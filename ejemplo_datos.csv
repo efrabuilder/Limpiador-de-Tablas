@@ -1,0 +1,17 @@
+id,nombre,edad,salario,departamento
+1,Ana,28,450000,Ventas
+2,Luis,34,520000,TI
+3,Marta,,480000,RRHH
+4,Carlos,45,510000,Ventas
+5,Sofia,29,495000,TI
+6,Pedro,31,999999999,Ventas
+7,Lucia,38,505000,RRHH
+8,Diego,150,530000,TI
+9,Elena,27,abc,Ventas
+10,Mario,33,515000,RRHH
+10,Mario,33,515000,RRHH
+11,Paula,30,500000,TI
+12,Jorge,26,-800000,Ventas
+13,Rosa,41,525000,RRHH
+14,Fernando,36,540000,TI
+15,Gabriela,,510000,Ventas
