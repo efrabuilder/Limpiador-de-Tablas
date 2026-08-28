@@ -26,6 +26,9 @@ from data_cleaner import (
     exportar,
 )
 from data_cleaner.cleaner import ACCIONES_VALIDAS  # noqa: F401 (referencia)
+from data_cleaner.exportador import (
+    generar_script_powerbi, generar_script_universal, generar_editor_m,
+)
 
 # --------------------------------------------------------------------------
 # Configuración de página y constantes
@@ -44,6 +47,12 @@ OPCIONES_ACCION = {
     "atipico": ["limitar", "reemplazar_mediana", "reemplazar_media",
                 "eliminar_fila", "marcar_solo"],
     "tipo_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "fecha_invalida": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "email_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "telefono_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "id_duplicado": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
+    "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
 }
 
 NOMBRES_TIPO = {
@@ -51,6 +60,12 @@ NOMBRES_TIPO = {
     "duplicado": "Filas duplicadas",
     "atipico": "Valores atípicos (outliers)",
     "tipo_invalido": "Errores de tipo (texto en columna numérica)",
+    "fecha_invalida": "Fechas inválidas o fuera de rango",
+    "email_invalido": "Correos electrónicos inválidos",
+    "telefono_invalido": "Teléfonos con formato/longitud inválida",
+    "id_duplicado": "IDs duplicados (columna identificadora)",
+    "formula_incorrecta": "Total no coincide (Cantidad × Precio)",
+    "texto_inconsistente": "Variantes / errores de tipeo en texto",
 }
 
 ICONOS_TIPO = {
@@ -58,6 +73,12 @@ ICONOS_TIPO = {
     "duplicado": "📑",
     "atipico": "📈",
     "tipo_invalido": "🔤",
+    "fecha_invalida": "📅",
+    "email_invalido": "📧",
+    "telefono_invalido": "📞",
+    "id_duplicado": "🆔",
+    "formula_incorrecta": "🧮",
+    "texto_inconsistente": "✏️",
 }
 
 NOMBRES_ACCION = {
@@ -66,6 +87,7 @@ NOMBRES_ACCION = {
     "reemplazar_moda": "Reemplazar por la moda",
     "valor_fijo": "Reemplazar por un valor fijo",
     "limitar": "Limitar al rango válido (winsorizing)",
+    "usar_sugerido": "Usar el valor sugerido por el análisis",
     "eliminar_fila": "Eliminar la fila",
     "marcar_solo": "Solo marcar en el reporte (no modifica el dato)",
 }
@@ -76,7 +98,8 @@ NOMBRES_ACCION = {
 # --------------------------------------------------------------------------
 
 def _reset_estado() -> None:
-    for key in ("df", "resultado", "nombre_fuente", "df_limpio", "registro", "tablas_reporte"):
+    for key in ("df", "resultado", "nombre_fuente", "df_limpio", "registro", "tablas_reporte",
+                "config_aplicada", "valores_fijos_aplicados"):
         st.session_state.pop(key, None)
 
 
@@ -266,6 +289,8 @@ if limpiar_btn:
         st.session_state.df_limpio = df_limpio
         st.session_state.registro = registro
         st.session_state.tablas_reporte = tablas_reporte
+        st.session_state.config_aplicada = config
+        st.session_state.valores_fijos_aplicados = valores_fijos
 
 # --------------------------------------------------------------------------
 # Paso 4 — Resultado y descargas
@@ -320,4 +345,56 @@ if st.session_state.get("df_limpio") is not None:
             file_name="reporte_calidad_datos.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
+        )
+
+    # ----------------------------------------------------------------------
+    # Paso 5 — Exportar como script portátil (Power BI / Tableau / etc.)
+    # ----------------------------------------------------------------------
+    st.divider()
+    st.subheader("📤 Exportar como script portátil")
+    st.caption(
+        "Genera un script autocontenido (solo pandas + numpy, sin depender de este "
+        "proyecto) con la MISMA configuración de arriba, listo para pegar en Power BI, "
+        "Tableau Prep, Alteryx, Qlik u otro pipeline. Solo soporta detección de atípicos "
+        "por método IQR."
+    )
+
+    config_aplicada = st.session_state.get("config_aplicada", {})
+    valores_fijos_aplicados = st.session_state.get("valores_fijos_aplicados", {})
+
+    tab_pbi, tab_m, tab_universal = st.tabs(
+        ["Script Power BI (.py)", "Código M (Editor avanzado)", "Script universal (.py)"]
+    )
+
+    with tab_pbi:
+        script_pbi = generar_script_powerbi(config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados)
+        st.code(script_pbi, language="python")
+        st.download_button(
+            "⬇️ Descargar limpiador_powerbi_generado.py", script_pbi,
+            file_name="limpiador_powerbi_generado.py", mime="text/x-python",
+        )
+
+    with tab_m:
+        nombre_paso = st.text_input(
+            "Nombre de tu último paso en Power Query (el que entrega la tabla a corregir)",
+            value="TuPasoAnterior",
+        )
+        script_m = generar_editor_m(
+            config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados,
+            nombre_paso_anterior=nombre_paso,
+        )
+        st.code(script_m, language="text")
+        st.download_button(
+            "⬇️ Descargar editor_avanzado_powerbi_generado.m", script_m,
+            file_name="editor_avanzado_powerbi_generado.m", mime="text/plain",
+        )
+
+    with tab_universal:
+        script_universal = generar_script_universal(
+            config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados
+        )
+        st.code(script_universal, language="python")
+        st.download_button(
+            "⬇️ Descargar limpiador_universal_generado.py", script_universal,
+            file_name="limpiador_universal_generado.py", mime="text/x-python",
         )

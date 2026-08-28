@@ -10,6 +10,18 @@ Acciones disponibles:
   - 'limitar' (winsorize): recorta atípicos al límite del rango válido (IQR)
   - 'marcar_solo'        : no modifica el dato, solo queda registrado en el reporte
   - 'valor_fijo'         : reemplaza por un valor fijo dado (para faltantes)
+  - 'usar_sugerido'      : reemplaza por el valor sugerido calculado por el
+                            analizador (ej. total correcto, forma canónica de
+                            un texto); solo aplica a 'formula_incorrecta' y
+                            'texto_inconsistente', cuando el hallazgo trae
+                            valor_sugerido
+
+Tipos de hallazgo nuevos (además de faltante/duplicado/atipico/tipo_invalido):
+  - 'fecha_invalida', 'email_invalido', 'telefono_invalido', 'id_duplicado',
+    'formula_incorrecta', 'texto_inconsistente'
+  Por defecto se dejan en 'marcar_solo' (corregirlos automáticamente es
+  riesgoso: un email o teléfono "corregido" a ciegas puede quedar mal); se
+  pueden pasar a 'valor_fijo', 'usar_sugerido' o 'eliminar_fila' vía config.
 """
 from __future__ import annotations
 import pandas as pd
@@ -19,7 +31,7 @@ from .analyzer import Issue, detectar_atipicos_iqr
 
 ACCIONES_VALIDAS = {
     "eliminar_fila", "reemplazar_media", "reemplazar_mediana",
-    "reemplazar_moda", "limitar", "marcar_solo", "valor_fijo",
+    "reemplazar_moda", "limitar", "marcar_solo", "valor_fijo", "usar_sugerido",
 }
 
 DEFAULT_CONFIG = {
@@ -27,7 +39,22 @@ DEFAULT_CONFIG = {
     "duplicado": "eliminar_fila",
     "atipico": "limitar",
     "tipo_invalido": "marcar_solo",
+    "fecha_invalida": "marcar_solo",
+    "email_invalido": "marcar_solo",
+    "telefono_invalido": "marcar_solo",
+    "id_duplicado": "marcar_solo",
+    "formula_incorrecta": "marcar_solo",
+    "texto_inconsistente": "marcar_solo",
 }
+
+# Tipos nuevos para los que 'valor_fijo' reemplaza directamente el valor
+# de la celda (no requieren cálculo de media/mediana/moda).
+_TIPOS_VALOR_FIJO_DIRECTO = {
+    "fecha_invalida", "email_invalido", "telefono_invalido",
+    "id_duplicado", "formula_incorrecta", "texto_inconsistente",
+}
+# Tipos para los que existe un valor_sugerido calculado por el analizador.
+_TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente"}
 
 
 def _asignar(df: pd.DataFrame, fila: int, columna: str, valor) -> None:
@@ -112,6 +139,15 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             "reemplazar_media", "reemplazar_mediana", "reemplazar_moda"
         ):
             valor_nuevo = _valor_reemplazo(df, issue.columna, accion)
+            _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
+
+        elif issue.tipo in _TIPOS_CON_SUGERENCIA and accion == "usar_sugerido" \
+                and issue.valor_sugerido is not None:
+            valor_nuevo = issue.valor_sugerido
+            _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
+
+        elif issue.tipo in _TIPOS_VALOR_FIJO_DIRECTO and accion == "valor_fijo":
+            valor_nuevo = valores_fijos.get(issue.columna)
             _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
         else:

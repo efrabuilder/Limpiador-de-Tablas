@@ -6,12 +6,49 @@ detallado** de todo lo encontrado y del archivo limpio resultante.
 
 ## ¿Qué detecta?
 
+**Genéricos** (cualquier columna, siempre activos):
+
 | Tipo            | Descripción                                                        |
 |-----------------|---------------------------------------------------------------------|
 | `faltante`      | Celdas vacías / nulas                                               |
 | `duplicado`     | Filas completas repetidas                                           |
 | `tipo_invalido` | Texto dentro de una columna que debería ser numérica (ej. "abc")    |
 | `atipico`       | Valores atípicos (outliers) por método **IQR** y/o **Z-score**      |
+
+**Reglas de negocio** (opcionales, se auto-detectan por nombre de columna
+o se indican explícitamente — ver "Auto-detección de columnas" abajo):
+
+| Tipo                   | Descripción                                                                 |
+|------------------------|-------------------------------------------------------------------------------|
+| `fecha_invalida`       | Fecha no parseable, o fuera de un rango `--fecha-min`/`--fecha-max` dado      |
+| `email_invalido`       | No cumple el formato `usuario@dominio.tld`                                    |
+| `telefono_invalido`    | Formato o cantidad de dígitos inválida (configurable, por defecto 8 dígitos)   |
+| `id_duplicado`         | Valor repetido en una columna identificadora (ID, código, folio…), aunque el resto de la fila sea distinto — a diferencia de `duplicado`, que exige la fila completa igual |
+| `formula_incorrecta`   | Una columna no coincide con el resultado de otras (ej. `Total ≠ Cantidad × Precio_Unitario`) |
+| `texto_inconsistente`  | Variantes o errores de tipeo del mismo valor categórico (ej. "San Jose" / "san josé " / "SanJosé") en columnas de baja cardinalidad (categoría, vendedor, método de pago, ciudad…) |
+
+### Auto-detección de columnas
+
+Estas 6 reglas nuevas no vienen atadas a nombres de columna de un proyecto
+en particular: si no se les indica una columna explícita, el analizador
+intenta adivinarla por el nombre (`fecha`/`date`, `email`/`correo`,
+`telefono`/`phone`, `id`/`codigo`/`folio`, `total`+`cantidad`+`precio`, y
+columnas de texto de baja cardinalidad para variantes). Esto permite
+reutilizar el mismo motor en datasets distintos sin tocar código. Se puede
+apagar con `auto_detectar_columnas=False` (o `--sin-auto-columnas` en la
+CLI) y pasar las columnas a mano.
+
+```python
+resultado = analizar(
+    df,
+    columnas_fecha=["Fecha_Venta"], fecha_min="2023-01-01", fecha_max="2025-12-31",
+    columnas_email=["Email_Cliente"],
+    columnas_telefono=["Telefono"], digitos_telefono=(8, 8),
+    columnas_id=["ID_Venta"],
+    columna_total="Total_Venta", columna_cantidad="Cantidad", columna_precio="Precio_Unitario",
+    columnas_texto=["Categoria_Producto", "Vendedor", "Metodo_Pago"],
+)
+```
 
 ## ¿Qué se puede hacer con cada hallazgo?
 
@@ -20,11 +57,20 @@ Para cada tipo de problema, usted elige la acción a aplicar:
 - `reemplazar_media` / `reemplazar_mediana` / `reemplazar_moda`
 - `limitar` (winsorizing: recorta el atípico al límite válido más cercano)
 - `valor_fijo` (usted define el valor de reemplazo)
+- `usar_sugerido` (solo para `formula_incorrecta` y `texto_inconsistente`:
+  usa el valor correcto/canónico que el propio analizador calculó — el
+  total esperado, o la grafía más frecuente de ese texto)
 - `eliminar_fila`
 - `marcar_solo` (no modifica el dato; en la tabla limpia se agrega una
   columna `_revisar_calidad` que indica, por fila, qué problema(s) se
   detectaron y en qué columna — solo aparece cuando al menos un hallazgo
   usó esta acción)
+
+Las 6 reglas nuevas quedan por defecto en `marcar_solo`: corregir un email,
+teléfono o fecha "a ciegas" es riesgoso, así que el default solo las deja
+señaladas en el reporte para revisión manual (excepto `formula_incorrecta`
+y `texto_inconsistente`, donde si usted elige `usar_sugerido` sí existe un
+valor de reemplazo calculable con confianza).
 
 ## Instalación
 
@@ -86,6 +132,17 @@ python cli.py limpiar --input ejemplo_datos.csv --outdir salida \
 # Con valor fijo de reemplazo (columna=valor, repetible)
 python cli.py limpiar --input ejemplo_datos.csv --outdir salida \
     --faltante valor_fijo --valor-fijo edad=0 --valor-fijo salario=0
+
+# Con las reglas de negocio nuevas (auto-detectadas por nombre de columna)
+python cli.py limpiar --input ventas.xlsx --outdir salida \
+    --formula-incorrecta usar_sugerido --texto-inconsistente usar_sugerido \
+    --email-invalido marcar_solo --telefono-invalido marcar_solo
+
+# Indicando las columnas a mano (útil si los nombres no son obvios)
+python cli.py limpiar --input ventas.xlsx --outdir salida \
+    --columnas-email Correo_Cliente --columnas-telefono Cel \
+    --total Monto_Total --cantidad Unidades --precio Precio_Unit \
+    --digitos-telefono 8-8 --fecha-min 2023-01-01 --fecha-max 2025-12-31
 ```
 
 Ver todas las opciones con `python cli.py limpiar --help`.

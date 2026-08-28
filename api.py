@@ -30,6 +30,9 @@ from data_cleaner import (
     analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, exportar,
 )
+from data_cleaner.exportador import (
+    generar_script_powerbi, generar_script_universal, generar_editor_m,
+)
 
 app = FastAPI(
     title="Limpiador de Tablas API",
@@ -161,6 +164,51 @@ def limpiar_endpoint(
         filas_finales=len(df_limpio),
         total_correcciones=len(registro),
         resumen_por_tipo=resultado.por_tipo(),
+    )
+
+
+@app.post("/exportar/script")
+def exportar_script_endpoint(
+    formato: str = Form(..., description="powerbi | universal | m"),
+    faltante: str = Form(DEFAULT_CONFIG["faltante"]),
+    duplicado: str = Form(DEFAULT_CONFIG["duplicado"]),
+    atipico: str = Form(DEFAULT_CONFIG["atipico"]),
+    tipo_invalido: str = Form(DEFAULT_CONFIG["tipo_invalido"]),
+    factor_iqr: float = Form(1.5),
+    valores_fijos: str = Form("{}", description='JSON con valores fijos por columna'),
+    nombre_paso_anterior: str = Form("TuPasoAnterior", description="Solo aplica a formato=m"),
+):
+    """Genera un script Python autocontenido (Power BI o universal) o el código M,
+    con la misma configuración de limpieza indicada, para usar en otras herramientas."""
+    if formato not in ("powerbi", "universal", "m"):
+        raise HTTPException(status_code=400, detail="formato debe ser 'powerbi', 'universal' o 'm'.")
+
+    try:
+        valores_fijos_dict = json.loads(valores_fijos) if valores_fijos else {}
+        if not isinstance(valores_fijos_dict, dict):
+            raise ValueError
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="valores_fijos debe ser un JSON de objeto (columna: valor).")
+
+    config = {
+        "faltante": faltante, "duplicado": duplicado,
+        "atipico": atipico, "tipo_invalido": tipo_invalido,
+    }
+
+    if formato == "powerbi":
+        contenido = generar_script_powerbi(config, factor_iqr, valores_fijos_dict)
+        nombre_archivo, media_type = "limpiador_powerbi_generado.py", "text/x-python"
+    elif formato == "universal":
+        contenido = generar_script_universal(config, factor_iqr, valores_fijos_dict)
+        nombre_archivo, media_type = "limpiador_universal_generado.py", "text/x-python"
+    else:
+        contenido = generar_editor_m(config, factor_iqr, valores_fijos_dict, nombre_paso_anterior)
+        nombre_archivo, media_type = "editor_avanzado_powerbi_generado.m", "text/plain"
+
+    return StreamingResponse(
+        io.BytesIO(contenido.encode("utf-8")),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{nombre_archivo}"'},
     )
 
 

@@ -21,6 +21,9 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, exportar,
 )
+from data_cleaner.exportador import (
+    generar_script_powerbi, generar_script_universal, generar_editor_m,
+)
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_mediana", "reemplazar_media", "reemplazar_moda",
@@ -29,6 +32,12 @@ OPCIONES_ACCION = {
     "atipico": ["limitar", "reemplazar_mediana", "reemplazar_media",
                 "eliminar_fila", "marcar_solo"],
     "tipo_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "fecha_invalida": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "email_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "telefono_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "id_duplicado": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
+    "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
 }
 
 NOMBRES_TIPO = {
@@ -36,6 +45,12 @@ NOMBRES_TIPO = {
     "duplicado": "Filas duplicadas",
     "atipico": "Valores atípicos",
     "tipo_invalido": "Errores de tipo",
+    "fecha_invalida": "Fechas inválidas/fuera de rango",
+    "email_invalido": "Correos inválidos",
+    "telefono_invalido": "Teléfonos inválidos",
+    "id_duplicado": "IDs duplicados",
+    "formula_incorrecta": "Total ≠ Cantidad × Precio",
+    "texto_inconsistente": "Variantes de texto",
 }
 
 
@@ -52,6 +67,8 @@ class LimpiadorApp(tk.Tk):
         self.df_limpio: pd.DataFrame | None = None
         self.registro = None
         self.tablas_reporte = None
+        self.config_aplicada: dict[str, str] = {}
+        self.valores_fijos_aplicados: dict[str, object] = {}
 
         self.accion_vars: dict[str, tk.StringVar] = {}
         self.valor_fijo_vars: dict[str, tk.StringVar] = {}
@@ -104,6 +121,8 @@ class LimpiadorApp(tk.Tk):
                    command=self.limpiar_tabla).pack(side="left")
         ttk.Button(botones, text="💾 Guardar resultados...",
                    command=self.guardar_resultados).pack(side="left", padx=10)
+        ttk.Button(botones, text="📤 Exportar script portátil...",
+                   command=self.exportar_script_portatil).pack(side="left")
 
         self.status_var = tk.StringVar(value="Listo.")
         ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w").pack(fill="x")
@@ -268,6 +287,8 @@ class LimpiadorApp(tk.Tk):
         self.df_limpio, self.registro = limpiar(
             self.df, self.resultado.issues, config=config, valores_fijos=valores_fijos
         )
+        self.config_aplicada = config
+        self.valores_fijos_aplicados = valores_fijos
         self.tablas_reporte = construir_reporte(
             self.resultado, self.registro,
             nombre_fuente=os.path.basename(self.ruta_actual or ""),
@@ -302,6 +323,70 @@ class LimpiadorApp(tk.Tk):
 
         self.status_var.set(f"Guardado en {carpeta}")
         messagebox.showinfo("Guardado", f"Archivos guardados en:\n{carpeta}")
+
+    def exportar_script_portatil(self) -> None:
+        """Genera un script autocontenido (Power BI / código M / universal) con la
+        misma configuración de limpieza ya aplicada, listo para pegar en otras
+        herramientas de BI (Power BI, Tableau Prep, Alteryx, Qlik, etc.)."""
+        if not self.config_aplicada:
+            messagebox.showwarning(
+                "Sin configuración",
+                "Primero presione 'Limpiar tabla y generar reporte' para fijar la "
+                "configuración que se va a exportar.",
+            )
+            return
+
+        ventana = tk.Toplevel(self)
+        ventana.title("Exportar script portátil")
+        ventana.geometry("420x200")
+        ventana.transient(self)
+        ventana.grab_set()
+
+        ttk.Label(
+            ventana,
+            text="Elija qué generar (usa la configuración de limpieza ya aplicada):",
+            wraplength=380, justify="left",
+        ).pack(padx=15, pady=(15, 10), anchor="w")
+
+        ttk.Button(
+            ventana, text="Script para Power BI (.py)",
+            command=lambda: self._guardar_script(
+                generar_script_powerbi(self.config_aplicada, 1.5, self.valores_fijos_aplicados),
+                "limpiador_powerbi_generado.py", [("Python", "*.py")], ventana,
+            ),
+        ).pack(fill="x", padx=15, pady=4)
+
+        ttk.Button(
+            ventana, text="Código M (Editor avanzado de Power Query)",
+            command=lambda: self._guardar_script(
+                generar_editor_m(self.config_aplicada, 1.5, self.valores_fijos_aplicados),
+                "editor_avanzado_powerbi_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
+            ),
+        ).pack(fill="x", padx=15, pady=4)
+
+        ttk.Button(
+            ventana, text="Script universal (Tableau/Alteryx/Qlik) (.py)",
+            command=lambda: self._guardar_script(
+                generar_script_universal(self.config_aplicada, 1.5, self.valores_fijos_aplicados),
+                "limpiador_universal_generado.py", [("Python", "*.py")], ventana,
+            ),
+        ).pack(fill="x", padx=15, pady=4)
+
+    def _guardar_script(self, contenido: str, nombre_sugerido: str, tipos_archivo, ventana) -> None:
+        ruta = filedialog.asksaveasfilename(
+            title="Guardar script", initialfile=nombre_sugerido, filetypes=tipos_archivo,
+        )
+        if not ruta:
+            return
+        try:
+            with open(ruta, "w", encoding="utf-8") as f:
+                f.write(contenido)
+        except Exception as exc:
+            messagebox.showerror("Error al guardar", str(exc))
+            return
+        ventana.destroy()
+        self.status_var.set(f"Script exportado en {ruta}")
+        messagebox.showinfo("Exportado", f"Script guardado en:\n{ruta}")
 
 
 def main():
