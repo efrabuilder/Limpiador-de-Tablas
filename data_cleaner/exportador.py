@@ -8,9 +8,10 @@ configuración de limpieza (acción por tipo de hallazgo, factor IQR y
 valores fijos) que el usuario eligió en la interfaz (web, escritorio o
 API).
 
-Los scripts generados solo requieren pandas y numpy, porque los entornos
-externos (Power BI, Tableau Prep/TabPy, Alteryx, Qlik) normalmente no
-tienen instalado ``data_cleaner``.
+Los scripts generados solo requieren pandas, numpy y la librería estándar
+de Python (re, difflib, unicodedata), porque los entornos externos
+(Power BI, Tableau Prep/TabPy, Alteryx, Qlik) normalmente no tienen
+instalado ``data_cleaner``.
 
 Nota: por ahora solo soportan detección de atípicos por método IQR (no
 Z-score), que es el único método implementado de forma autocontenida.
@@ -23,13 +24,31 @@ DEFAULT_CONFIG_EXPORT = {
     "duplicado": "eliminar_fila",
     "atipico": "limitar",
     "tipo_invalido": "marcar_solo",
+    "fecha_invalida": "marcar_solo",
+    "email_invalido": "marcar_solo",
+    "telefono_invalido": "marcar_solo",
+    "id_duplicado": "marcar_solo",
+    "formula_incorrecta": "marcar_solo",
+    "texto_inconsistente": "marcar_solo",
 }
 
 # -----------------------------------------------------------------------------
 # Núcleo de lógica compartido entre el script para Power BI y el universal.
 # Es una copia autocontenida (solo pandas/numpy) de data_cleaner/cleaner.py.
 # -----------------------------------------------------------------------------
-_NUCLEO_LOGICA = '''def _columna_numerica_potencial(serie):
+_NUCLEO_LOGICA = '''_PATRONES_EMAIL = ("email", "correo", "e-mail", "mail")
+_PATRONES_TELEFONO = ("telefono", "teléfono", "phone", "celular", "movil", "móvil", "whatsapp")
+_PATRONES_FECHA = ("fecha", "date")
+_PATRONES_TOTAL = ("total",)
+_PATRONES_CANTIDAD = ("cantidad", "qty", "cant_")
+_PATRONES_PRECIO = ("precio", "price")
+_PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \\
+    ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
+_REGEX_EMAIL = re.compile(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,}$")
+_REGEX_TELEFONO_FORMATO = re.compile(r"^[\\d\\s\\-\\+\\(\\)]+$")
+
+
+def _columna_numerica_potencial(serie):
     valores = serie.dropna()
     if len(valores) == 0:
         return False
@@ -47,6 +66,195 @@ def _columnas_para_atipicos(df):
         if es_texto and _columna_numerica_potencial(serie):
             columnas.append(col)
     return columnas
+
+
+def _columnas_por_patron(df, patrones):
+    return [col for col in df.columns if any(p in str(col).lower() for p in patrones)]
+
+
+def _es_columna_id(col):
+    low = str(col).lower()
+    if low == "id":
+        return True
+    if low.startswith("id_") or low.endswith("_id") or "_id_" in low:
+        return True
+    if any(p in low for p in ("codigo", "código", "folio")):
+        return True
+    return False
+
+
+def _es_numero_con_sufijo(serie):
+    no_nulos = serie.dropna().astype(str)
+    if len(no_nulos) == 0:
+        return False
+    con_numero_inicial = no_nulos.str.match(r"^\\s*-?\\d+([.,]\\d+)?\\b")
+    return con_numero_inicial.mean() > 0.7
+
+
+def _normalizar_texto(valor):
+    s = str(valor).strip().lower()
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return " ".join(s.split())
+
+
+def _detectar_fechas_invalidas(df):
+    hallazgos = []
+    for col in _columnas_por_patron(df, _PATRONES_FECHA):
+        serie = df[col]
+        parseado = pd.to_datetime(serie, errors="coerce")
+        for idx, val in serie.items():
+            if pd.isna(val):
+                continue
+            fecha = parseado.loc[idx]
+            if pd.isna(fecha):
+                fecha = pd.to_datetime(val, errors="coerce", dayfirst=True)
+            if pd.isna(fecha):
+                hallazgos.append({"tipo": "fecha_invalida", "columna": col, "fila": int(idx),
+                                   "valor_original": val, "detalle": "Formato de fecha no reconocido"})
+    return hallazgos
+
+
+def _detectar_emails_invalidos(df):
+    hallazgos = []
+    for col in _columnas_por_patron(df, _PATRONES_EMAIL):
+        for idx, val in df[col].items():
+            if pd.isna(val):
+                continue
+            if not _REGEX_EMAIL.match(str(val).strip()):
+                hallazgos.append({"tipo": "email_invalido", "columna": col, "fila": int(idx),
+                                   "valor_original": val, "detalle": "Formato de correo electronico invalido"})
+    return hallazgos
+
+
+def _detectar_telefonos_invalidos(df, min_digitos=8, max_digitos=8):
+    hallazgos = []
+    for col in _columnas_por_patron(df, _PATRONES_TELEFONO):
+        for idx, val in df[col].items():
+            if pd.isna(val):
+                continue
+            texto = str(val).strip()
+            solo_digitos = re.sub(r"\\D", "", texto)
+            formato_ok = bool(_REGEX_TELEFONO_FORMATO.match(texto))
+            longitud_ok = min_digitos <= len(solo_digitos) <= max_digitos
+            if not (formato_ok and longitud_ok):
+                hallazgos.append({"tipo": "telefono_invalido", "columna": col, "fila": int(idx),
+                                   "valor_original": val,
+                                   "detalle": "Formato/longitud de telefono invalido"})
+    return hallazgos
+
+
+def _detectar_ids_duplicados(df, umbral_unicidad=0.9):
+    hallazgos = []
+    for col in df.columns:
+        if not _es_columna_id(col):
+            continue
+        serie_no_nula = df[col].dropna()
+        if len(serie_no_nula) == 0:
+            continue
+        if serie_no_nula.nunique() / len(serie_no_nula) < umbral_unicidad:
+            continue
+        serie = df[col]
+        mask = serie.duplicated(keep="first") & serie.notna()
+        for idx in serie[mask].index:
+            hallazgos.append({"tipo": "id_duplicado", "columna": col, "fila": int(idx),
+                               "valor_original": serie.loc[idx],
+                               "detalle": f"Valor repetido en columna identificadora '{col}'"})
+    return hallazgos
+
+
+def _detectar_formula_incorrecta(df, tolerancia=0.01):
+    hallazgos = []
+    cand_total = _columnas_por_patron(df, _PATRONES_TOTAL)
+    cand_cant = _columnas_por_patron(df, _PATRONES_CANTIDAD)
+    cand_precio = _columnas_por_patron(df, _PATRONES_PRECIO)
+    if not (cand_total and cand_cant and cand_precio):
+        return hallazgos
+    columna_total, columna_cantidad, columna_precio = cand_total[0], cand_cant[0], cand_precio[0]
+
+    total = pd.to_numeric(df[columna_total], errors="coerce")
+    cantidad = pd.to_numeric(df[columna_cantidad], errors="coerce")
+    precio = pd.to_numeric(df[columna_precio], errors="coerce")
+    esperado = cantidad * precio
+    diferencia = (total - esperado).abs()
+    limite = (esperado.abs() * tolerancia).clip(lower=0.01)
+    mal = (diferencia > limite) & total.notna() & esperado.notna()
+
+    for idx in df[mal].index:
+        valor_correcto = esperado.loc[idx]
+        hallazgos.append({
+            "tipo": "formula_incorrecta", "columna": columna_total, "fila": int(idx),
+            "valor_original": df.loc[idx, columna_total],
+            "detalle": f"{columna_total} no coincide con {columna_cantidad} x {columna_precio}",
+            "valor_sugerido": round(float(valor_correcto), 2) if pd.notna(valor_correcto) else None,
+        })
+    return hallazgos
+
+
+def _detectar_texto_inconsistente(df, umbral_similitud=0.85, max_cardinalidad_ratio=0.5,
+                                   min_apariciones_canonica=1):
+    cols = []
+    for col in df.columns:
+        serie = df[col]
+        es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
+        if not es_texto or _es_columna_id(col):
+            continue
+        if any(p in str(col).lower() for p in _PATRONES_EXCLUIR_TEXTO):
+            continue
+        no_nulos = serie.dropna()
+        if _columna_numerica_potencial(no_nulos) or _es_numero_con_sufijo(no_nulos):
+            continue
+        if len(no_nulos) == 0:
+            continue
+        ratio = no_nulos.map(_normalizar_texto).nunique() / len(no_nulos)
+        if ratio <= max_cardinalidad_ratio:
+            cols.append(col)
+
+    hallazgos = []
+    for col in cols:
+        serie = df[col].dropna()
+        if serie.empty:
+            continue
+        conteo_por_texto = serie.astype(str).value_counts()
+        textos_por_norm = {}
+        for texto, cuenta in conteo_por_texto.items():
+            norm = _normalizar_texto(texto)
+            textos_por_norm.setdefault(norm, []).append((texto, int(cuenta)))
+
+        normalizados = list(textos_por_norm.keys())
+        visitados = set()
+        grupos = []
+        for i, n1 in enumerate(normalizados):
+            if n1 in visitados:
+                continue
+            grupo = [n1]
+            visitados.add(n1)
+            for n2 in normalizados[i + 1:]:
+                if n2 in visitados:
+                    continue
+                if difflib.SequenceMatcher(None, n1, n2).ratio() >= umbral_similitud:
+                    grupo.append(n2)
+                    visitados.add(n2)
+            grupos.append(grupo)
+
+        for grupo in grupos:
+            candidatas = [par for n in grupo for par in textos_por_norm[n]]
+            if len(candidatas) < 2:
+                continue
+            canonica_texto, canonica_cuenta = max(candidatas, key=lambda t: t[1])
+            if canonica_cuenta < min_apariciones_canonica:
+                continue
+            for texto_variante, _ in candidatas:
+                if texto_variante == canonica_texto:
+                    continue
+                for idx, val in serie.items():
+                    if str(val) == texto_variante:
+                        hallazgos.append({
+                            "tipo": "texto_inconsistente", "columna": col, "fila": int(idx),
+                            "valor_original": val,
+                            "detalle": f"Posible variante/error de tipeo de '{canonica_texto}'",
+                            "valor_sugerido": canonica_texto,
+                        })
+    return hallazgos
 
 
 def _detectar_hallazgos(df, factor_iqr=1.5):
@@ -72,6 +280,13 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
             for idx, val in malos.items():
                 hallazgos.append({"tipo": "tipo_invalido", "columna": col, "fila": int(idx),
                                    "valor_original": val, "detalle": "Se esperaba un valor numerico"})
+
+    hallazgos += _detectar_fechas_invalidas(df)
+    hallazgos += _detectar_emails_invalidos(df)
+    hallazgos += _detectar_telefonos_invalidos(df)
+    hallazgos += _detectar_ids_duplicados(df)
+    hallazgos += _detectar_formula_incorrecta(df)
+    hallazgos += _detectar_texto_inconsistente(df)
 
     for col in _columnas_para_atipicos(df):
         serie = pd.to_numeric(df[col], errors="coerce")
@@ -111,9 +326,22 @@ def _valor_reemplazo(df, columna, accion, valor_fijo=None):
     return None
 
 
-def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, valores_fijos):
+_TIPOS_VALOR_FIJO_DIRECTO = {
+    "fecha_invalida", "email_invalido", "telefono_invalido",
+    "id_duplicado", "formula_incorrecta", "texto_inconsistente",
+}
+_TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente"}
+
+
+def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, valores_fijos,
+                   fecha_invalida="marcar_solo", email_invalido="marcar_solo",
+                   telefono_invalido="marcar_solo", id_duplicado="marcar_solo",
+                   formula_incorrecta="marcar_solo", texto_inconsistente="marcar_solo"):
     config = {"faltante": faltante, "duplicado": duplicado,
-              "atipico": atipico, "tipo_invalido": tipo_invalido}
+              "atipico": atipico, "tipo_invalido": tipo_invalido,
+              "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
+              "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
+              "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente}
 
     df_limpio = df.copy()
     hallazgos = _detectar_hallazgos(df, factor_iqr=factor_iqr)
@@ -151,6 +379,15 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
         elif h["tipo"] == "atipico" and accion in (
                 "reemplazar_media", "reemplazar_mediana", "reemplazar_moda"):
             valor_nuevo = _valor_reemplazo(df, h["columna"], accion)
+            _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
+
+        elif h["tipo"] in _TIPOS_CON_SUGERENCIA and accion == "usar_sugerido" \\
+                and h.get("valor_sugerido") is not None:
+            valor_nuevo = h["valor_sugerido"]
+            _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
+
+        elif h["tipo"] in _TIPOS_VALOR_FIJO_DIRECTO and accion == "valor_fijo":
+            valor_nuevo = valores_fijos.get(h["columna"])
             _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
 
         registro.append({
@@ -197,6 +434,12 @@ def _bloque_config(config: Dict[str, str], factor_iqr: float, valores_fijos: Opt
         f"ACCION_DUPLICADO = {cfg['duplicado']!r}\n"
         f"ACCION_ATIPICO = {cfg['atipico']!r}\n"
         f"ACCION_TIPO_INVALIDO = {cfg['tipo_invalido']!r}\n"
+        f"ACCION_FECHA_INVALIDA = {cfg['fecha_invalida']!r}\n"
+        f"ACCION_EMAIL_INVALIDO = {cfg['email_invalido']!r}\n"
+        f"ACCION_TELEFONO_INVALIDO = {cfg['telefono_invalido']!r}\n"
+        f"ACCION_ID_DUPLICADO = {cfg['id_duplicado']!r}\n"
+        f"ACCION_FORMULA_INCORRECTA = {cfg['formula_incorrecta']!r}\n"
+        f"ACCION_TEXTO_INCONSISTENTE = {cfg['texto_inconsistente']!r}\n"
         f"FACTOR_IQR = {factor_iqr!r}\n"
         f"VALORES_FIJOS = {valores_fijos!r}\n"
     )
@@ -222,6 +465,9 @@ def generar_script_powerbi(config: Dict[str, str], factor_iqr: float = 1.5,
 # Requiere Python local con pandas y numpy (Power BI Desktop -> Opciones ->
 # Python scripting).
 # =============================================================================
+import re
+import difflib
+import unicodedata
 import pandas as pd
 import numpy as np
 
@@ -232,6 +478,9 @@ dataset_limpio, reporte_limpieza = limpiar_tabla(
     dataset,
     ACCION_FALTANTE, ACCION_DUPLICADO, ACCION_ATIPICO, ACCION_TIPO_INVALIDO,
     FACTOR_IQR, VALORES_FIJOS,
+    fecha_invalida=ACCION_FECHA_INVALIDA, email_invalido=ACCION_EMAIL_INVALIDO,
+    telefono_invalido=ACCION_TELEFONO_INVALIDO, id_duplicado=ACCION_ID_DUPLICADO,
+    formula_incorrecta=ACCION_FORMULA_INCORRECTA, texto_inconsistente=ACCION_TEXTO_INCONSISTENTE,
 )
 '''
     return cabecera + _bloque_config(config, factor_iqr, valores_fijos) + "\n\n" + _NUCLEO_LOGICA + pie
@@ -261,6 +510,9 @@ def generar_script_universal(config: Dict[str, str], factor_iqr: float = 1.5,
 # =============================================================================
 import sys
 import os
+import re
+import difflib
+import unicodedata
 import pandas as pd
 import numpy as np
 
@@ -280,6 +532,9 @@ def _main_cli():
     df_limpio, df_reporte = limpiar_tabla(
         df, ACCION_FALTANTE, ACCION_DUPLICADO, ACCION_ATIPICO, ACCION_TIPO_INVALIDO,
         FACTOR_IQR, VALORES_FIJOS,
+        fecha_invalida=ACCION_FECHA_INVALIDA, email_invalido=ACCION_EMAIL_INVALIDO,
+        telefono_invalido=ACCION_TELEFONO_INVALIDO, id_duplicado=ACCION_ID_DUPLICADO,
+        formula_incorrecta=ACCION_FORMULA_INCORRECTA, texto_inconsistente=ACCION_TEXTO_INCONSISTENTE,
     )
 
     base, _ext = os.path.splitext(os.path.basename(ruta))
