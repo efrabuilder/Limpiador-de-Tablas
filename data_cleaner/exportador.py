@@ -17,6 +17,7 @@ Nota: por ahora solo soportan detección de atípicos por método IQR (no
 Z-score), que es el único método implementado de forma autocontenida.
 """
 from __future__ import annotations
+import re
 from typing import Dict, Optional
 
 DEFAULT_CONFIG_EXPORT = {
@@ -561,12 +562,28 @@ def _escapar_m(texto: str) -> str:
     return texto.replace('"', '""').replace("\n", "#(lf)")
 
 
+_IDENTIFICADOR_M_SIMPLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _referencia_m(nombre: str) -> str:
+    """Devuelve el nombre de un paso listo para usarse como identificador M.
+    Los identificadores M con espacios u otros caracteres especiales (el caso
+    normal para pasos de Power Query, ej. "Tipo de columna cambiado") deben
+    escribirse entre comillas con el prefijo #, o Power Query los rechaza
+    como error de sintaxis."""
+    nombre = nombre.strip()
+    if _IDENTIFICADOR_M_SIMPLE.match(nombre):
+        return nombre
+    return f'#"{nombre.replace(chr(34), chr(34) * 2)}"'
+
+
 def generar_editor_m(config: Dict[str, str], factor_iqr: float = 1.5,
                       valores_fijos: Optional[dict] = None,
                       nombre_paso_anterior: str = "TuPasoAnterior") -> str:
     """Codigo M listo para pegar en el Editor avanzado de Power Query."""
     script_python = generar_script_powerbi(config, factor_iqr, valores_fijos)
     script_m = _escapar_m(script_python)
+    referencia_paso_anterior = _referencia_m(nombre_paso_anterior)
     return f'''// =============================================================================
 // Codigo M generado automaticamente por Limpiador de Tablas.
 // Pegar en Power Query -> clic derecho en la consulta -> "Editor avanzado",
@@ -576,7 +593,7 @@ def generar_editor_m(config: Dict[str, str], factor_iqr: float = 1.5,
 // =============================================================================
 
 let
-    Origen = {nombre_paso_anterior},
+    Origen = {referencia_paso_anterior},
 
     EjecutarLimpieza = Python.Execute("{script_m}", [dataset=Origen]),
 
