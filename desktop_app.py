@@ -24,6 +24,7 @@ from data_cleaner import (
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
+from data_cleaner.exportador_m import generar_editor_m_puro
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_mediana", "reemplazar_media", "reemplazar_moda",
@@ -245,7 +246,7 @@ class LimpiadorApp(tk.Tk):
                         clave = f"{tipo}::{col}"
                         v = tk.StringVar()
                         self.valor_fijo_vars[clave] = v
-                        ttk.Label(marco, text=f"{col} = (escriba 'null' para vacío)").pack(side="left")
+                        ttk.Label(marco, text=f"{col} =").pack(side="left")
                         ttk.Entry(marco, textvariable=v, width=8).pack(side="left", padx=(0, 6))
 
             var.trace_add("write", _actualizar_visibilidad)
@@ -275,10 +276,7 @@ class LimpiadorApp(tk.Tk):
                 if valor == "":
                     faltan.append(f"{NOMBRES_TIPO.get(tipo, tipo)} → columna '{col}'")
                 else:
-                    # "null" (sin comillas) es la forma de pedir que la celda quede
-                    # vacía; de lo contrario no hay manera de indicar "vacío" porque
-                    # un texto realmente vacío activa la validación de "faltan".
-                    valores_fijos[col] = "" if valor.lower() == "null" else valor
+                    valores_fijos[col] = valor
 
         if faltan:
             messagebox.showwarning(
@@ -372,6 +370,27 @@ class LimpiadorApp(tk.Tk):
             command=lambda: self._guardar_script(
                 generar_script_universal(self.config_aplicada, 1.5, self.valores_fijos_aplicados),
                 "limpiador_universal_generado.py", [("Python", "*.py")], ventana,
+            ),
+        ).pack(fill="x", padx=15, pady=4)
+
+        ttk.Separator(ventana, orient="horizontal").pack(fill="x", padx=15, pady=8)
+
+        ttk.Button(
+            ventana, text="Código M PURO (sin Python.Execute) — recomendado",
+            command=lambda: self._guardar_script(
+                generar_editor_m_puro(
+                    self.df,
+                    config=self.config_aplicada,
+                    factor_iqr=1.5,
+                    valores_fijos=self.valores_fijos_aplicados,
+                    fecha_invalida=self.config_aplicada.get("fecha_invalida", "marcar_solo"),
+                    email_invalido=self.config_aplicada.get("email_invalido", "marcar_solo"),
+                    telefono_invalido=self.config_aplicada.get("telefono_invalido", "marcar_solo"),
+                    id_duplicado=self.config_aplicada.get("id_duplicado", "marcar_solo"),
+                    formula_incorrecta=self.config_aplicada.get("formula_incorrecta", "marcar_solo"),
+                    texto_inconsistente=self.config_aplicada.get("texto_inconsistente", "marcar_solo"),
+                ),
+                "codigo_m_puro_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
             ),
         ).pack(fill="x", padx=15, pady=4)
 
