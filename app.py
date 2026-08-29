@@ -29,6 +29,7 @@ from data_cleaner.cleaner import ACCIONES_VALIDAS  # noqa: F401 (referencia)
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
+from data_cleaner.exportador_m import generar_editor_m_puro
 
 # --------------------------------------------------------------------------
 # Configuración de página y constantes
@@ -262,11 +263,9 @@ for tipo, cantidad in por_tipo.items():
                 valor = st.text_input(
                     f"Valor fijo para '{col_name}'",
                     key=f"valor_fijo_{tipo}_{col_name}",
-                    help="Escriba 'null' (sin comillas) si quiere que la celda quede vacía.",
                 )
                 if valor != "":
-                    valor_final = "" if valor.strip().lower() == "null" else valor
-                    valores_fijos[col_name] = valor_final
+                    valores_fijos[col_name] = valor
 
     st.write("")
 
@@ -364,8 +363,9 @@ if st.session_state.get("df_limpio") is not None:
     config_aplicada = st.session_state.get("config_aplicada", {})
     valores_fijos_aplicados = st.session_state.get("valores_fijos_aplicados", {})
 
-    tab_pbi, tab_m, tab_universal = st.tabs(
-        ["Script Power BI (.py)", "Código M (Editor avanzado)", "Script universal (.py)"]
+    tab_pbi, tab_m, tab_m_puro, tab_universal = st.tabs(
+        ["Script Power BI (.py)", "Código M (Editor avanzado)",
+         "Código M puro (sin Python)", "Script universal (.py)"]
     )
 
     with tab_pbi:
@@ -389,6 +389,57 @@ if st.session_state.get("df_limpio") is not None:
         st.download_button(
             "⬇️ Descargar editor_avanzado_powerbi_generado.m", script_m,
             file_name="editor_avanzado_powerbi_generado.m", mime="text/plain",
+        )
+
+    with tab_m_puro:
+        st.caption(
+            "Genera la MISMA limpieza, pero como código M nativo — sin Python.Execute. "
+            "No requiere Python configurado en Power BI Desktop y evita que se pierdan "
+            "datos cuando Power BI trae de vuelta columnas con tipos mezclados. La "
+            "columna se detecta y se corrige tal como aparece en el análisis de arriba; "
+            "las correcciones de texto (typos, mayúsculas) quedan fijas con los valores "
+            "vistos en ESTE análisis — si el origen cambia más adelante, vuelva a "
+            "generar el código."
+        )
+        nombre_paso_puro = st.text_input(
+            "Nombre de tu último paso en Power Query (el que entrega la tabla a corregir)",
+            value="TuPasoAnterior", key="nombre_paso_puro",
+        )
+        col_tel1, col_tel2 = st.columns(2)
+        with col_tel1:
+            digitos_tel = st.number_input(
+                "Dígitos exactos esperados en teléfono", min_value=1, max_value=20, value=8,
+            )
+        with col_tel2:
+            primeros_digitos_txt = st.text_input(
+                "Primeros dígitos válidos de teléfono (coma-separado; vacío = no validar)",
+                value="2,4,5,6,7,8",
+                help="Ej. para Costa Rica: 2,4,5,6,7,8. Déjelo vacío si su país no aplica esta regla.",
+            )
+        primeros_digitos_lista = (
+            [d.strip() for d in primeros_digitos_txt.split(",") if d.strip()]
+            if primeros_digitos_txt.strip() else None
+        )
+
+        script_m_puro = generar_editor_m_puro(
+            df,
+            config=config_aplicada,
+            factor_iqr=1.5,
+            valores_fijos=valores_fijos_aplicados,
+            nombre_paso_anterior=nombre_paso_puro,
+            fecha_invalida=config_aplicada.get("fecha_invalida", "marcar_solo"),
+            email_invalido=config_aplicada.get("email_invalido", "marcar_solo"),
+            telefono_invalido=config_aplicada.get("telefono_invalido", "marcar_solo"),
+            digitos_telefono=(int(digitos_tel), int(digitos_tel)),
+            primeros_digitos_telefono_validos=primeros_digitos_lista,
+            id_duplicado=config_aplicada.get("id_duplicado", "marcar_solo"),
+            formula_incorrecta=config_aplicada.get("formula_incorrecta", "marcar_solo"),
+            texto_inconsistente=config_aplicada.get("texto_inconsistente", "marcar_solo"),
+        )
+        st.code(script_m_puro, language="text")
+        st.download_button(
+            "⬇️ Descargar codigo_m_puro_generado.m", script_m_puro,
+            file_name="codigo_m_puro_generado.m", mime="text/plain",
         )
 
     with tab_universal:
