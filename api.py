@@ -33,6 +33,7 @@ from data_cleaner import (
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
+from data_cleaner.exportador_m import generar_editor_m_puro
 
 app = FastAPI(
     title="Limpiador de Tablas API",
@@ -209,6 +210,73 @@ def exportar_script_endpoint(
         io.BytesIO(contenido.encode("utf-8")),
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{nombre_archivo}"'},
+    )
+
+
+@app.post("/exportar/script-m-puro")
+def exportar_script_m_puro_endpoint(
+    archivo: UploadFile = File(..., description="Mismo archivo CSV/Excel ya analizado."),
+    faltante: str = Form(DEFAULT_CONFIG["faltante"]),
+    duplicado: str = Form(DEFAULT_CONFIG["duplicado"]),
+    atipico: str = Form(DEFAULT_CONFIG["atipico"]),
+    tipo_invalido: str = Form(DEFAULT_CONFIG["tipo_invalido"]),
+    fecha_invalida: str = Form("marcar_solo"),
+    email_invalido: str = Form("marcar_solo"),
+    telefono_invalido: str = Form("marcar_solo"),
+    digitos_telefono_min: int = Form(8),
+    digitos_telefono_max: int = Form(8),
+    primeros_digitos_telefono_validos: str = Form(
+        "", description='Coma-separado, ej: "2,4,5,6,7,8". Vacio = no validar.'
+    ),
+    id_duplicado: str = Form("marcar_solo"),
+    formula_incorrecta: str = Form("marcar_solo"),
+    texto_inconsistente: str = Form("marcar_solo"),
+    factor_iqr: float = Form(1.5),
+    valores_fijos: str = Form("{}", description='JSON con valores fijos por columna'),
+    nombre_paso_anterior: str = Form("TuPasoAnterior"),
+):
+    """Genera codigo M 100% nativo (sin Python.Execute), a diferencia de
+    /exportar/script?formato=m que genera un paso Python.Execute(...).
+    Requiere el archivo de datos (no solo la config) porque las columnas de
+    fecha/email/telefono/id/formula/texto se auto-detectan sobre los datos
+    reales al momento de generar el codigo."""
+    df = _leer_upload(archivo)
+    try:
+        valores_fijos_dict = json.loads(valores_fijos) if valores_fijos else {}
+        if not isinstance(valores_fijos_dict, dict):
+            raise ValueError
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="valores_fijos debe ser un JSON de objeto (columna: valor).")
+
+    config = {
+        "faltante": faltante, "duplicado": duplicado,
+        "atipico": atipico, "tipo_invalido": tipo_invalido,
+    }
+    lista_primeros_digitos = (
+        [d.strip() for d in primeros_digitos_telefono_validos.split(",") if d.strip()]
+        or None
+    )
+
+    contenido = generar_editor_m_puro(
+        df,
+        config=config,
+        factor_iqr=factor_iqr,
+        valores_fijos=valores_fijos_dict,
+        nombre_paso_anterior=nombre_paso_anterior,
+        fecha_invalida=fecha_invalida,
+        email_invalido=email_invalido,
+        telefono_invalido=telefono_invalido,
+        digitos_telefono=(digitos_telefono_min, digitos_telefono_max),
+        primeros_digitos_telefono_validos=lista_primeros_digitos,
+        id_duplicado=id_duplicado,
+        formula_incorrecta=formula_incorrecta,
+        texto_inconsistente=texto_inconsistente,
+    )
+
+    return StreamingResponse(
+        io.BytesIO(contenido.encode("utf-8")),
+        media_type="text/plain",
+        headers={"Content-Disposition": 'attachment; filename="codigo_m_puro_generado.m"'},
     )
 
 
