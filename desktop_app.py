@@ -245,7 +245,7 @@ class LimpiadorApp(tk.Tk):
                         clave = f"{tipo}::{col}"
                         v = tk.StringVar()
                         self.valor_fijo_vars[clave] = v
-                        ttk.Label(marco, text=f"{col} =").pack(side="left")
+                        ttk.Label(marco, text=f"{col} = (escriba 'null' para vacío)").pack(side="left")
                         ttk.Entry(marco, textvariable=v, width=8).pack(side="left", padx=(0, 6))
 
             var.trace_add("write", _actualizar_visibilidad)
@@ -275,7 +275,10 @@ class LimpiadorApp(tk.Tk):
                 if valor == "":
                     faltan.append(f"{NOMBRES_TIPO.get(tipo, tipo)} → columna '{col}'")
                 else:
-                    valores_fijos[col] = valor
+                    # "null" (sin comillas) es la forma de pedir que la celda quede
+                    # vacía; de lo contrario no hay manera de indicar "vacío" porque
+                    # un texto realmente vacío activa la validación de "faltan".
+                    valores_fijos[col] = "" if valor.lower() == "null" else valor
 
         if faltan:
             messagebox.showwarning(
