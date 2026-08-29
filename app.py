@@ -262,9 +262,11 @@ for tipo, cantidad in por_tipo.items():
                 valor = st.text_input(
                     f"Valor fijo para '{col_name}'",
                     key=f"valor_fijo_{tipo}_{col_name}",
+                    help="Escriba 'null' (sin comillas) si quiere que la celda quede vacía.",
                 )
                 if valor != "":
-                    valores_fijos[col_name] = valor
+                    valor_final = "" if valor.strip().lower() == "null" else valor
+                    valores_fijos[col_name] = valor_final
 
     st.write("")
 
