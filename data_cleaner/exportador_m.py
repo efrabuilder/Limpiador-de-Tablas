@@ -1,0 +1,630 @@
+# -*- coding: utf-8 -*-
+"""
+exportador_m.py
+================
+Genera código M PURO (sin Python.Execute) para pegar en el Editor avanzado
+de Power Query, con las 10 reglas de `limpiador_powerbi.py` traducidas a
+pasos nativos de M.
+
+POR QUÉ EXISTE ESTE ARCHIVO
+---------------------------
+`exportador.generar_editor_m()` produce un paso `Python.Execute(...)` que
+Power BI ejecuta con un motor de Python local. Eso trae dos problemas
+recurrentes:
+  1. Requiere que la máquina tenga Python + pandas/numpy configurados en
+     Power BI Desktop (Opciones -> Python scripting).
+  2. Power BI serializa el resultado de Python de vuelta a M, y si una
+     columna queda con TIPOS MEZCLADOS (ej. `datetime.datetime` y
+     `datetime.date` en la misma columna "object"), Power BI descarta en
+     silencio los valores que no reconoce -> columnas que se ven "vacías"
+     aunque el script de Python no tiró ningún error.
+
+Este módulo evita el problema de raíz: NO ejecuta Python dentro de Power
+BI. En vez de eso, esta función corre la MISMA lógica de detección de
+columnas (fecha/email/teléfono/id/fórmula/texto) que ya usa
+`integraciones_bi/limpiador_powerbi.py`, pero la corre AHORA (al generar
+el código, con el DataFrame ya cargado en memoria) para decidir qué
+columnas concretas necesitan cada regla, y qué correcciones de texto
+("San Jose" -> "San José", etc.) hacen falta. El resultado es una
+consulta M que solo usa funciones nativas de Power Query, sin depender de
+ningún motor externo.
+
+LIMITACIONES CONOCIDAS (documentarlas es mejor que fingir que no existen):
+  - `texto_inconsistente` usa coincidencia difusa (difflib) en Python
+    porque M no tiene una función nativa de similitud de texto. Por eso
+    la tabla de correcciones queda "congelada" con los valores vistos en
+    el momento de generar el código: si el origen agrega variantes nuevas
+    más adelante, hay que volver a generar el M (no se recalcula solo en
+    cada refresh, a diferencia de las demás reglas).
+  - Las acciones soportadas por regla son un subconjunto razonable de las
+    8 acciones de `limpiador_powerbi.py` (ver ACCIONES_SOPORTADAS_M más
+    abajo). Si se pide una acción no soportada para una regla, se genera
+    con 'marcar_solo' y se dice explícitamente en un comentario dentro
+    del M generado.
+"""
+from __future__ import annotations
+import re
+import difflib
+import unicodedata
+from typing import Dict, List, Optional, Tuple
+
+import pandas as pd
+import numpy as np
+
+# -----------------------------------------------------------------------------
+# Mismos patrones/heurísticas de auto-detección que integraciones_bi/limpiador_powerbi.py
+# -----------------------------------------------------------------------------
+_PATRONES_EMAIL = ("email", "correo", "e-mail", "mail")
+_PATRONES_TELEFONO = ("telefono", "teléfono", "phone", "celular", "movil", "móvil", "whatsapp")
+_PATRONES_FECHA = ("fecha", "date")
+_PATRONES_TOTAL = ("total",)
+_PATRONES_CANTIDAD = ("cantidad", "qty", "cant_")
+_PATRONES_PRECIO = ("precio", "price")
+_PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \
+    ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
+
+ACCIONES_SOPORTADAS_M = {
+    "faltante": {"reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "valor_fijo", "marcar_solo", "eliminar_fila"},
+    "duplicado": {"eliminar_fila", "marcar_solo"},
+    "atipico": {"limitar", "reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "marcar_solo", "eliminar_fila"},
+    "tipo_invalido": {"marcar_solo", "valor_fijo", "eliminar_fila"},
+    "fecha_invalida": {"valor_fijo", "marcar_solo", "eliminar_fila"},
+    "email_invalido": {"valor_fijo", "marcar_solo", "eliminar_fila"},
+    "telefono_invalido": {"valor_fijo", "marcar_solo", "eliminar_fila"},
+    "id_duplicado": {"marcar_solo", "eliminar_fila"},
+    "formula_incorrecta": {"usar_sugerido", "marcar_solo", "eliminar_fila"},
+    "texto_inconsistente": {"usar_sugerido", "marcar_solo", "eliminar_fila"},
+}
+
+
+def _columnas_por_patron(df, patrones):
+    return [col for col in df.columns if any(p in str(col).lower() for p in patrones)]
+
+
+def _es_columna_id(col):
+    low = str(col).lower()
+    if low == "id":
+        return True
+    if low.startswith("id_") or low.endswith("_id") or "_id_" in low:
+        return True
+    if any(p in low for p in ("codigo", "código", "folio")):
+        return True
+    return False
+
+
+def _columna_numerica_potencial(serie):
+    valores = serie.dropna()
+    if len(valores) == 0:
+        return False
+    convertibles = pd.to_numeric(valores, errors="coerce")
+    return convertibles.notna().mean() > 0.7
+
+
+def _normalizar_texto(valor):
+    s = str(valor).strip().lower()
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return " ".join(s.split())
+
+
+def _m_str(valor) -> str:
+    """Escapa un valor como literal de texto M (comillas dobles duplicadas)."""
+    return '"' + str(valor).replace('"', '""') + '"'
+
+
+def _m_ident(nombre: str) -> str:
+    """Devuelve el identificador de paso M, citado con #"..." si hace falta."""
+    if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', nombre):
+        return nombre
+    return '#' + _m_str(nombre)
+
+
+def _accion_o_fallback(regla: str, accion: str, comentarios: List[str]) -> str:
+    if accion in ACCIONES_SOPORTADAS_M.get(regla, set()):
+        return accion
+    comentarios.append(
+        f'  // AVISO: la accion "{accion}" pedida para "{regla}" no esta soportada en '
+        f'generacion 100% M; se genero como "marcar_solo".'
+    )
+    return "marcar_solo"
+
+
+def _mapa_texto_inconsistente(df, columnas, umbral_similitud=0.85, max_cardinalidad_ratio=0.5,
+                               min_apariciones_canonica=1) -> Dict[str, Dict[str, str]]:
+    """Calcula, columna por columna, el diccionario {variante_original: forma_canonica}
+    usando la MISMA coincidencia difusa (difflib) que analyzer.py. Esto se hace UNA VEZ
+    aqui, en Python, para poder "hornear" el resultado como una tabla estatica dentro
+    del M generado (M no tiene una funcion nativa de similitud de texto)."""
+    resultado = {}
+    for col in columnas:
+        if col not in df.columns:
+            continue
+        serie = df[col].dropna()
+        if serie.empty:
+            continue
+        conteo_por_texto = serie.astype(str).value_counts()
+        textos_por_norm = {}
+        for texto, cuenta in conteo_por_texto.items():
+            norm = _normalizar_texto(texto)
+            textos_por_norm.setdefault(norm, []).append((texto, int(cuenta)))
+
+        normalizados = list(textos_por_norm.keys())
+        visitados = set()
+        grupos = []
+        for i, n1 in enumerate(normalizados):
+            if n1 in visitados:
+                continue
+            grupo = [n1]
+            visitados.add(n1)
+            for n2 in normalizados[i + 1:]:
+                if n2 in visitados:
+                    continue
+                if difflib.SequenceMatcher(None, n1, n2).ratio() >= umbral_similitud:
+                    grupo.append(n2)
+                    visitados.add(n2)
+            grupos.append(grupo)
+
+        mapa_col = {}
+        for grupo in grupos:
+            candidatas = [par for n in grupo for par in textos_por_norm[n]]
+            if len(candidatas) < 2:
+                continue
+            canonica_texto, canonica_cuenta = max(candidatas, key=lambda t: t[1])
+            if canonica_cuenta < min_apariciones_canonica:
+                continue
+            for texto_variante, _ in candidatas:
+                if texto_variante != canonica_texto:
+                    mapa_col[texto_variante] = canonica_texto
+        if mapa_col:
+            resultado[col] = mapa_col
+    return resultado
+
+
+def _columnas_candidatas_texto(df, umbral_max_cardinalidad=0.5):
+    cols = []
+    for col in df.columns:
+        serie = df[col]
+        es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
+        if not es_texto or _es_columna_id(col):
+            continue
+        if any(p in str(col).lower() for p in _PATRONES_EXCLUIR_TEXTO):
+            continue
+        no_nulos = serie.dropna()
+        if len(no_nulos) == 0:
+            continue
+        ratio = no_nulos.map(_normalizar_texto).nunique() / len(no_nulos)
+        if ratio <= umbral_max_cardinalidad:
+            cols.append(col)
+    return cols
+
+
+# =============================================================================
+# FUNCIÓN AUXILIAR M (fija, no depende del dataset): parser de fechas
+# multi-formato + función de percentil (para IQR), inyectadas al inicio del
+# query cuando hacen falta.
+# =============================================================================
+_M_FUNCION_FECHA = '''  // Interpreta una fecha en texto sin importar cual de los 5 formatos use.
+  // Devuelve null si el texto no calza con ninguno o si la fecha no existe
+  // (ej. 31 de febrero).
+  FechaDesdeTexto = (t as text) as nullable date =>
+    let
+        limpio = Text.Trim(t),
+        MesesEN = {"January","February","March","April","May","June","July","August","September","October","November","December"},
+        porPuntos = try (
+            let p = Text.Split(limpio, ".") in
+            if List.Count(p) = 3 then #date(Number.From(p{0}), Number.From(p{1}), Number.From(p{2})) else error "na"
+        ) otherwise null,
+        conDe = if porPuntos <> null then porPuntos else try (
+            let p = Text.Split(limpio, " de ") in
+            if List.Count(p) = 3 and List.Contains(MesesEN, p{1}) then
+                #date(Number.From(p{2}), List.PositionOf(MesesEN, p{1}) + 1, Number.From(p{0}))
+            else error "na"
+        ) otherwise null,
+        porSlash = if conDe <> null then conDe else try (
+            let p = Text.Split(limpio, "/") in
+            if List.Count(p) = 3 then #date(Number.From(p{2}), Number.From(p{1}), Number.From(p{0})) else error "na"
+        ) otherwise null,
+        porGuion = if porSlash <> null then porSlash else try (
+            let p = Text.Split(limpio, "-") in
+            if List.Count(p) <> 3 then error "na"
+            else if Text.Length(p{2}) = 2 then #date(2000 + Number.From(p{2}), Number.From(p{1}), Number.From(p{0}))
+            else #date(Number.From(p{2}), Number.From(p{0}), Number.From(p{1}))
+        ) otherwise null
+    in
+        porGuion,
+'''
+
+_M_FUNCION_PERCENTIL = '''  // Percentil con interpolacion lineal (igual convencion que pandas .quantile()).
+  Percentil = (lista as list, p as number) as nullable number =>
+    let
+        ordenada = List.Sort(List.RemoveNulls(lista)),
+        n = List.Count(ordenada)
+    in
+        if n = 0 then null else
+        let
+            posicion = p * (n - 1),
+            piso = Number.RoundDown(posicion),
+            techo = Number.RoundUp(posicion),
+            fraccion = posicion - piso,
+            valorPiso = ordenada{piso},
+            valorTecho = ordenada{techo}
+        in
+            valorPiso + fraccion * (valorTecho - valorPiso),
+'''
+
+
+class _ConstructorM:
+    """Acumula pasos (nombre, formula) M en orden y arma el `let ... in` final."""
+
+    def __init__(self, paso_inicial: str):
+        self.pasos: List[Tuple[str, str]] = []
+        self.ultimo = paso_inicial
+        self.banderas: List[str] = []  # nombres de columnas Revisar_* generadas
+
+    def agregar(self, nombre: str, formula_con_placeholder: str) -> str:
+        """formula_con_placeholder puede usar el texto literal {prev} para referirse
+        al paso anterior. Se usa un simple .replace() (no .format()) porque el
+        propio codigo M esta lleno de llaves { } que .format() interpretaria mal."""
+        formula = formula_con_placeholder.replace("{prev}", _m_ident(self.ultimo))
+        self.pasos.append((nombre, formula))
+        self.ultimo = nombre
+        return nombre
+
+    def bandera(self, nombre_col: str):
+        self.banderas.append(nombre_col)
+
+    def construir(self, funciones_extra: str = "") -> str:
+        cuerpo = ",\n\n".join(f"  {_m_ident(n)} = {f}" for n, f in self.pasos)
+        return f"let\n{funciones_extra}{cuerpo}\nin\n  {_m_ident(self.ultimo)}\n"
+
+
+def generar_editor_m_puro(
+    df: pd.DataFrame,
+    config: Optional[Dict[str, str]] = None,
+    factor_iqr: float = 1.5,
+    valores_fijos: Optional[dict] = None,
+    nombre_paso_anterior: str = "TuPasoAnterior",
+    # --- reglas nuevas: mismos parametros que limpiador_powerbi.py ---
+    fecha_invalida: str = "marcar_solo",
+    email_invalido: str = "marcar_solo",
+    telefono_invalido: str = "marcar_solo",
+    id_duplicado: str = "marcar_solo",
+    formula_incorrecta: str = "marcar_solo",
+    texto_inconsistente: str = "marcar_solo",
+    columnas_fecha: Optional[List[str]] = None,
+    fecha_min: Optional[str] = None,
+    fecha_max: Optional[str] = None,
+    columnas_email: Optional[List[str]] = None,
+    columnas_telefono: Optional[List[str]] = None,
+    digitos_telefono: Tuple[int, int] = (8, 8),
+    primeros_digitos_telefono_validos: Optional[List[str]] = None,
+    columnas_id: Optional[List[str]] = None,
+    columna_total: Optional[str] = None,
+    columna_cantidad: Optional[str] = None,
+    columna_precio: Optional[str] = None,
+    tolerancia_formula: float = 0.01,
+    columnas_texto: Optional[List[str]] = None,
+    umbral_similitud_texto: float = 0.85,
+    max_cardinalidad_ratio_texto: float = 0.5,
+) -> str:
+    """Genera codigo M 100% nativo (sin Python.Execute) equivalente a
+    integraciones_bi/limpiador_powerbi.py, usando `df` (los datos YA cargados
+    en el notebook/app) para decidir que columnas concretas necesita cada regla.
+
+    `df` debe ser el mismo DataFrame que se analizo/limpio en la interfaz,
+    para que la deteccion de columnas y la tabla de correcciones de texto
+    coincidan con lo que el usuario ya vio en el reporte de calidad.
+    """
+    cfg_basico = {"faltante": "reemplazar_mediana", "duplicado": "eliminar_fila",
+                  "atipico": "limitar", "tipo_invalido": "marcar_solo", **(config or {})}
+    valores_fijos = valores_fijos or {}
+    comentarios: List[str] = []
+
+    a_faltante = _accion_o_fallback("faltante", cfg_basico["faltante"], comentarios)
+    a_duplicado = _accion_o_fallback("duplicado", cfg_basico["duplicado"], comentarios)
+    a_atipico = _accion_o_fallback("atipico", cfg_basico["atipico"], comentarios)
+    a_tipo_invalido = _accion_o_fallback("tipo_invalido", cfg_basico["tipo_invalido"], comentarios)
+    a_fecha = _accion_o_fallback("fecha_invalida", fecha_invalida, comentarios)
+    a_email = _accion_o_fallback("email_invalido", email_invalido, comentarios)
+    a_tel = _accion_o_fallback("telefono_invalido", telefono_invalido, comentarios)
+    a_id = _accion_o_fallback("id_duplicado", id_duplicado, comentarios)
+    a_formula = _accion_o_fallback("formula_incorrecta", formula_incorrecta, comentarios)
+    a_texto = _accion_o_fallback("texto_inconsistente", texto_inconsistente, comentarios)
+
+    cols_fecha = columnas_fecha if columnas_fecha is not None else _columnas_por_patron(df, _PATRONES_FECHA)
+    cols_email = columnas_email if columnas_email is not None else _columnas_por_patron(df, _PATRONES_EMAIL)
+    cols_tel = columnas_telefono if columnas_telefono is not None else _columnas_por_patron(df, _PATRONES_TELEFONO)
+    cols_id = columnas_id if columnas_id is not None else [c for c in df.columns if _es_columna_id(c)]
+    cols_texto = columnas_texto if columnas_texto is not None else _columnas_candidatas_texto(df, max_cardinalidad_ratio_texto)
+    col_total = columna_total or (_columnas_por_patron(df, _PATRONES_TOTAL) or [None])[0]
+    col_cant = columna_cantidad or (_columnas_por_patron(df, _PATRONES_CANTIDAD) or [None])[0]
+    col_precio = columna_precio or (_columnas_por_patron(df, _PATRONES_PRECIO) or [None])[0]
+    hay_formula = bool(col_total and col_cant and col_precio and
+                        all(c in df.columns for c in (col_total, col_cant, col_precio)))
+
+    # OJO: el M generado aplica Text.Trim() a TODAS las columnas de texto
+    # antes de la correccion de texto_inconsistente (ver mas abajo). El mapa
+    # de correcciones tiene que calcularse sobre los valores YA recortados,
+    # o las claves con espacios sobrantes nunca harian match en tiempo de
+    # ejecucion (el Trim ya las habria eliminado antes de llegar ahi).
+    df_para_mapa = df.copy()
+    for c in df_para_mapa.columns:
+        if pd.api.types.is_object_dtype(df_para_mapa[c]) or pd.api.types.is_string_dtype(df_para_mapa[c]):
+            df_para_mapa[c] = df_para_mapa[c].apply(lambda v: v.strip() if isinstance(v, str) else v)
+    mapa_texto = _mapa_texto_inconsistente(df_para_mapa, cols_texto, umbral_similitud_texto,
+                                            max_cardinalidad_ratio_texto) if cols_texto else {}
+
+    cb = _ConstructorM(nombre_paso_anterior)
+    necesita_fecha_fn = bool(cols_fecha)
+    necesita_percentil_fn = (a_atipico in {"limitar"})
+
+    # -- 1) Duplicados de fila completa --------------------------------------
+    if a_duplicado == "eliminar_fila":
+        cb.agregar("SinDuplicados", "Table.Distinct({prev})")
+    elif a_duplicado == "marcar_solo":
+        cb.agregar("ConteoDupFila",
+                    "Table.Group({prev}, Table.ColumnNames(" + _m_ident(cb.ultimo) + "), "
+                    '{{"_conteo_dup_fila", each Table.RowCount(_), each Table.FirstN(_,1){0}, Table.ColumnNames(' + _m_ident(cb.ultimo) + ')}})')
+        # Nota: Table.Group con GroupKind.Local por defecto agrupa filas identicas;
+        # se anexa el conteo y se re-expande para no perder columnas originales.
+        # Implementacion simplificada: se marca via join en vez de Group+expand
+        # para evitar reordenar columnas.
+        cb.pasos.pop()  # descartar el intento anterior (queda mas simple con NestedJoin)
+        cb.ultimo = nombre_paso_anterior if not cb.pasos else cb.pasos[-1][0]
+        base_dup = _m_ident(cb.ultimo)
+        cb.agregar("ConteoPorFila",
+                    "Table.Group(" + base_dup + ", Table.ColumnNames(" + base_dup + "), "
+                    '{{"_conteo_fila", each Table.RowCount(_)}})')
+        cb.agregar("Revisar_Duplicado_col",
+                    "Table.AddColumn(Table.Join(" + base_dup + ", Table.ColumnNames(" + base_dup + "), "
+                    "{prev}, Table.ColumnNames(" + base_dup + ")), \"Revisar_Duplicado\", each [_conteo_fila] > 1, type logical)")
+        cb.agregar("SinConteoFila", 'Table.RemoveColumns({prev}, {"_conteo_fila"})')
+        cb.bandera("Revisar_Duplicado")
+
+    # -- 2) Limpieza basica de texto (trim) ----------------------------------
+    columnas_texto_trim = [c for c in df.columns
+                            if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c])]
+    if columnas_texto_trim:
+        pares = ", ".join(f'{{{_m_str(c)}, each if _ = null then null else Text.Trim(_)}}' for c in columnas_texto_trim)
+        cb.agregar("EspaciosRecortados", "Table.TransformColumns({prev}, {" + pares + "})")
+
+    # -- 3) Texto inconsistente (tabla de correccion horneada) ---------------
+    if mapa_texto and a_texto in ("usar_sugerido", "marcar_solo"):
+        paso_prev_texto = cb.ultimo
+        for col, mapa in mapa_texto.items():
+            if a_texto == "usar_sugerido":
+                # Cadena de "if v = X then Y else if ... else v"
+                cadena = "_"
+                for variante, canonica in mapa.items():
+                    cadena = f'if _ = {_m_str(variante)} then {_m_str(canonica)} else ({cadena})'
+                formula = f'{{{_m_str(col)}, each if _ = null then null else {cadena}}}'
+                cb.agregar(f"Corregido_{re.sub(r"[^A-Za-z0-9]", "", col)}",
+                           "Table.TransformColumns({prev}, {" + formula + "})")
+            else:  # marcar_solo -> columna Revisar_Texto_<col>
+                variantes_lista = "{" + ", ".join(_m_str(v) for v in mapa.keys()) + "}"
+                nombre_bandera = f"Revisar_Texto_{col}"
+                cb.agregar(f"Revisar_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                           "Table.AddColumn({prev}, " + _m_str(nombre_bandera) +
+                           f", each List.Contains({variantes_lista}, [{col}]), type logical)")
+                cb.bandera(nombre_bandera)
+
+    # -- 4) Fechas ------------------------------------------------------------
+    for col in cols_fecha:
+        if col not in df.columns:
+            continue
+        rango_check = ""
+        if fecha_min:
+            rango_check += f' or _ < #date({",".join(str(int(x)) for x in str(fecha_min).split("-"))})'
+        if fecha_max:
+            rango_check += f' or _ > #date({",".join(str(int(x)) for x in str(fecha_max).split("-"))})'
+        cuerpo_parse = (
+            f'each if [{col}] = null then null '
+            f'else let _v = if Value.Is([{col}], type text) then FechaDesdeTexto([{col}]) else Date.From([{col}]) '
+            f'in if _v = null then null'
+            + (f' else let _ = _v in if (false{rango_check}) then null else _v' if rango_check else ' else _v')
+        )
+        if a_fecha in ("valor_fijo", "marcar_solo"):
+            cb.agregar(f"FechaCorregida_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                       "Table.TransformColumns({prev}, {{" + _m_str(col) + f", {cuerpo_parse}, type nullable date}}}})")
+            if a_fecha == "marcar_solo":
+                nombre_bandera = f"Revisar_Fecha_{col}" if len(cols_fecha) > 1 else "Revisar_Fecha"
+                cb.agregar(f"RevisarFecha_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                           "Table.AddColumn({prev}, " + _m_str(nombre_bandera) +
+                           f", each [{col}] = null, type logical)")
+                cb.bandera(nombre_bandera)
+
+    # -- 5) ID duplicado --------------------------------------------------------
+    for col in cols_id:
+        if col not in df.columns:
+            continue
+        base = _m_ident(cb.ultimo)
+        cb.agregar(f"ConteoID_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                   f"Table.Group({{prev}}, {{{_m_str(col)}}}, " + '{{"_conteo_id", each Table.RowCount(_), type number}})')
+        conteo_paso = cb.ultimo
+        cb.pasos.pop(); cb.ultimo = base if not cb.pasos else cb.pasos[-1][0]
+        cb.agregar(f"ConteoID_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                   f"Table.Group({_m_ident(cb.ultimo)}, {{{_m_str(col)}}}, "
+                   '{{"_conteo_id", each Table.RowCount(_), type number}})')
+        conteo_nombre = cb.ultimo
+        cb.agregar(f"UnionID_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                   f"Table.NestedJoin({base}, {{{_m_str(col)}}}, {conteo_nombre}, {{{_m_str(col)}}}, \"_infoID\", JoinKind.LeftOuter)")
+        cb.agregar(f"ExpandID_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                   'Table.ExpandTableColumn({prev}, "_infoID", {"_conteo_id"})')
+        nombre_bandera = f"Revisar_ID_Duplicado_{col}" if len(cols_id) > 1 else "Revisar_ID_Duplicado"
+        if a_id == "eliminar_fila":
+            cb.agregar(f"SinIDDup_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                       'Table.Distinct(Table.RemoveColumns(Table.Sort({prev}, {{"_conteo_id", Order.Ascending}}), {"_conteo_id"}), {' + _m_str(col) + '})')
+        else:
+            cb.agregar(f"RevisarIDDup_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                       "Table.AddColumn({prev}, " + _m_str(nombre_bandera) + ", each [_conteo_id] > 1, type logical)")
+            cb.agregar(f"SinConteoID_{re.sub(r'[^A-Za-z0-9]', '', col)}", 'Table.RemoveColumns({prev}, {"_conteo_id"})')
+            cb.bandera(nombre_bandera)
+
+    # -- 6) Numericos: faltante / tipo_invalido / atipico ------------------------
+    # Se excluyen las columnas que ya tienen su propia regla especializada
+    # (ID y Telefono): esas NO deben pasar por conversion generica a numero,
+    # relleno con mediana ni recorte por IQR, o se pisaria/rompería la
+    # limpieza especifica de esa regla (ej. Telefono quedaria convertido a
+    # numero, perdiendo ceros a la izquierda, antes de poder validarlo).
+    columnas_excluidas_numerico = set(cols_id) | set(cols_tel)
+    columnas_numericas_potenciales = [c for c in df.columns
+                                       if c not in columnas_excluidas_numerico
+                                       and _columna_numerica_potencial(df[c])]
+    for col in columnas_numericas_potenciales:
+        cb.agregar(f"NumConvertido_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                   "Table.TransformColumns({prev}, {{" + _m_str(col) +
+                   f", each try Number.FromText(Text.Select(Text.From(_), {{\"0\"..\"9\",\".\",\"-\"}})) otherwise null, type number}}}})")
+        if a_faltante != "marcar_solo" or a_tipo_invalido != "marcar_solo":
+            pass  # el relleno de nulos ocurre mas abajo, comun a ambas reglas
+        nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
+        if a_faltante in ("reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "valor_fijo"):
+            if a_faltante == "reemplazar_mediana":
+                expr_relleno = f"List.Median(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
+            elif a_faltante == "reemplazar_media":
+                expr_relleno = f"List.Average(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
+            elif a_faltante == "reemplazar_moda":
+                expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
+            else:
+                valor_fijo_col = valores_fijos.get(col)
+                expr_relleno = repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
+            cb.agregar(f"SinFaltantes_{nombre_col_id}",
+                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
+                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+        elif a_faltante == "marcar_solo":
+            cb.agregar(f"RevisarFaltante_{nombre_col_id}",
+                       "Table.AddColumn({prev}, " + _m_str(f"Revisar_Faltante_{col}") +
+                       f", each [{col}] = null, type logical)")
+            cb.bandera(f"Revisar_Faltante_{col}")
+
+    if necesita_percentil_fn:
+        pass  # la funcion se inyecta al final del bloque de atipicos
+
+    if a_atipico != "marcar_solo" or True:
+        for col in columnas_numericas_potenciales:
+            nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
+            if a_atipico == "limitar":
+                cb.agregar(
+                    f"LimitesAtipico_{nombre_col_id}",
+                    (f"let _lista = List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})), "
+                     f"_q1 = Percentil(_lista, 0.25), _q3 = Percentil(_lista, 0.75), "
+                     f"_iqr = if _q1 = null or _q3 = null then null else _q3 - _q1, "
+                     f"_li = if _iqr = null then null else _q1 - {factor_iqr} * _iqr, "
+                     f"_ls = if _iqr = null then null else _q3 + {factor_iqr} * _iqr "
+                     f"in Table.TransformColumns({{prev}}, {{{{{_m_str(col)}, each "
+                     f"if _ = null or _li = null then _ else if _ < _li then _li else if _ > _ls then _ls else _"
+                     f", type number}}}})")
+                )
+            elif a_atipico == "marcar_solo":
+                cb.agregar(
+                    f"RevisarAtipico_{nombre_col_id}",
+                    (f"let _lista = List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})), "
+                     f"_q1 = Percentil(_lista, 0.25), _q3 = Percentil(_lista, 0.75), "
+                     f"_iqr = if _q1 = null or _q3 = null then null else _q3 - _q1, "
+                     f"_li = if _iqr = null then null else _q1 - {factor_iqr} * _iqr, "
+                     f"_ls = if _iqr = null then null else _q3 + {factor_iqr} * _iqr "
+                     f"in Table.AddColumn({{prev}}, {_m_str(f'Revisar_Atipico_{col}')}, each "
+                     f"[{col}] <> null and _li <> null and ([{col}] < _li or [{col}] > _ls), type logical)")
+                )
+                cb.bandera(f"Revisar_Atipico_{col}")
+                necesita_percentil_fn = True
+            if a_atipico == "limitar":
+                necesita_percentil_fn = True
+
+    # -- 7) Formula (Total = Cantidad x Precio) -------------------------------
+    if hay_formula:
+        cb.agregar("FormulaEsperada",
+                   "Table.AddColumn({prev}, \"_total_esperado\", each "
+                   f"if [{col_cant}] = null or [{col_precio}] = null then null else [{col_cant}] * [{col_precio}], type number)")
+        if a_formula == "usar_sugerido":
+            # Se reemplaza la columna de total por el valor recalculado
+            # (Cantidad x Precio) manteniendo el nombre original, en vez de
+            # intentar "editar en el lugar" con Table.TransformRows (que
+            # perderia los tipos de columna al reconstruir la tabla).
+            cb.agregar("SinTotalOriginal", 'Table.RemoveColumns({prev}, {' + _m_str(col_total) + '})')
+            cb.agregar("FormulaCorregida",
+                       'Table.RenameColumns({prev}, {{"_total_esperado", ' + _m_str(col_total) + '}})')
+        else:
+            tolerancia_check = (
+                f"[_total_esperado] <> null and [{col_total}] <> null and "
+                f"Number.Abs([{col_total}] - [_total_esperado]) > (Number.Abs([_total_esperado]) * {tolerancia_formula} + 0.01)"
+            )
+            cb.agregar("RevisarFormula", "Table.AddColumn({prev}, \"Revisar_Formula\", each " + tolerancia_check + ", type logical)")
+            cb.agregar("SinTotalEsperado", 'Table.RemoveColumns({prev}, {"_total_esperado"})')
+            cb.bandera("Revisar_Formula")
+
+    # -- 8) Telefono -----------------------------------------------------------
+    for col in cols_tel:
+        if col not in df.columns:
+            continue
+        min_d, max_d = digitos_telefono
+        nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
+        chequeo_largo = f"Text.Length(_soloDigitos) >= {min_d} and Text.Length(_soloDigitos) <= {max_d}"
+        if min_d == max_d:
+            chequeo_largo = f"Text.Length(_soloDigitos) = {min_d}"
+        if a_tel == "valor_fijo":
+            chequeo_primer_digito = ""
+            if primeros_digitos_telefono_validos:
+                lista_d = "{" + ", ".join(_m_str(d) for d in primeros_digitos_telefono_validos) + "}"
+                chequeo_primer_digito = f" and List.Contains({lista_d}, Text.Start(_soloDigitos, 1))"
+            cb.agregar(f"TelefonoLimpio_{nombre_col_id}",
+                       "Table.TransformColumns({prev}, {{" + _m_str(col) +
+                       f", each if _ = null then null else let _soloDigitos = Text.Select(_, {{\"0\"..\"9\"}}) "
+                       f"in if ({chequeo_largo}{chequeo_primer_digito}) then _soloDigitos else null, type text}}}})")
+        else:
+            lista_d_flag = ""
+            if primeros_digitos_telefono_validos:
+                lista_d = "{" + ", ".join(_m_str(d) for d in primeros_digitos_telefono_validos) + "}"
+                lista_d_flag = f" or not List.Contains({lista_d}, Text.Start(Text.Select(Text.From([{col}]), {{\"0\"..\"9\"}}), 1))"
+            cb.agregar(f"RevisarTelefono_{nombre_col_id}",
+                       "Table.AddColumn({prev}, " + _m_str(f"Revisar_Telefono_{col}") +
+                       f", each [{col}] = null or not ({chequeo_largo.replace('_soloDigitos', f'Text.Select(Text.From([{col}]), {{\"0\"..\"9\"}})')}){lista_d_flag}, type logical)")
+            cb.bandera(f"Revisar_Telefono_{col}")
+
+    # -- 9) Email ---------------------------------------------------------------
+    for col in cols_email:
+        if col not in df.columns:
+            continue
+        nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
+        chequeo_email = (
+            f"[{col}] = null or not Text.Contains([{col}], \"@\") "
+            f"or Text.StartsWith([{col}], \"@\") or Text.EndsWith([{col}], \"@\") "
+            f"or not Text.Contains(Text.AfterDelimiter([{col}], \"@\"), \".\") "
+            f"or Text.EndsWith([{col}], \".\")"
+        )
+        if a_email == "valor_fijo":
+            valor_fijo_email = valores_fijos.get(col, None)
+            reemplazo = _m_str(valor_fijo_email) if valor_fijo_email is not None else "null"
+            cb.agregar(f"EmailLimpio_{nombre_col_id}",
+                       "Table.TransformColumns({prev}, {{" + _m_str(col) +
+                       f", each if _ = null then null else Text.Lower(Text.Remove(Text.Trim(_), \" \")), type text}}}})")
+            cb.agregar(f"EmailValidado_{nombre_col_id}",
+                       "Table.TransformColumns({prev}, {{" + _m_str(col) +
+                       f", each if _ <> null and ({chequeo_email.replace(f'[{col}]', '_')}) then {reemplazo} else _, type text}}}})")
+        else:
+            cb.agregar(f"EmailLimpio_{nombre_col_id}",
+                       "Table.TransformColumns({prev}, {{" + _m_str(col) +
+                       f", each if _ = null then null else Text.Lower(Text.Remove(Text.Trim(_), \" \")), type text}}}})")
+            cb.agregar(f"RevisarEmail_{nombre_col_id}",
+                       "Table.AddColumn({prev}, " + _m_str(f"Revisar_Email_{col}") + f", each {chequeo_email}, type logical)")
+            cb.bandera(f"Revisar_Email_{col}")
+
+    # -- 10) Columna final Requiere_Revision -------------------------------------
+    if cb.banderas:
+        expr = " or ".join(f"[{b}]" for b in cb.banderas)
+        cb.agregar("RevisionFinal", "Table.AddColumn({prev}, \"Requiere_Revision\", each " + expr + ", type logical)")
+
+    funciones_extra = ""
+    if necesita_fecha_fn:
+        funciones_extra += _M_FUNCION_FECHA + "\n"
+    if necesita_percentil_fn:
+        funciones_extra += _M_FUNCION_PERCENTIL + "\n"
+
+    cuerpo_m = cb.construir(funciones_extra)
+    encabezado = (
+        "// =============================================================================\n"
+        "// Codigo M 100% nativo generado por Limpiador de Tablas (sin Python.Execute).\n"
+        "// Reemplaza en el Editor avanzado, ajustando el nombre del primer paso\n"
+        f'// ("{nombre_paso_anterior}") por el nombre real de tu ultimo paso previo.\n'
+        + ("".join(c + "\n" for c in comentarios) if comentarios else "")
+        + "// =============================================================================\n\n"
+    )
+    return encabezado + cuerpo_m
