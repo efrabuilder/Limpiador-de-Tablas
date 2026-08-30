@@ -37,16 +37,121 @@ DEFAULT_CONFIG_EXPORT = {
 # Núcleo de lógica compartido entre el script para Power BI y el universal.
 # Es una copia autocontenida (solo pandas/numpy) de data_cleaner/cleaner.py.
 # -----------------------------------------------------------------------------
-_NUCLEO_LOGICA = '''_PATRONES_EMAIL = ("email", "correo", "e-mail", "mail")
-_PATRONES_TELEFONO = ("telefono", "teléfono", "phone", "celular", "movil", "móvil", "whatsapp")
-_PATRONES_FECHA = ("fecha", "date")
-_PATRONES_TOTAL = ("total",)
-_PATRONES_CANTIDAD = ("cantidad", "qty", "cant_")
-_PATRONES_PRECIO = ("precio", "price")
+_NUCLEO_LOGICA = '''# --- Deteccion de columnas: por nombre (normalizado) y, si eso no
+# encuentra nada, por contenido real. Mismo enfoque que data_cleaner/patrones.py,
+# copiado aqui en forma autocontenida porque este script corre fuera del
+# proyecto (Power BI, Tableau, Alteryx, etc.) y no puede importarlo. -----
+_PATRONES_EMAIL = ("email", "correo", "e_mail", "mail", "correo_electronico")
+_PATRONES_TELEFONO = ("telefono", "phone", "celular", "movil", "whatsapp",
+                       "numero_telefono", "phone_number", "tel", "mobile")
+_PATRONES_FECHA = ("fecha", "date", "fec", "dob", "birth", "nacimiento",
+                    "created_at", "updated_at", "timestamp", "vencimiento",
+                    "expiry", "ingreso", "egreso")
+_PATRONES_TOTAL = ("total", "monto", "importe", "amount", "subtotal",
+                    "salario", "sueldo", "costo", "cost")
+_PATRONES_CANTIDAD = ("cantidad", "qty", "quantity", "cant", "unidades",
+                       "horas", "hours", "peso", "weight")
+_PATRONES_PRECIO = ("precio", "price", "tarifa", "rate", "valor_unitario", "unit_price")
 _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \\
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
 _REGEX_EMAIL = re.compile(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,}$")
 _REGEX_TELEFONO_FORMATO = re.compile(r"^[\\d\\s\\-\\+\\(\\)]+$")
+
+
+def _normalizar_nombre_columna(col):
+    s = str(col).strip()
+    s = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', ' ', s)
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    s = s.lower()
+    return re.sub(r'[^a-z0-9]+', '_', s).strip('_')
+
+
+def _coincide_patron_columna(col, patrones):
+    norm = _normalizar_nombre_columna(col)
+    tokens = [t for t in norm.split('_') if t]
+    for p in patrones:
+        p_norm = _normalizar_nombre_columna(p)
+        if not p_norm:
+            continue
+        if '_' in p_norm:
+            if p_norm in norm:
+                return True
+            continue
+        for tok in tokens:
+            if tok == p_norm:
+                return True
+            if re.fullmatch(re.escape(p_norm) + r'\\d+', tok) or re.fullmatch(r'\\d+' + re.escape(p_norm), tok):
+                return True
+    return False
+
+
+def _columnas_por_patron(df, patrones):
+    return [col for col in df.columns if _coincide_patron_columna(col, patrones)]
+
+
+def _es_columna_id(col):
+    norm = _normalizar_nombre_columna(col)
+    tokens = norm.split('_')
+    if norm == "id" or "id" in tokens:
+        return True
+    if any(p in norm for p in ("codigo", "folio", "identificador", "clave")):
+        return True
+    return False
+
+
+def _muestra_serie(serie, n=200):
+    no_nulos = serie.dropna()
+    if len(no_nulos) == 0:
+        return no_nulos
+    return no_nulos.sample(min(n, len(no_nulos)), random_state=0) if len(no_nulos) > n else no_nulos
+
+
+def _parece_email_col(serie, umbral=0.6):
+    m = _muestra_serie(serie).astype(str)
+    if len(m) == 0:
+        return False
+    return (m.str.match(_REGEX_EMAIL)).mean() >= umbral
+
+
+def _parece_telefono_col(serie, umbral=0.7, min_d=7, max_d=15):
+    m = _muestra_serie(serie).astype(str)
+    if len(m) == 0:
+        return False
+    con_anio = m.str.contains(r'\\b(?:19|20)\\d{2}\\b', regex=True)
+    m = m[~con_anio]
+    if len(m) == 0:
+        return False
+    solo_digitos = m.str.replace(r"\\D", "", regex=True)
+    return solo_digitos.str.len().between(min_d, max_d).mean() >= umbral
+
+
+def _parece_fecha_col(serie, umbral=0.7):
+    m = _muestra_serie(serie)
+    if len(m) == 0:
+        return False
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        return True
+    parseado = pd.to_datetime(m.astype(str), errors="coerce", dayfirst=True)
+    return parseado.notna().mean() >= umbral
+
+
+def _detectar_columnas_combinado(df, patrones, detector_contenido):
+    """Nivel 1 (nombre normalizado) primero; si no encuentra nada, Nivel 2
+    revisa el contenido real de las columnas de texto no-ID como respaldo
+    (cubre datasets con columnas mal nombradas: "col_1", "campo_7", etc.)."""
+    por_nombre = _columnas_por_patron(df, patrones)
+    if por_nombre:
+        return por_nombre
+    candidatas = []
+    for col in df.columns:
+        if _es_columna_id(col):
+            continue
+        try:
+            if detector_contenido(df[col]):
+                candidatas.append(col)
+        except Exception:
+            continue
+    return candidatas
 
 
 def _columna_numerica_potencial(serie):
@@ -69,21 +174,6 @@ def _columnas_para_atipicos(df):
     return columnas
 
 
-def _columnas_por_patron(df, patrones):
-    return [col for col in df.columns if any(p in str(col).lower() for p in patrones)]
-
-
-def _es_columna_id(col):
-    low = str(col).lower()
-    if low == "id":
-        return True
-    if low.startswith("id_") or low.endswith("_id") or "_id_" in low:
-        return True
-    if any(p in low for p in ("codigo", "código", "folio")):
-        return True
-    return False
-
-
 def _es_numero_con_sufijo(serie):
     no_nulos = serie.dropna().astype(str)
     if len(no_nulos) == 0:
@@ -100,7 +190,7 @@ def _normalizar_texto(valor):
 
 def _detectar_fechas_invalidas(df):
     hallazgos = []
-    for col in _columnas_por_patron(df, _PATRONES_FECHA):
+    for col in _detectar_columnas_combinado(df, _PATRONES_FECHA, _parece_fecha_col):
         serie = df[col]
         parseado = pd.to_datetime(serie, errors="coerce")
         for idx, val in serie.items():
@@ -117,7 +207,7 @@ def _detectar_fechas_invalidas(df):
 
 def _detectar_emails_invalidos(df):
     hallazgos = []
-    for col in _columnas_por_patron(df, _PATRONES_EMAIL):
+    for col in _detectar_columnas_combinado(df, _PATRONES_EMAIL, _parece_email_col):
         for idx, val in df[col].items():
             if pd.isna(val):
                 continue
@@ -129,7 +219,7 @@ def _detectar_emails_invalidos(df):
 
 def _detectar_telefonos_invalidos(df, min_digitos=8, max_digitos=8):
     hallazgos = []
-    for col in _columnas_por_patron(df, _PATRONES_TELEFONO):
+    for col in _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col):
         for idx, val in df[col].items():
             if pd.isna(val):
                 continue
