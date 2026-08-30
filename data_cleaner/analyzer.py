@@ -166,12 +166,27 @@ def detectar_atipicos_zscore(df: pd.DataFrame, umbral: float = 3.0,
 # Detección de columnas candidatas por nombre (para auto_detectar_columnas=True)
 # ---------------------------------------------------------------------------
 
-_PATRONES_EMAIL = ("email", "correo", "e-mail", "mail")
-_PATRONES_TELEFONO = ("telefono", "teléfono", "phone", "celular", "movil", "móvil", "whatsapp")
-_PATRONES_FECHA = ("fecha", "date")
-_PATRONES_TOTAL = ("total",)
-_PATRONES_CANTIDAD = ("cantidad", "qty", "cant_")
-_PATRONES_PRECIO = ("precio", "price")
+from data_cleaner.patrones import (
+    PATRONES_EMAIL as _PATRONES_EMAIL,
+    PATRONES_TELEFONO as _PATRONES_TELEFONO,
+    PATRONES_FECHA as _PATRONES_FECHA,
+    PATRONES_TOTAL as _PATRONES_TOTAL,
+    PATRONES_CANTIDAD as _PATRONES_CANTIDAD,
+    PATRONES_PRECIO as _PATRONES_PRECIO,
+    columnas_por_patron as _columnas_por_patron,
+    es_columna_id as _es_columna_id,
+    detectar_columnas as _detectar_columnas_por_contenido,
+    parece_email as _parece_email,
+    parece_telefono as _parece_telefono,
+    parece_fecha as _parece_fecha,
+)
+# _PATRONES_*, _columnas_por_patron y _es_columna_id ahora vienen del modulo
+# compartido data_cleaner.patrones (mismo que usa exportador_m.py), en vez
+# de una copia local: normalizan acentos/mayusculas, exigen coincidencia de
+# palabra completa (antes "date" podia matchear dentro de "Update"), traen
+# mas vocabulario (ingles + sinonimos de nomina/salud/logistica), y
+# _detectar_columnas_por_contenido permite reconocer una columna por sus
+# VALORES cuando el nombre no da ninguna pista (ej. "campo_7").
 _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
 
@@ -192,21 +207,6 @@ def _es_numero_con_sufijo(serie: pd.Series) -> bool:
     return con_numero_inicial.mean() > 0.7
 
 
-def _columnas_por_patron(df: pd.DataFrame, patrones: Tuple[str, ...]) -> List[str]:
-    return [col for col in df.columns if any(p in str(col).lower() for p in patrones)]
-
-
-def _es_columna_id(col) -> bool:
-    low = str(col).lower()
-    if low == "id":
-        return True
-    if low.startswith("id_") or low.endswith("_id") or "_id_" in low:
-        return True
-    if any(p in low for p in ("codigo", "código", "folio")):
-        return True
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Fechas
 # ---------------------------------------------------------------------------
@@ -219,7 +219,7 @@ def detectar_fechas_invalidas(df: pd.DataFrame, columnas: Optional[List[str]] = 
     Los valores vacíos no se reportan aquí (ya los cubre detectar_faltantes).
     """
     issues = []
-    cols = columnas if columnas is not None else (_columnas_por_patron(df, _PATRONES_FECHA) if auto else [])
+    cols = columnas if columnas is not None else (_detectar_columnas_por_contenido(df, _PATRONES_FECHA, _parece_fecha) if auto else [])
     lim_min = pd.Timestamp(fecha_min) if fecha_min is not None else None
     lim_max = pd.Timestamp(fecha_max) if fecha_max is not None else None
 
@@ -258,7 +258,7 @@ _REGEX_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
 def detectar_emails_invalidos(df: pd.DataFrame, columnas: Optional[List[str]] = None,
                                auto: bool = True) -> List[Issue]:
     issues = []
-    cols = columnas if columnas is not None else (_columnas_por_patron(df, _PATRONES_EMAIL) if auto else [])
+    cols = columnas if columnas is not None else (_detectar_columnas_por_contenido(df, _PATRONES_EMAIL, _parece_email) if auto else [])
     for col in cols:
         if col not in df.columns:
             continue
@@ -289,7 +289,7 @@ def detectar_telefonos_invalidos(df: pd.DataFrame, columnas: Optional[List[str]]
     costarricense); ajustar min_digitos/max_digitos para otros países.
     """
     issues = []
-    cols = columnas if columnas is not None else (_columnas_por_patron(df, _PATRONES_TELEFONO) if auto else [])
+    cols = columnas if columnas is not None else (_detectar_columnas_por_contenido(df, _PATRONES_TELEFONO, _parece_telefono) if auto else [])
     regex_formato = re.compile(patron) if patron else _REGEX_TELEFONO_FORMATO
     for col in cols:
         if col not in df.columns:
