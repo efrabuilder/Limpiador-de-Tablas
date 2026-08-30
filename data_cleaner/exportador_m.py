@@ -54,12 +54,20 @@ import numpy as np
 # -----------------------------------------------------------------------------
 # Mismos patrones/heurísticas de auto-detección que integraciones_bi/limpiador_powerbi.py
 # -----------------------------------------------------------------------------
-_PATRONES_EMAIL = ("email", "correo", "e-mail", "mail")
-_PATRONES_TELEFONO = ("telefono", "teléfono", "phone", "celular", "movil", "móvil", "whatsapp")
-_PATRONES_FECHA = ("fecha", "date")
-_PATRONES_TOTAL = ("total",)
-_PATRONES_CANTIDAD = ("cantidad", "qty", "cant_")
-_PATRONES_PRECIO = ("precio", "price")
+from data_cleaner.patrones import (
+    PATRONES_EMAIL as _PATRONES_EMAIL,
+    PATRONES_TELEFONO as _PATRONES_TELEFONO,
+    PATRONES_FECHA as _PATRONES_FECHA,
+    PATRONES_TOTAL as _PATRONES_TOTAL,
+    PATRONES_CANTIDAD as _PATRONES_CANTIDAD,
+    PATRONES_PRECIO as _PATRONES_PRECIO,
+    columnas_por_patron as _columnas_por_patron,
+    es_columna_id as _es_columna_id,
+    detectar_columnas as _detectar_columnas,
+    parece_email as _parece_email,
+    parece_telefono as _parece_telefono,
+    parece_fecha as _parece_fecha,
+)
 _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
 
@@ -76,20 +84,10 @@ ACCIONES_SOPORTADAS_M = {
     "texto_inconsistente": {"usar_sugerido", "marcar_solo", "eliminar_fila"},
 }
 
-
-def _columnas_por_patron(df, patrones):
-    return [col for col in df.columns if any(p in str(col).lower() for p in patrones)]
-
-
-def _es_columna_id(col):
-    low = str(col).lower()
-    if low == "id":
-        return True
-    if low.startswith("id_") or low.endswith("_id") or "_id_" in low:
-        return True
-    if any(p in low for p in ("codigo", "código", "folio")):
-        return True
-    return False
+# _columnas_por_patron y _es_columna_id ahora vienen de data_cleaner.patrones
+# (importadas arriba), en vez de una copia local — asi los tres consumidores
+# del proyecto (analyzer.py, exportador_m.py, y el futuro que se agregue)
+# comparten exactamente la misma logica de deteccion.
 
 
 def _columna_numerica_potencial(serie):
@@ -330,9 +328,18 @@ def generar_editor_m_puro(
     a_formula = _accion_o_fallback("formula_incorrecta", formula_incorrecta, comentarios)
     a_texto = _accion_o_fallback("texto_inconsistente", texto_inconsistente, comentarios)
 
-    cols_fecha = columnas_fecha if columnas_fecha is not None else _columnas_por_patron(df, _PATRONES_FECHA)
-    cols_email = columnas_email if columnas_email is not None else _columnas_por_patron(df, _PATRONES_EMAIL)
-    cols_tel = columnas_telefono if columnas_telefono is not None else _columnas_por_patron(df, _PATRONES_TELEFONO)
+    # Deteccion en 2 niveles: por nombre de columna primero (rapido); si
+    # eso no encuentra nada, se revisan los VALORES reales como respaldo
+    # (cubre datasets con columnas mal nombradas: "col_1", "campo_7", etc.).
+    # El orden fecha -> email -> telefono importa: cada deteccion excluye
+    # las columnas que ya reclamo una regla anterior, para que una columna
+    # de fecha con muchos digitos no se confunda con telefono, etc.
+    cols_fecha = columnas_fecha if columnas_fecha is not None else \
+        _detectar_columnas(df, _PATRONES_FECHA, _parece_fecha)
+    cols_email = columnas_email if columnas_email is not None else \
+        _detectar_columnas(df, _PATRONES_EMAIL, _parece_email, excluir=cols_fecha)
+    cols_tel = columnas_telefono if columnas_telefono is not None else \
+        _detectar_columnas(df, _PATRONES_TELEFONO, _parece_telefono, excluir=cols_fecha + cols_email)
     cols_id = columnas_id if columnas_id is not None else [c for c in df.columns if _es_columna_id(c)]
     cols_texto = columnas_texto if columnas_texto is not None else _columnas_candidatas_texto(df, max_cardinalidad_ratio_texto)
     col_total = columna_total or (_columnas_por_patron(df, _PATRONES_TOTAL) or [None])[0]
