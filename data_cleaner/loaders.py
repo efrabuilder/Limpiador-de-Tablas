@@ -10,9 +10,29 @@ def load_csv(path: str, **kwargs) -> pd.DataFrame:
     return pd.read_csv(path, **kwargs)
 
 
-def load_excel(path: str, sheet_name=0, **kwargs) -> pd.DataFrame:
-    """Carga una hoja de un archivo Excel (.xlsx/.xls) a un DataFrame."""
-    return pd.read_excel(path, sheet_name=sheet_name, **kwargs)
+def load_excel(path, sheet_name=None, **kwargs) -> pd.DataFrame:
+    """
+    Carga un archivo Excel (.xlsx/.xls/.xlsm) a un DataFrame.
+
+    Por defecto (sheet_name=None) lee TODAS las hojas del archivo y las
+    concatena en un único DataFrame, agregando la columna '_hoja' al
+    inicio con el nombre de la hoja de origen de cada fila. Si se indica
+    un sheet_name explícito, se conserva el comportamiento de pandas
+    (una sola hoja, sin columna '_hoja').
+    """
+    hojas = pd.read_excel(path, sheet_name=sheet_name, **kwargs)
+
+    if isinstance(hojas, dict):
+        if not hojas:
+            return pd.DataFrame()
+        marcos = []
+        for nombre_hoja, df_hoja in hojas.items():
+            df_hoja = df_hoja.copy()
+            df_hoja.insert(0, "_hoja", nombre_hoja)
+            marcos.append(df_hoja)
+        return pd.concat(marcos, ignore_index=True, sort=False)
+
+    return hojas
 
 
 def load_sql(connection_string: str, query: str = None, table_name: str = None) -> pd.DataFrame:
