@@ -21,6 +21,7 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, exportar,
 )
+from data_cleaner.loaders import load_excel
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
@@ -154,6 +155,41 @@ class LimpiadorApp(tk.Tk):
     # ------------------------------------------------------------------
     # Acciones
     # ------------------------------------------------------------------
+    def _elegir_hoja(self, hojas: list[str]) -> str | None:
+        """
+        Diálogo modal para elegir qué hoja limpiar cuando el Excel tiene
+        varias. Cada hoja puede ser una tabla con esquema distinto (ej. un
+        libro Power BI con varias tablas); concatenarlas todas por defecto
+        genera valores faltantes falsos en las columnas que no existen en
+        cada hoja. Se pide elegir una sola hoja; "Todas las hojas" queda
+        disponible solo si de verdad es la misma tabla repartida.
+        """
+        resultado: dict[str, str | None] = {"hoja": None}
+        ventana = tk.Toplevel(self)
+        ventana.title("Elegir hoja")
+        ventana.resizable(False, False)
+        ttk.Label(
+            ventana,
+            text="Este Excel tiene varias hojas. ¿Cuál desea limpiar?",
+            wraplength=320, justify="left",
+        ).pack(padx=15, pady=(15, 5))
+        opciones = list(hojas) + ["Todas las hojas (concatenadas)"]
+        var_hoja = tk.StringVar(value=opciones[0])
+        combo = ttk.Combobox(ventana, textvariable=var_hoja, values=opciones,
+                              state="readonly", width=40)
+        combo.pack(padx=15, pady=5)
+
+        def _confirmar() -> None:
+            resultado["hoja"] = var_hoja.get()
+            ventana.destroy()
+
+        ttk.Button(ventana, text="Aceptar", command=_confirmar).pack(pady=(5, 15))
+        ventana.protocol("WM_DELETE_WINDOW", ventana.destroy)
+        ventana.transient(self)
+        ventana.grab_set()
+        self.wait_window(ventana)
+        return resultado["hoja"]
+
     def abrir_archivo(self) -> None:
         ruta = filedialog.askopenfilename(
             title="Seleccionar archivo",
@@ -162,7 +198,20 @@ class LimpiadorApp(tk.Tk):
         if not ruta:
             return
         try:
-            df = load_table(ruta, kind="auto")
+            if ruta.lower().endswith((".xlsx", ".xls", ".xlsm")):
+                hojas = pd.ExcelFile(ruta).sheet_names
+                if len(hojas) == 1:
+                    df = load_excel(ruta, sheet_name=hojas[0])
+                else:
+                    hoja_elegida = self._elegir_hoja(hojas)
+                    if not hoja_elegida:
+                        return
+                    if hoja_elegida == "Todas las hojas (concatenadas)":
+                        df = load_excel(ruta)
+                    else:
+                        df = load_excel(ruta, sheet_name=hoja_elegida)
+            else:
+                df = load_table(ruta, kind="csv")
         except Exception as exc:
             messagebox.showerror("Error al cargar", str(exc))
             return
