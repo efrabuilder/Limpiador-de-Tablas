@@ -353,6 +353,42 @@ def detectar_ids_duplicados(df: pd.DataFrame, columnas: Optional[List[str]] = No
 # Fórmula / regla de negocio entre columnas (ej. Total = Cantidad × Precio)
 # ---------------------------------------------------------------------------
 
+def _mejor_combinacion_formula(df: pd.DataFrame, cand_total: List[str], cand_cant: List[str],
+                                cand_precio: List[str], tolerancia: float = 0.01
+                                ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Cuando el nombre de columna da varios candidatos para 'total' (ej.
+    'Costo_Unitario_USD' matchea el patrón "costo" igual que 'Monto_...'),
+    tomar siempre el primero por orden de columna es arbitrario y puede
+    comparar un valor por-unidad contra un total, generando que el 100%
+    de las filas parezcan "incorrectas". En vez de adivinar por nombre,
+    se prueba cada combinación total/cantidad/precio y se elige la que
+    de verdad cuadra (mayor % de filas donde total ≈ cantidad × precio).
+    """
+    mejor = (cand_total[0], cand_cant[0], cand_precio[0])
+    mejor_tasa = -1.0
+    for t in cand_total:
+        for c in cand_cant:
+            for p in cand_precio:
+                if len({t, c, p}) < 3:
+                    continue
+                total = pd.to_numeric(df[t], errors="coerce")
+                cantidad = pd.to_numeric(df[c], errors="coerce")
+                precio = pd.to_numeric(df[p], errors="coerce")
+                esperado = cantidad * precio
+                valido = total.notna() & esperado.notna()
+                if valido.sum() == 0:
+                    continue
+                diferencia = (total - esperado).abs()
+                limite = (esperado.abs() * tolerancia).clip(lower=0.01)
+                coincide = (diferencia <= limite) & valido
+                tasa = coincide.sum() / valido.sum()
+                if tasa > mejor_tasa:
+                    mejor_tasa = tasa
+                    mejor = (t, c, p)
+    return mejor
+
+
 def detectar_formula_incorrecta(df: pd.DataFrame, columna_total: Optional[str] = None,
                                  columna_cantidad: Optional[str] = None,
                                  columna_precio: Optional[str] = None,
@@ -361,7 +397,9 @@ def detectar_formula_incorrecta(df: pd.DataFrame, columna_total: Optional[str] =
     Verifica columna_total ≈ columna_cantidad × columna_precio. 'tolerancia'
     es relativa (1% por defecto) con un piso absoluto de 0.01 para evitar
     falsos positivos por redondeo. Si no se indican las columnas y
-    auto=True, intenta adivinarlas por nombre.
+    auto=True, intenta adivinarlas por nombre, y si hay varios candidatos
+    posibles para alguna, se elige la combinación que mejor cuadra con los
+    datos reales (ver _mejor_combinacion_formula).
     """
     issues = []
     if auto and not (columna_total and columna_cantidad and columna_precio):
@@ -369,9 +407,10 @@ def detectar_formula_incorrecta(df: pd.DataFrame, columna_total: Optional[str] =
         cand_cant = _columnas_por_patron(df, _PATRONES_CANTIDAD)
         cand_precio = _columnas_por_patron(df, _PATRONES_PRECIO)
         if cand_total and cand_cant and cand_precio:
-            columna_total = columna_total or cand_total[0]
-            columna_cantidad = columna_cantidad or cand_cant[0]
-            columna_precio = columna_precio or cand_precio[0]
+            t, c, p = _mejor_combinacion_formula(df, cand_total, cand_cant, cand_precio, tolerancia)
+            columna_total = columna_total or t
+            columna_cantidad = columna_cantidad or c
+            columna_precio = columna_precio or p
 
     if not (columna_total and columna_cantidad and columna_precio):
         return issues
