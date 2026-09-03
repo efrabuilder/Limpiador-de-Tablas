@@ -133,12 +133,43 @@ with st.sidebar:
             try:
                 if archivo.name.lower().endswith(".csv"):
                     df_cargado = pd.read_csv(archivo)
+                    clave_fuente = archivo.name
                 else:
-                    df_cargado = load_excel(archivo)
-                if st.session_state.get("nombre_fuente") != archivo.name:
+                    # Cada hoja de un Excel puede ser una tabla distinta
+                    # (esquemas distintos, ej. un libro Power BI con varias
+                    # tablas). Concatenar todo por defecto mezcla columnas
+                    # que no existen entre sí y genera NaN falsos. Se pide
+                    # elegir una hoja específica; "todas concatenadas" solo
+                    # tiene sentido si de verdad es la misma tabla repartida.
+                    hojas_disponibles = pd.ExcelFile(archivo).sheet_names
+                    if len(hojas_disponibles) == 1:
+                        hoja_elegida = hojas_disponibles[0]
+                    else:
+                        opciones_hoja = ["(elegir una hoja)"] + hojas_disponibles + \
+                            ["Todas las hojas (concatenadas)"]
+                        hoja_elegida = st.selectbox(
+                            "Hoja a limpiar",
+                            opciones_hoja,
+                            help="Elija la hoja que quiere analizar. Use 'Todas las hojas' "
+                                 "solo si son la misma tabla repartida entre varias hojas "
+                                 "(mismas columnas); si son tablas distintas, concatenarlas "
+                                 "genera valores faltantes falsos.",
+                        )
+                        if hoja_elegida == "(elegir una hoja)":
+                            st.info("Seleccione una hoja para continuar.")
+                            st.stop()
+
+                    archivo.seek(0)
+                    if hoja_elegida == "Todas las hojas (concatenadas)":
+                        df_cargado = load_excel(archivo)
+                    else:
+                        df_cargado = load_excel(archivo, sheet_name=hoja_elegida)
+                    clave_fuente = f"{archivo.name}::{hoja_elegida}"
+
+                if st.session_state.get("nombre_fuente") != clave_fuente:
                     _reset_estado()
                     st.session_state.df = df_cargado
-                    st.session_state.nombre_fuente = archivo.name
+                    st.session_state.nombre_fuente = clave_fuente
             except Exception as exc:
                 st.error(f"No se pudo leer el archivo: {exc}")
     else:
