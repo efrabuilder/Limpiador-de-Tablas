@@ -25,6 +25,7 @@ from data_cleaner import (
     exportar_reporte_excel,
     exportar,
 )
+from data_cleaner.loaders import load_excel
 from data_cleaner.cleaner import ACCIONES_VALIDAS  # noqa: F401 (referencia)
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
@@ -133,7 +134,7 @@ with st.sidebar:
                 if archivo.name.lower().endswith(".csv"):
                     df_cargado = pd.read_csv(archivo)
                 else:
-                    df_cargado = pd.read_excel(archivo)
+                    df_cargado = load_excel(archivo)
                 if st.session_state.get("nombre_fuente") != archivo.name:
                     _reset_estado()
                     st.session_state.df = df_cargado
