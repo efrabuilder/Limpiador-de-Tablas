@@ -204,6 +204,13 @@ def detectar_columnas(
     for c in df.columns:
         if c in excluir or es_columna_id(c):
             continue
+        # Nivel 2 es un respaldo pensado para columnas de TEXTO (nombres
+        # de columna que no dicen nada, ej. "contacto_1", "campo_7").
+        # Las columnas numéricas (montos, cantidades, precios) quedan
+        # fuera: un monto grande en colones puede tener 7-15 dígitos y
+        # confundirse con un teléfono si no se excluye por tipo de dato.
+        if pd.api.types.is_numeric_dtype(df[c]):
+            continue
         try:
             if detector_contenido(df[c]):
                 candidatas.append(c)
