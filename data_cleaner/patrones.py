@@ -128,6 +128,15 @@ PATRONES_CANTIDAD = (
 PATRONES_PRECIO = (
     "precio", "price", "tarifa", "rate", "valor_unitario", "unit_price",
 )
+PATRONES_DESCUENTO = (
+    "descuento", "discount", "rebaja", "bonificacion", "dcto",
+)
+PATRONES_IMPUESTO = (
+    "impuesto", "iva", "tax", "itbis", "vat",
+)
+PATRONES_ENVIO = (
+    "envio", "flete", "shipping", "freight", "logistico",
+)
 
 
 # -----------------------------------------------------------------------------
