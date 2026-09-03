@@ -34,6 +34,7 @@ from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
+from data_cleaner.loaders import load_excel
 
 app = FastAPI(
     title="Limpiador de Tablas API",
@@ -77,7 +78,7 @@ def _leer_upload(archivo: UploadFile) -> pd.DataFrame:
     if nombre.endswith(".csv"):
         return pd.read_csv(io.BytesIO(contenido))
     if nombre.endswith((".xlsx", ".xls")):
-        return pd.read_excel(io.BytesIO(contenido))
+        return load_excel(io.BytesIO(contenido))
     raise HTTPException(status_code=400, detail="Formato no soportado. Use .csv, .xlsx o .xls.")
 
 
