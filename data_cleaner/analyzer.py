@@ -173,6 +173,9 @@ from data_cleaner.patrones import (
     PATRONES_TOTAL as _PATRONES_TOTAL,
     PATRONES_CANTIDAD as _PATRONES_CANTIDAD,
     PATRONES_PRECIO as _PATRONES_PRECIO,
+    PATRONES_DESCUENTO as _PATRONES_DESCUENTO,
+    PATRONES_IMPUESTO as _PATRONES_IMPUESTO,
+    PATRONES_ENVIO as _PATRONES_ENVIO,
     columnas_por_patron as _columnas_por_patron,
     es_columna_id as _es_columna_id,
     detectar_columnas as _detectar_columnas_por_contenido,
@@ -354,8 +357,13 @@ def detectar_ids_duplicados(df: pd.DataFrame, columnas: Optional[List[str]] = No
 # ---------------------------------------------------------------------------
 
 def _mejor_combinacion_formula(df: pd.DataFrame, cand_total: List[str], cand_cant: List[str],
-                                cand_precio: List[str], tolerancia: float = 0.01
-                                ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+                                cand_precio: List[str],
+                                cand_descuento: Optional[List[str]] = None,
+                                cand_impuesto: Optional[List[str]] = None,
+                                cand_envio: Optional[List[str]] = None,
+                                tolerancia: float = 0.01
+                                ) -> Tuple[Optional[str], Optional[str], Optional[str],
+                                           Optional[str], Optional[str], Optional[str], float]:
     """
     Cuando el nombre de columna da varios candidatos para 'total' (ej.
     'Costo_Unitario_USD' matchea el patrón "costo" igual que 'Monto_...'),
@@ -363,9 +371,25 @@ def _mejor_combinacion_formula(df: pd.DataFrame, cand_total: List[str], cand_can
     comparar un valor por-unidad contra un total, generando que el 100%
     de las filas parezcan "incorrectas". En vez de adivinar por nombre,
     se prueba cada combinación total/cantidad/precio y se elige la que
-    de verdad cuadra (mayor % de filas donde total ≈ cantidad × precio).
+    de verdad cuadra (mayor % de filas donde total ≈ esperado).
+
+    La fórmula base es cantidad × precio, pero muchas tablas de negocio
+    no son tan simples (total = cantidad×precio − descuento + impuesto +
+    envío). Por eso también se prueba, para cada candidata de descuento/
+    impuesto/envío detectada por nombre, si INCLUIRLA en la fórmula mejora
+    la tasa de coincidencia frente a no incluirla (representado por None);
+    así se descubre automáticamente qué ajustes forman parte de la fórmula
+    real de esta tabla en particular, sin asumir que siempre aplican.
+
+    Devuelve también esa tasa de coincidencia, para que quien llama pueda
+    decidir si la combinación elegida es lo bastante confiable como para
+    usarla (ver 'tasa_minima' en detectar_formula_incorrecta).
     """
-    mejor = (cand_total[0], cand_cant[0], cand_precio[0])
+    opciones_descuento = list(cand_descuento or []) + [None]
+    opciones_impuesto = list(cand_impuesto or []) + [None]
+    opciones_envio = list(cand_envio or []) + [None]
+
+    mejor = (cand_total[0], cand_cant[0], cand_precio[0], None, None, None)
     mejor_tasa = -1.0
     for t in cand_total:
         for c in cand_cant:
@@ -373,33 +397,63 @@ def _mejor_combinacion_formula(df: pd.DataFrame, cand_total: List[str], cand_can
                 if len({t, c, p}) < 3:
                     continue
                 total = pd.to_numeric(df[t], errors="coerce")
-                cantidad = pd.to_numeric(df[c], errors="coerce")
-                precio = pd.to_numeric(df[p], errors="coerce")
-                esperado = cantidad * precio
-                valido = total.notna() & esperado.notna()
-                if valido.sum() == 0:
-                    continue
-                diferencia = (total - esperado).abs()
-                limite = (esperado.abs() * tolerancia).clip(lower=0.01)
-                coincide = (diferencia <= limite) & valido
-                tasa = coincide.sum() / valido.sum()
-                if tasa > mejor_tasa:
-                    mejor_tasa = tasa
-                    mejor = (t, c, p)
-    return mejor
+                base = pd.to_numeric(df[c], errors="coerce") * pd.to_numeric(df[p], errors="coerce")
+                for d in opciones_descuento:
+                    for i in opciones_impuesto:
+                        for e in opciones_envio:
+                            usados = {x for x in (d, i, e) if x is not None}
+                            if usados & {t, c, p} or len(usados) != len({x for x in (d, i, e) if x is not None}):
+                                continue
+                            esperado = base.copy()
+                            if d is not None:
+                                esperado = esperado - pd.to_numeric(df[d], errors="coerce").fillna(0)
+                            if i is not None:
+                                esperado = esperado + pd.to_numeric(df[i], errors="coerce").fillna(0)
+                            if e is not None:
+                                esperado = esperado + pd.to_numeric(df[e], errors="coerce").fillna(0)
+                            valido = total.notna() & esperado.notna()
+                            if valido.sum() == 0:
+                                continue
+                            diferencia = (total - esperado).abs()
+                            limite = (esperado.abs() * tolerancia).clip(lower=0.01)
+                            coincide = (diferencia <= limite) & valido
+                            tasa = coincide.sum() / valido.sum()
+                            if tasa > mejor_tasa:
+                                mejor_tasa = tasa
+                                mejor = (t, c, p, d, i, e)
+    return (*mejor, max(mejor_tasa, 0.0))
 
 
 def detectar_formula_incorrecta(df: pd.DataFrame, columna_total: Optional[str] = None,
                                  columna_cantidad: Optional[str] = None,
                                  columna_precio: Optional[str] = None,
-                                 tolerancia: float = 0.01, auto: bool = True) -> List[Issue]:
+                                 columna_descuento: Optional[str] = None,
+                                 columna_impuesto: Optional[str] = None,
+                                 columna_envio: Optional[str] = None,
+                                 tolerancia: float = 0.01, auto: bool = True,
+                                 tasa_minima: float = 0.5) -> List[Issue]:
     """
-    Verifica columna_total ≈ columna_cantidad × columna_precio. 'tolerancia'
-    es relativa (1% por defecto) con un piso absoluto de 0.01 para evitar
-    falsos positivos por redondeo. Si no se indican las columnas y
-    auto=True, intenta adivinarlas por nombre, y si hay varios candidatos
-    posibles para alguna, se elige la combinación que mejor cuadra con los
-    datos reales (ver _mejor_combinacion_formula).
+    Verifica columna_total ≈ columna_cantidad × columna_precio, ajustado
+    opcionalmente por descuento (se resta), impuesto y envío/flete (se
+    suman): esperado = cantidad×precio − descuento + impuesto + envío.
+    Las tres columnas de ajuste son opcionales — si no aplican a la tabla,
+    simplemente no se usan. 'tolerancia' es relativa (1% por defecto) con
+    un piso absoluto de 0.01 para evitar falsos positivos por redondeo.
+
+    Si no se indican las columnas y auto=True, intenta adivinarlas por
+    nombre (incluidas las de ajuste), y si hay varios candidatos posibles
+    para alguna, se elige la combinación que mejor cuadra con los datos
+    reales, incluyendo si conviene o no usar cada ajuste (ver
+    _mejor_combinacion_formula).
+
+    'tasa_minima' es una salvaguarda: si ni siquiera la mejor combinación
+    de columnas autodetectada (con o sin ajustes) cuadra en al menos esa
+    fracción de filas (50% por defecto), lo más probable es que se hayan
+    detectado las columnas equivocadas, o que la fórmula real de esta
+    tabla sea distinta a "cantidad×precio ± ajustes" — en ese caso no se
+    reportan hallazgos, en vez de inundar con "errores" que son un falso
+    positivo de detección. Solo aplica cuando las columnas se autodetectan
+    por nombre; si se indican explícitamente, tasa_minima no se evalúa.
     """
     issues = []
     if auto and not (columna_total and columna_cantidad and columna_precio):
@@ -407,10 +461,24 @@ def detectar_formula_incorrecta(df: pd.DataFrame, columna_total: Optional[str] =
         cand_cant = _columnas_por_patron(df, _PATRONES_CANTIDAD)
         cand_precio = _columnas_por_patron(df, _PATRONES_PRECIO)
         if cand_total and cand_cant and cand_precio:
-            t, c, p = _mejor_combinacion_formula(df, cand_total, cand_cant, cand_precio, tolerancia)
+            usadas = set(cand_total) | set(cand_cant) | set(cand_precio)
+            cand_descuento = [columna_descuento] if columna_descuento else \
+                [c for c in _columnas_por_patron(df, _PATRONES_DESCUENTO) if c not in usadas]
+            cand_impuesto = [columna_impuesto] if columna_impuesto else \
+                [c for c in _columnas_por_patron(df, _PATRONES_IMPUESTO) if c not in usadas]
+            cand_envio = [columna_envio] if columna_envio else \
+                [c for c in _columnas_por_patron(df, _PATRONES_ENVIO) if c not in usadas]
+            t, c, p, d, i, e, tasa = _mejor_combinacion_formula(
+                df, cand_total, cand_cant, cand_precio, cand_descuento, cand_impuesto, cand_envio, tolerancia,
+            )
+            if tasa < tasa_minima:
+                return issues
             columna_total = columna_total or t
             columna_cantidad = columna_cantidad or c
             columna_precio = columna_precio or p
+            columna_descuento = columna_descuento or d
+            columna_impuesto = columna_impuesto or i
+            columna_envio = columna_envio or e
 
     if not (columna_total and columna_cantidad and columna_precio):
         return issues
@@ -421,6 +489,17 @@ def detectar_formula_incorrecta(df: pd.DataFrame, columna_total: Optional[str] =
     cantidad = pd.to_numeric(df[columna_cantidad], errors="coerce")
     precio = pd.to_numeric(df[columna_precio], errors="coerce")
     esperado = cantidad * precio
+    detalle_formula = f"{columna_cantidad} × {columna_precio}"
+    if columna_descuento and columna_descuento in df.columns:
+        esperado = esperado - pd.to_numeric(df[columna_descuento], errors="coerce").fillna(0)
+        detalle_formula += f" − {columna_descuento}"
+    if columna_impuesto and columna_impuesto in df.columns:
+        esperado = esperado + pd.to_numeric(df[columna_impuesto], errors="coerce").fillna(0)
+        detalle_formula += f" + {columna_impuesto}"
+    if columna_envio and columna_envio in df.columns:
+        esperado = esperado + pd.to_numeric(df[columna_envio], errors="coerce").fillna(0)
+        detalle_formula += f" + {columna_envio}"
+
     diferencia = (total - esperado).abs()
     limite = (esperado.abs() * tolerancia).clip(lower=0.01)
     mal = (diferencia > limite) & total.notna() & esperado.notna()
@@ -429,7 +508,7 @@ def detectar_formula_incorrecta(df: pd.DataFrame, columna_total: Optional[str] =
         valor_correcto = esperado.loc[idx]
         issues.append(Issue(
             "formula_incorrecta", columna_total, int(idx), df.loc[idx, columna_total],
-            f"{columna_total} no coincide con {columna_cantidad} × {columna_precio} "
+            f"{columna_total} no coincide con {detalle_formula} "
             f"(esperado ≈ {valor_correcto:.2f})",
             valor_sugerido=round(float(valor_correcto), 2) if pd.notna(valor_correcto) else None,
         ))
@@ -563,6 +642,8 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
              detectar_ids: bool = True, columnas_id: Optional[List[str]] = None,
              detectar_formula: bool = True, columna_total: Optional[str] = None,
              columna_cantidad: Optional[str] = None, columna_precio: Optional[str] = None,
+             columna_descuento: Optional[str] = None, columna_impuesto: Optional[str] = None,
+             columna_envio: Optional[str] = None,
              tolerancia_formula: float = 0.01,
              detectar_texto: bool = True, columnas_texto: Optional[List[str]] = None,
              umbral_similitud_texto: float = 0.85) -> AnalysisResult:
@@ -594,8 +675,9 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
         issues += detectar_ids_duplicados(df, columnas=columnas_id, auto=auto_detectar_columnas)
     if detectar_formula:
         issues += detectar_formula_incorrecta(df, columna_total=columna_total, columna_cantidad=columna_cantidad,
-                                               columna_precio=columna_precio, tolerancia=tolerancia_formula,
-                                               auto=auto_detectar_columnas)
+                                               columna_precio=columna_precio, columna_descuento=columna_descuento,
+                                               columna_impuesto=columna_impuesto, columna_envio=columna_envio,
+                                               tolerancia=tolerancia_formula, auto=auto_detectar_columnas)
     if detectar_texto:
         issues += detectar_texto_inconsistente(df, columnas=columnas_texto, auto=auto_detectar_columnas,
                                                 umbral_similitud=umbral_similitud_texto)
