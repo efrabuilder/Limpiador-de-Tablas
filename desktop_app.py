@@ -388,14 +388,14 @@ class LimpiadorApp(tk.Tk):
 
         ventana = tk.Toplevel(self)
         ventana.title("Exportar script portátil")
-        ventana.geometry("420x200")
+        ventana.geometry("460x360")
         ventana.transient(self)
         ventana.grab_set()
 
         ttk.Label(
             ventana,
             text="Elija qué generar (usa la configuración de limpieza ya aplicada):",
-            wraplength=380, justify="left",
+            wraplength=420, justify="left",
         ).pack(padx=15, pady=(15, 10), anchor="w")
 
         ttk.Button(
@@ -424,9 +424,41 @@ class LimpiadorApp(tk.Tk):
 
         ttk.Separator(ventana, orient="horizontal").pack(fill="x", padx=15, pady=8)
 
-        ttk.Button(
-            ventana, text="Código M PURO (sin Python.Execute) — recomendado",
-            command=lambda: self._guardar_script(
+        # -- Opciones de teléfono para el M puro ---------------------------------
+        # Antes el rango de dígitos era fijo (8, formato de Costa Rica). Ahora se
+        # puede elegir país(es) — la validación acepta la UNION de sus rangos
+        # típicos de celular — o dejarlo vacío para el rango internacional amplio
+        # (7-15 dígitos, E.164). También se puede activar/desactivar el desglose
+        # por dígito (columnas Telefono_Digito_N + tabla de correcciones editable).
+        frame_tel = ttk.LabelFrame(ventana, text="Teléfono (solo aplica al M puro)")
+        frame_tel.pack(fill="x", padx=15, pady=(0, 8))
+
+        ttk.Label(
+            frame_tel,
+            text="País(es) (coma-separado, ej: cr,mexico — vacío = rango internacional amplio):",
+            wraplength=420, justify="left",
+        ).pack(anchor="w", padx=8, pady=(6, 0))
+        paises_tel_var = tk.StringVar(value="cr")
+        ttk.Entry(frame_tel, textvariable=paises_tel_var).pack(fill="x", padx=8, pady=(2, 6))
+
+        permitir_codigo_pais_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            frame_tel, variable=permitir_codigo_pais_var,
+            text="Aceptar el mismo número con código de país adelante (ej. +506 ...)",
+        ).pack(anchor="w", padx=8)
+
+        desglosar_digitos_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            frame_tel, variable=desglosar_digitos_var,
+            text="Agregar columnas para ver y corregir cada dígito por separado",
+        ).pack(anchor="w", padx=8, pady=(0, 6))
+
+        def _generar_m_puro():
+            paises_lista = (
+                [p.strip() for p in paises_tel_var.get().split(",") if p.strip()]
+                if paises_tel_var.get().strip() else None
+            )
+            self._guardar_script(
                 generar_editor_m_puro(
                     self.df,
                     config=self.config_aplicada,
@@ -435,12 +467,19 @@ class LimpiadorApp(tk.Tk):
                     fecha_invalida=self.config_aplicada.get("fecha_invalida", "marcar_solo"),
                     email_invalido=self.config_aplicada.get("email_invalido", "marcar_solo"),
                     telefono_invalido=self.config_aplicada.get("telefono_invalido", "marcar_solo"),
+                    paises_telefono=paises_lista,
+                    permitir_codigo_pais_telefono=permitir_codigo_pais_var.get(),
+                    desglosar_digitos_telefono=desglosar_digitos_var.get(),
                     id_duplicado=self.config_aplicada.get("id_duplicado", "marcar_solo"),
                     formula_incorrecta=self.config_aplicada.get("formula_incorrecta", "marcar_solo"),
                     texto_inconsistente=self.config_aplicada.get("texto_inconsistente", "marcar_solo"),
                 ),
                 "codigo_m_puro_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
-            ),
+            )
+
+        ttk.Button(
+            ventana, text="Código M PURO (sin Python.Execute) — recomendado",
+            command=_generar_m_puro,
         ).pack(fill="x", padx=15, pady=4)
 
     def _guardar_script(self, contenido: str, nombre_sugerido: str, tipos_archivo, ventana) -> None:
