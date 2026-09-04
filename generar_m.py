@@ -40,6 +40,13 @@ codigo_m = generar_editor_m_puro(
     fecha_invalida="valor_fijo",
     email_invalido="marcar_solo",
     telefono_invalido="valor_fijo",
+    # Antes el rango de digitos de telefono era fijo (8 digitos, CR) por
+    # defecto en toda la libreria. Ahora el default es internacional amplio
+    # (7-15 digitos), asi que para este dataset costarricense se especifica
+    # el pais explicitamente (acepta 8 digitos locales, o 9-11 con codigo
+    # de pais tipo "+506" adelante). Para otro proyecto: cambiar/agregar
+    # paises aqui, ej. paises_telefono=["mexico"] o ["cr", "mexico"].
+    paises_telefono=["cr"],
     primeros_digitos_telefono_validos=["2", "4", "5", "6", "7", "8"],  # None si no es Costa Rica
     id_duplicado="marcar_solo",
     formula_incorrecta="marcar_solo",
