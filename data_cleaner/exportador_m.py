@@ -67,6 +67,7 @@ from data_cleaner.patrones import (
     parece_email as _parece_email,
     parece_telefono as _parece_telefono,
     parece_fecha as _parece_fecha,
+    rango_digitos_telefono as _rango_digitos_telefono,
 )
 _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
@@ -249,6 +250,45 @@ _M_FUNCION_PERCENTIL = '''  // Percentil con interpolacion lineal (igual convenc
             valorPiso + fraccion * (valorTecho - valorPiso),
 '''
 
+_M_FUNCION_CORRECCION_DIGITOS = '''  // Tabla EDITABLE A MANO para corregir digitos individuales de telefono sin
+  // tocar el dato de origen. Agregue una fila por cada digito que necesite
+  // reemplazar: ID = valor de la columna identificadora (o del indice de
+  // fila si el dataset no tiene ID) del registro a corregir; Columna =
+  // nombre EXACTO de la columna de telefono; Posicion = 1 es el primer
+  // caracter del texto; DigitoCorrecto = un solo caracter. Esta tabla
+  // sobrevive a los refrescos de datos porque esta escrita aqui a mano, no
+  // calculada a partir del origen.
+  TablaCorreccionesDigitosTelefono = #table(
+      type table [ID = any, Columna = text, Posicion = Int64.Type, DigitoCorrecto = text],
+      {
+          // Ejemplo (quite el // de la linea para activarlo):
+          // {12, "Telefono", 3, "7"}   -> en el registro ID=12, columna "Telefono", cambia el caracter en la posicion 3 por "7"
+      }
+  ),
+
+  // Aplica, en orden, todas las correcciones de TablaCorreccionesDigitosTelefono
+  // que apliquen a un registro+columna dados, reemplazando solo el caracter
+  // en la posicion indicada y dejando el resto del texto intacto.
+  AplicarCorreccionDigito = (idFila as any, columna as text, valorOriginal as nullable text) as nullable text =>
+    let
+        correcciones = Table.SelectRows(TablaCorreccionesDigitosTelefono, each [ID] = idFila and [Columna] = columna),
+        resultado = List.Accumulate(
+            Table.ToRecords(correcciones),
+            valorOriginal,
+            (acumulado, correccion) =>
+                if acumulado = null then acumulado
+                else
+                    let
+                        pos = correccion[Posicion],
+                        antes = Text.Start(acumulado, pos - 1),
+                        despues = Text.Range(acumulado, pos)
+                    in
+                        antes & correccion[DigitoCorrecto] & despues
+        )
+    in
+        resultado,
+'''
+
 
 class _ConstructorM:
     """Acumula pasos (nombre, formula) M en orden y arma el `let ... in` final."""
@@ -293,7 +333,10 @@ def generar_editor_m_puro(
     fecha_max: Optional[str] = None,
     columnas_email: Optional[List[str]] = None,
     columnas_telefono: Optional[List[str]] = None,
-    digitos_telefono: Tuple[int, int] = (8, 8),
+    digitos_telefono: Optional[Tuple[int, int]] = None,
+    paises_telefono: Optional[List[str]] = None,
+    permitir_codigo_pais_telefono: bool = True,
+    desglosar_digitos_telefono: bool = True,
     primeros_digitos_telefono_validos: Optional[List[str]] = None,
     columnas_id: Optional[List[str]] = None,
     columna_total: Optional[str] = None,
@@ -311,6 +354,28 @@ def generar_editor_m_puro(
     `df` debe ser el mismo DataFrame que se analizo/limpio en la interfaz,
     para que la deteccion de columnas y la tabla de correcciones de texto
     coincidan con lo que el usuario ya vio en el reporte de calidad.
+
+    Telefono:
+      - `digitos_telefono`: si se da explicito (min, max), manda sobre todo
+        lo demas (ej. para un dataset de un solo pais que ya se conoce bien).
+      - `paises_telefono`: lista de paises/codigos (ej. ["cr", "mexico"]);
+        si `digitos_telefono` es None, el rango aceptado es la UNION de los
+        rangos tipicos de esos paises (ver patrones.DIGITOS_TELEFONO_PAIS).
+      - Si ninguno de los dos se da, se usa el rango internacional amplio
+        (7-15 digitos, E.164) en vez de asumir un solo pais.
+      - `permitir_codigo_pais_telefono`: si True (por defecto), tambien se
+        acepta el mismo numero con 1-3 digitos extra al inicio (codigo de
+        pais sin "+"), para no rechazar numeros que vienen con codigo de
+        pais incluido.
+      - `desglosar_digitos_telefono`: si True (por defecto), por cada
+        columna de telefono se agregan columnas "<col>_Digito_1..N" (un
+        caracter cada una) y "<col>_Posiciones_Invalidas", para visualizar
+        exactamente donde esta el error. Ademas se inyecta al inicio del
+        query una tabla editable a mano (`TablaCorreccionesDigitosTelefono`)
+        donde se puede agregar una fila por cada digito puntual a corregir
+        (identificando el registro por ID, o por un indice de fila si el
+        dataset no tiene columna ID), sin tocar el dato de origen ni
+        perderse en cada refresh.
     """
     cfg_basico = {"faltante": "reemplazar_mediana", "duplicado": "eliminar_fila",
                   "atipico": "limitar", "tipo_invalido": "marcar_solo", **(config or {})}
@@ -363,6 +428,7 @@ def generar_editor_m_puro(
     cb = _ConstructorM(nombre_paso_anterior)
     necesita_fecha_fn = bool(cols_fecha)
     necesita_percentil_fn = (a_atipico in {"limitar"})
+    necesita_correccion_digitos_fn = bool(cols_tel) and desglosar_digitos_telefono
 
     # -- 1) Duplicados de fila completa --------------------------------------
     if a_duplicado == "eliminar_fila":
@@ -420,14 +486,19 @@ def generar_editor_m_puro(
             continue
         rango_check = ""
         if fecha_min:
-            rango_check += f' or _ < #date({",".join(str(int(x)) for x in str(fecha_min).split("-"))})'
+            rango_check += f' or _v < #date({",".join(str(int(x)) for x in str(fecha_min).split("-"))})'
         if fecha_max:
-            rango_check += f' or _ > #date({",".join(str(int(x)) for x in str(fecha_max).split("-"))})'
+            rango_check += f' or _v > #date({",".join(str(int(x)) for x in str(fecha_max).split("-"))})'
+        # OJO: dentro de Table.TransformColumns el "each" recibe el VALOR de
+        # la celda como "_" (no la fila completa) — usar [col] aqui (como se
+        # hacia antes) revienta con error en el 100% de las filas porque "_"
+        # no es un record. Por eso se usa "_" en todo este bloque, igual que
+        # en el M de referencia (FechaDesdeTexto la recibe como texto plano).
         cuerpo_parse = (
-            f'each if [{col}] = null then null '
-            f'else let _v = if Value.Is([{col}], type text) then FechaDesdeTexto([{col}]) else Date.From([{col}]) '
+            f'each if _ = null then null '
+            f'else let _v = if Value.Is(_, type text) then FechaDesdeTexto(_) else Date.From(_) '
             f'in if _v = null then null'
-            + (f' else let _ = _v in if (false{rango_check}) then null else _v' if rango_check else ' else _v')
+            + (f' else if (false{rango_check}) then null else _v' if rango_check else ' else _v')
         )
         if a_fecha in ("valor_fijo", "marcar_solo"):
             cb.agregar(f"FechaCorregida_{re.sub(r'[^A-Za-z0-9]', '', col)}",
@@ -559,14 +630,58 @@ def generar_editor_m_puro(
             cb.bandera("Revisar_Formula")
 
     # -- 8) Telefono -----------------------------------------------------------
+    # min_d_tel/max_d_tel: digitos_telefono explicito manda; si no, se calcula
+    # por pais(es) (union de rangos, para aceptar la mayoria de formatos de
+    # celular de esos paises a la vez); si no se da ninguno de los dos, cae
+    # al rango internacional amplio (7-15 digitos) en vez de un solo pais.
+    min_d_tel, max_d_tel = digitos_telefono if digitos_telefono is not None \
+        else _rango_digitos_telefono(paises_telefono)
+
+    # Columna/indice usado para identificar cada registro en
+    # TablaCorreccionesDigitosTelefono: se prefiere una columna ID real ya
+    # detectada; si el dataset no tiene, se agrega un indice de fila (0-based
+    # + 1) SOLO para esto. OJO: un indice de fila asume que el orden de los
+    # datos no cambia entre refrescos; si el origen puede reordenarse, es
+    # preferible tener una columna ID real.
+    id_ref_col = cols_id[0] if cols_id else None
+    if cols_tel and desglosar_digitos_telefono and id_ref_col is None:
+        cb.agregar("IndiceParaCorreccionTelefono",
+                   'Table.AddIndexColumn({prev}, "_IndiceFila", 0, 1, Int64.Type)')
+        id_ref_col = "_IndiceFila"
+
     for col in cols_tel:
         if col not in df.columns:
             continue
-        min_d, max_d = digitos_telefono
         nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
-        chequeo_largo = f"Text.Length(_soloDigitos) >= {min_d} and Text.Length(_soloDigitos) <= {max_d}"
-        if min_d == max_d:
-            chequeo_largo = f"Text.Length(_soloDigitos) = {min_d}"
+
+        # 8a) Aplicar primero las correcciones manuales de digitos puntuales
+        # (si las hay en TablaCorreccionesDigitosTelefono), para que un
+        # registro corregido deje de marcarse como invalido de aqui en
+        # adelante. Se hace via AddColumn + remove + rename (en vez de
+        # TransformColumns) porque hace falta el ID de la fila, no solo el
+        # valor de la celda.
+        if desglosar_digitos_telefono:
+            cb.agregar(f"TelCorreccion_{nombre_col_id}",
+                       "Table.AddColumn({prev}, \"_tel_corr_" + nombre_col_id + "\", each "
+                       f"AplicarCorreccionDigito([{id_ref_col}], {_m_str(col)}, "
+                       f"if [{col}] = null then null else Text.From([{col}])), type text)")
+            cb.agregar(f"TelSinOriginal_{nombre_col_id}", 'Table.RemoveColumns({prev}, {' + _m_str(col) + '})')
+            cb.agregar(f"TelRenombrado_{nombre_col_id}",
+                       'Table.RenameColumns({prev}, {{"_tel_corr_' + nombre_col_id + '", ' + _m_str(col) + '}})')
+
+        # 8b) Chequeo de formato/longitud. Con permitir_codigo_pais_telefono
+        # activo tambien se acepta el mismo numero con 1-3 digitos extra al
+        # inicio (codigo de pais sin "+"), para no rechazar numeros que
+        # vienen con codigo de pais incluido.
+        chequeo_largo_base = f"Text.Length(_soloDigitos) >= {min_d_tel} and Text.Length(_soloDigitos) <= {max_d_tel}"
+        if min_d_tel == max_d_tel:
+            chequeo_largo_base = f"Text.Length(_soloDigitos) = {min_d_tel}"
+        if permitir_codigo_pais_telefono:
+            chequeo_largo = (f"({chequeo_largo_base}) or "
+                              f"(Text.Length(_soloDigitos) >= {min_d_tel + 1} and Text.Length(_soloDigitos) <= {max_d_tel + 3})")
+        else:
+            chequeo_largo = chequeo_largo_base
+
         if a_tel == "valor_fijo":
             chequeo_primer_digito = ""
             if primeros_digitos_telefono_validos:
@@ -581,10 +696,32 @@ def generar_editor_m_puro(
             if primeros_digitos_telefono_validos:
                 lista_d = "{" + ", ".join(_m_str(d) for d in primeros_digitos_telefono_validos) + "}"
                 lista_d_flag = f" or not List.Contains({lista_d}, Text.Start(Text.Select(Text.From([{col}]), {{\"0\"..\"9\"}}), 1))"
+            chequeo_largo_col = chequeo_largo.replace('_soloDigitos', f'Text.Select(Text.From([{col}]), {{"0".."9"}})')
             cb.agregar(f"RevisarTelefono_{nombre_col_id}",
                        "Table.AddColumn({prev}, " + _m_str(f"Revisar_Telefono_{col}") +
-                       f", each [{col}] = null or not ({chequeo_largo.replace('_soloDigitos', f'Text.Select(Text.From([{col}]), {{\"0\"..\"9\"}})')}){lista_d_flag}, type logical)")
+                       f", each [{col}] = null or not ({chequeo_largo_col}){lista_d_flag}, type logical)")
             cb.bandera(f"Revisar_Telefono_{col}")
+
+        # 8c) Desglose caracter por caracter, para VISUALIZAR exactamente en
+        # que posicion esta el error (ej. una letra en vez de un digito, o
+        # un digito extra/faltante) y poder corregirlo agregando una fila en
+        # TablaCorreccionesDigitosTelefono (definida al inicio del query).
+        # Nota: se usan variables con nombre (_v, _t) en vez de "_" dentro de
+        # los "each" anidados, porque "_" se reasigna al elemento de la
+        # lista en List.Select/List.Transform y pisaria el valor de la fila.
+        if desglosar_digitos_telefono:
+            for n in range(1, max_d_tel + 1):
+                cb.agregar(f"{nombre_col_id}_Digito_{n}",
+                           "Table.AddColumn({prev}, " + _m_str(f"{col}_Digito_{n}") +
+                           f", each let _v = [{col}] in if _v = null then null else "
+                           f"let _t = Text.From(_v) in if Text.Length(_t) >= {n} "
+                           f"then Text.Range(_t, {n - 1}, 1) else null, type text)")
+            cb.agregar(f"{nombre_col_id}_PosicionesInvalidas",
+                       "Table.AddColumn({prev}, " + _m_str(f"{col}_Posiciones_Invalidas") +
+                       f", each let _v = [{col}] in if _v = null then null else "
+                       f"let _t = Text.From(_v) in Text.Combine(List.Transform(List.Select("
+                       f"List.Numbers(1, Text.Length(_t)), each not List.Contains({{\"0\"..\"9\"}}, "
+                       f"Text.Range(_t, _ - 1, 1))), Text.From), \", \"), type text)")
 
     # -- 9) Email ---------------------------------------------------------------
     for col in cols_email:
@@ -624,6 +761,8 @@ def generar_editor_m_puro(
         funciones_extra += _M_FUNCION_FECHA + "\n"
     if necesita_percentil_fn:
         funciones_extra += _M_FUNCION_PERCENTIL + "\n"
+    if necesita_correccion_digitos_fn:
+        funciones_extra += _M_FUNCION_CORRECCION_DIGITOS + "\n"
 
     cuerpo_m = cb.construir(funciones_extra)
     encabezado = (
