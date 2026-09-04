@@ -437,17 +437,63 @@ if st.session_state.get("df_limpio") is not None:
             "Nombre de tu último paso en Power Query (el que entrega la tabla a corregir)",
             value="TuPasoAnterior", key="nombre_paso_puro",
         )
+
+        PAISES_TELEFONO_DISPONIBLES = {
+            "Costa Rica": "cr", "México": "mexico", "Colombia": "colombia",
+            "Argentina": "argentina", "España": "espana", "Estados Unidos": "us",
+            "Panamá": "panama", "Guatemala": "guatemala", "Honduras": "honduras",
+            "Nicaragua": "nicaragua", "El Salvador": "el_salvador", "Chile": "chile",
+            "Perú": "peru", "Ecuador": "ecuador", "Venezuela": "venezuela",
+            "Brasil": "brasil", "Uruguay": "uruguay", "Bolivia": "bolivia",
+            "República Dominicana": "republica_dominicana", "Reino Unido": "reino_unido",
+            "Alemania": "alemania", "Francia": "francia", "Canadá": "canada",
+        }
+
         col_tel1, col_tel2 = st.columns(2)
         with col_tel1:
-            digitos_tel = st.number_input(
-                "Dígitos exactos esperados en teléfono", min_value=1, max_value=20, value=8,
+            modo_telefono = st.radio(
+                "Rango de dígitos de teléfono",
+                ["Automático por país", "Rango manual"],
+                horizontal=True,
             )
-        with col_tel2:
+        digitos_telefono_manual = None
+        paises_telefono_sel = None
+        if modo_telefono == "Automático por país":
+            with col_tel2:
+                paises_sel_nombres = st.multiselect(
+                    "País(es) del teléfono",
+                    options=list(PAISES_TELEFONO_DISPONIBLES.keys()),
+                    default=["Costa Rica"],
+                    help="Vacío = rango internacional amplio (7-15 dígitos, estándar E.164). "
+                         "Con varios países, se acepta la UNIÓN de sus rangos típicos de celular.",
+                )
+            paises_telefono_sel = [PAISES_TELEFONO_DISPONIBLES[n] for n in paises_sel_nombres] or None
+        else:
+            with col_tel2:
+                digitos_tel = st.number_input(
+                    "Dígitos exactos esperados en teléfono", min_value=1, max_value=20, value=8,
+                )
+            digitos_telefono_manual = (int(digitos_tel), int(digitos_tel))
+
+        col_tel3, col_tel4 = st.columns(2)
+        with col_tel3:
             primeros_digitos_txt = st.text_input(
                 "Primeros dígitos válidos de teléfono (coma-separado; vacío = no validar)",
                 value="2,4,5,6,7,8",
                 help="Ej. para Costa Rica: 2,4,5,6,7,8. Déjelo vacío si su país no aplica esta regla.",
             )
+        with col_tel4:
+            permitir_codigo_pais = st.checkbox(
+                "Aceptar el número con código de país adelante (ej. +506 ...)",
+                value=True,
+            )
+        desglosar_digitos = st.checkbox(
+            "Agregar columnas para ver y corregir cada dígito de teléfono por separado",
+            value=True,
+            help="Genera una columna por cada posición del teléfono y una tabla editable "
+                 "(TablaCorreccionesDigitosTelefono) al inicio del código M, para corregir "
+                 "un dígito puntual sin tocar el dato original y sin que se pierda al refrescar.",
+        )
         primeros_digitos_lista = (
             [d.strip() for d in primeros_digitos_txt.split(",") if d.strip()]
             if primeros_digitos_txt.strip() else None
@@ -462,7 +508,10 @@ if st.session_state.get("df_limpio") is not None:
             fecha_invalida=config_aplicada.get("fecha_invalida", "marcar_solo"),
             email_invalido=config_aplicada.get("email_invalido", "marcar_solo"),
             telefono_invalido=config_aplicada.get("telefono_invalido", "marcar_solo"),
-            digitos_telefono=(int(digitos_tel), int(digitos_tel)),
+            digitos_telefono=digitos_telefono_manual,
+            paises_telefono=paises_telefono_sel,
+            permitir_codigo_pais_telefono=permitir_codigo_pais,
+            desglosar_digitos_telefono=desglosar_digitos,
             primeros_digitos_telefono_validos=primeros_digitos_lista,
             id_duplicado=config_aplicada.get("id_duplicado", "marcar_solo"),
             formula_incorrecta=config_aplicada.get("formula_incorrecta", "marcar_solo"),
