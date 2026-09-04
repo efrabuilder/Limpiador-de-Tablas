@@ -36,7 +36,7 @@ había ninguna.
 from __future__ import annotations
 import re
 import unicodedata
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -193,6 +193,69 @@ def parece_id(serie: pd.Series, umbral_unicidad: float = 0.95) -> bool:
     if len(no_nulos) < 5:
         return False
     return no_nulos.nunique() / len(no_nulos) >= umbral_unicidad
+
+
+# -----------------------------------------------------------------------------
+# Rango de digitos de telefono/celular por pais (numero nacional, SIN codigo
+# de pais). Antes el proyecto asumia siempre 8 digitos (formato de Costa
+# Rica) sin importar el dataset. Esta tabla permite aceptar la mayoria de
+# formatos de celular reales pais por pais, o -si no se especifica ninguno-
+# caer en el rango internacional amplio (estandar E.164: 7 a 15 digitos)
+# en vez de un unico pais fijo.
+# -----------------------------------------------------------------------------
+DIGITOS_TELEFONO_PAIS: dict[str, Tuple[int, int]] = {
+    "cr": (8, 8), "costa_rica": (8, 8),
+    "mx": (10, 10), "mexico": (10, 10),
+    "co": (10, 10), "colombia": (10, 10),
+    "ar": (10, 11), "argentina": (10, 11),
+    "es": (9, 9), "espana": (9, 9), "spain": (9, 9),
+    "us": (10, 10), "usa": (10, 10), "estados_unidos": (10, 10),
+    "pa": (7, 8), "panama": (7, 8),
+    "gt": (8, 8), "guatemala": (8, 8),
+    "hn": (8, 8), "honduras": (8, 8),
+    "ni": (8, 8), "nicaragua": (8, 8),
+    "sv": (8, 8), "el_salvador": (8, 8),
+    "cl": (9, 9), "chile": (9, 9),
+    "pe": (9, 9), "peru": (9, 9),
+    "ec": (9, 9), "ecuador": (9, 9),
+    "ve": (10, 11), "venezuela": (10, 11),
+    "br": (10, 11), "brasil": (10, 11), "brazil": (10, 11),
+    "uy": (8, 9), "uruguay": (8, 9),
+    "bo": (8, 8), "bolivia": (8, 8),
+    "do": (10, 10), "republica_dominicana": (10, 10),
+    "gb": (10, 10), "uk": (10, 10), "reino_unido": (10, 10),
+    "de": (10, 11), "alemania": (10, 11), "germany": (10, 11),
+    "fr": (9, 9), "francia": (9, 9), "france": (9, 9),
+    "ca": (10, 10), "canada": (10, 10),
+}
+
+# Rango "por defecto" cuando no se especifica ningun pais: estandar
+# internacional E.164 (numero nacional significativo de 7 a 15 digitos).
+DIGITOS_TELEFONO_INTERNACIONAL: Tuple[int, int] = (7, 15)
+
+
+def rango_digitos_telefono(paises: Optional[Iterable[str]] = None) -> Tuple[int, int]:
+    """(min, max) de digitos aceptados para telefono/celular.
+
+    Sin `paises`: rango internacional amplio (7-15). Con `paises` (nombres o
+    codigos ISO en cualquier combinacion de mayusculas/acentos, ej. "CR",
+    "México", "Costa Rica"): la UNION de sus rangos tipicos, para aceptar en
+    una misma columna la mayoria de formatos de celular de esos paises a la
+    vez. Si ninguno de los paises dados se reconoce, cae al rango
+    internacional en vez de fallar.
+    """
+    if not paises:
+        return DIGITOS_TELEFONO_INTERNACIONAL
+    mins, maxs = [], []
+    for p in paises:
+        clave = normalizar_nombre(p)
+        if clave in DIGITOS_TELEFONO_PAIS:
+            mn, mx = DIGITOS_TELEFONO_PAIS[clave]
+            mins.append(mn)
+            maxs.append(mx)
+    if not mins:
+        return DIGITOS_TELEFONO_INTERNACIONAL
+    return (min(mins), max(maxs))
 
 
 def detectar_columnas(
