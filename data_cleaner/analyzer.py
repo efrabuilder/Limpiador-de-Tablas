@@ -182,6 +182,7 @@ from data_cleaner.patrones import (
     parece_email as _parece_email,
     parece_telefono as _parece_telefono,
     parece_fecha as _parece_fecha,
+    rango_digitos_telefono as _rango_digitos_telefono,
 )
 # _PATRONES_*, _columnas_por_patron y _es_columna_id ahora vienen del modulo
 # compartido data_cleaner.patrones (mismo que usa exportador_m.py), en vez
@@ -283,14 +284,27 @@ _REGEX_TELEFONO_FORMATO = re.compile(r"^[\d\s\-\+\(\)]+$")
 
 def detectar_telefonos_invalidos(df: pd.DataFrame, columnas: Optional[List[str]] = None,
                                   patron: Optional[str] = None,
-                                  min_digitos: int = 8, max_digitos: int = 8,
+                                  min_digitos: Optional[int] = None, max_digitos: Optional[int] = None,
+                                  paises: Optional[List[str]] = None,
+                                  permitir_codigo_pais: bool = True,
                                   auto: bool = True) -> List[Issue]:
     """
     Un teléfono se considera inválido si contiene caracteres fuera de
     dígitos/espacios/guiones/paréntesis/'+', o si la cantidad de dígitos no
-    cae en [min_digitos, max_digitos]. Por defecto exige 8 dígitos (formato
-    costarricense); ajustar min_digitos/max_digitos para otros países.
+    cae en el rango esperado.
+
+    El rango esperado se resuelve así: si se dan min_digitos/max_digitos
+    explícitos, mandan sobre todo lo demás. Si no, se calcula por país(es)
+    (union de los rangos típicos de celular de esos países — ver
+    patrones.DIGITOS_TELEFONO_PAIS); sin países tampoco, se usa el rango
+    internacional amplio (7-15 dígitos, estándar E.164) en vez de asumir un
+    solo país. Con permitir_codigo_pais=True (por defecto) también se acepta
+    el mismo número con 1-3 dígitos extra al inicio (código de país sin "+").
     """
+    if min_digitos is not None and max_digitos is not None:
+        min_d, max_d = min_digitos, max_digitos
+    else:
+        min_d, max_d = _rango_digitos_telefono(paises)
     issues = []
     cols = columnas if columnas is not None else (_detectar_columnas_por_contenido(df, _PATRONES_TELEFONO, _parece_telefono) if auto else [])
     regex_formato = re.compile(patron) if patron else _REGEX_TELEFONO_FORMATO
@@ -303,9 +317,12 @@ def detectar_telefonos_invalidos(df: pd.DataFrame, columnas: Optional[List[str]]
             texto = str(val).strip()
             solo_digitos = re.sub(r"\D", "", texto)
             formato_ok = bool(regex_formato.match(texto))
-            longitud_ok = min_digitos <= len(solo_digitos) <= max_digitos
+            n = len(solo_digitos)
+            longitud_ok = min_d <= n <= max_d
+            if not longitud_ok and permitir_codigo_pais:
+                longitud_ok = (min_d + 1) <= n <= (max_d + 3)
             if not (formato_ok and longitud_ok):
-                rango = f"{min_digitos}" if min_digitos == max_digitos else f"{min_digitos}-{max_digitos}"
+                rango = f"{min_d}" if min_d == max_d else f"{min_d}-{max_d}"
                 issues.append(Issue("telefono_invalido", col, int(idx), val,
                                      f"Formato/longitud de teléfono inválido (se esperaban {rango} dígitos)"))
     return issues
@@ -638,7 +655,9 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
              detectar_emails: bool = True, columnas_email: Optional[List[str]] = None,
              detectar_telefonos: bool = True, columnas_telefono: Optional[List[str]] = None,
              patron_telefono: Optional[str] = None,
-             digitos_telefono: Tuple[int, int] = (8, 8),
+             digitos_telefono: Optional[Tuple[int, int]] = None,
+             paises_telefono: Optional[List[str]] = None,
+             permitir_codigo_pais_telefono: bool = True,
              detectar_ids: bool = True, columnas_id: Optional[List[str]] = None,
              detectar_formula: bool = True, columna_total: Optional[str] = None,
              columna_cantidad: Optional[str] = None, columna_precio: Optional[str] = None,
@@ -669,7 +688,10 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
         issues += detectar_emails_invalidos(df, columnas=columnas_email, auto=auto_detectar_columnas)
     if detectar_telefonos:
         issues += detectar_telefonos_invalidos(df, columnas=columnas_telefono, patron=patron_telefono,
-                                                min_digitos=digitos_telefono[0], max_digitos=digitos_telefono[1],
+                                                min_digitos=digitos_telefono[0] if digitos_telefono else None,
+                                                max_digitos=digitos_telefono[1] if digitos_telefono else None,
+                                                paises=paises_telefono,
+                                                permitir_codigo_pais=permitir_codigo_pais_telefono,
                                                 auto=auto_detectar_columnas)
     if detectar_ids:
         issues += detectar_ids_duplicados(df, columnas=columnas_id, auto=auto_detectar_columnas)
