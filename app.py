@@ -140,7 +140,7 @@ st.caption(
 
 with st.sidebar:
     st.header("1. Cargar datos")
-    origen = st.radio("Fuente", ["Archivo (CSV / Excel)", "Datos de ejemplo"], index=0)
+    origen = st.radio("Fuente", ["Archivo (CSV / Excel)", "Base de datos SQL", "Datos de ejemplo"], index=0)
 
     if origen == "Archivo (CSV / Excel)":
         archivo = st.file_uploader("Seleccione un archivo", type=["csv", "xlsx", "xls"])
@@ -187,6 +187,80 @@ with st.sidebar:
                     st.session_state.nombre_fuente = clave_fuente
             except Exception as exc:
                 st.error(f"No se pudo leer el archivo: {exc}")
+
+    elif origen == "Base de datos SQL":
+        # load_sql (en data_cleaner/loaders.py) ya existe y usa SQLAlchemy;
+        # esto solo arma la cadena de conexión y la muestra en la interfaz.
+        # OJO: segun el motor elegido hace falta el driver correspondiente
+        # instalado (psycopg2-binary para PostgreSQL, pymysql para MySQL,
+        # pyodbc para SQL Server) — agregarlo a requirements.txt si falta.
+        motor_sql = st.selectbox(
+            "Motor de base de datos",
+            ["PostgreSQL", "MySQL", "SQL Server", "SQLite", "Otra (cadena de conexión manual)"],
+        )
+        cadena_conexion = ""
+        if motor_sql == "SQLite":
+            ruta_sqlite = st.text_input("Ruta del archivo .db", value="")
+            if ruta_sqlite:
+                cadena_conexion = f"sqlite:///{ruta_sqlite}"
+        elif motor_sql == "Otra (cadena de conexión manual)":
+            cadena_conexion = st.text_input(
+                "Cadena de conexión SQLAlchemy completa",
+                type="password",
+                help="Ej: mssql+pyodbc://usuario:clave@host/basedatos?driver=ODBC+Driver+17+for+SQL+Server",
+            )
+        else:
+            _driver_por_motor = {
+                "PostgreSQL": ("postgresql+psycopg2", "5432"),
+                "MySQL": ("mysql+pymysql", "3306"),
+                "SQL Server": ("mssql+pyodbc", "1433"),
+            }
+            driver_sql, puerto_defecto = _driver_por_motor[motor_sql]
+            col_sql_a, col_sql_b = st.columns(2)
+            with col_sql_a:
+                host_sql = st.text_input("Host", value="localhost", key="host_sql")
+                usuario_sql = st.text_input("Usuario", key="usuario_sql")
+                basedatos_sql = st.text_input("Base de datos", key="basedatos_sql")
+            with col_sql_b:
+                puerto_sql = st.text_input("Puerto", value=puerto_defecto, key="puerto_sql")
+                clave_sql = st.text_input("Contraseña", type="password", key="clave_sql")
+            if usuario_sql and basedatos_sql and host_sql:
+                cadena_conexion = f"{driver_sql}://{usuario_sql}:{clave_sql}@{host_sql}:{puerto_sql}/{basedatos_sql}"
+                if motor_sql == "SQL Server":
+                    cadena_conexion += "?driver=ODBC+Driver+17+for+SQL+Server"
+
+        modo_fuente_sql = st.radio(
+            "¿Cómo traer los datos?", ["Nombre de tabla", "Consulta SQL personalizada"],
+            horizontal=True, key="modo_fuente_sql",
+        )
+        tabla_sql = query_sql = None
+        if modo_fuente_sql == "Nombre de tabla":
+            tabla_sql = st.text_input("Nombre de la tabla", key="tabla_sql")
+        else:
+            query_sql = st.text_area(
+                "Consulta SQL (SELECT ...)", key="query_sql",
+                help="Solo se ejecutan lecturas: se usa para traer los datos a limpiar, no modifica la base de datos.",
+            )
+
+        if st.button("🔌 Conectar y cargar"):
+            if not cadena_conexion:
+                st.error("Complete los datos de conexión.")
+            elif not tabla_sql and not query_sql:
+                st.error("Indique una tabla o una consulta SQL.")
+            else:
+                try:
+                    df_cargado = load_table(
+                        cadena_conexion, kind="sql", table_name=tabla_sql or None, query=query_sql or None,
+                    )
+                    clave_fuente = f"sql::{motor_sql}::{tabla_sql or 'consulta_personalizada'}"
+                    if st.session_state.get("nombre_fuente") != clave_fuente:
+                        _reset_estado()
+                    st.session_state.df = df_cargado
+                    st.session_state.nombre_fuente = clave_fuente
+                    st.success(f"Se cargaron {len(df_cargado)} filas desde la base de datos.")
+                except Exception as exc:
+                    st.error(f"No se pudo conectar/cargar desde la base de datos: {exc}")
+
     else:
         if st.button("Cargar ejemplo_datos.csv"):
             _reset_estado()
