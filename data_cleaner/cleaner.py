@@ -56,6 +56,11 @@ _TIPOS_VALOR_FIJO_DIRECTO = {
 }
 # Tipos para los que existe un valor_sugerido calculado por el analizador.
 _TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente"}
+# Tipos para los que 'editar_individualmente' tiene sentido: cada hallazgo
+# tiene una sola columna + un solo valor de celda que corregir uno por uno.
+# 'duplicado' queda afuera porque su Issue no trae columna/valor puntual
+# (columna=None, valor_original=la fila completa).
+_TIPOS_EDITAR_INDIVIDUAL = _TIPOS_VALOR_FIJO_DIRECTO | {"faltante", "tipo_invalido", "atipico"}
 
 
 def _asignar(df: pd.DataFrame, fila: int, columna: str, valor) -> None:
@@ -159,7 +164,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             valor_nuevo = valores_fijos.get(issue.columna)
             _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
-        elif issue.tipo in _TIPOS_VALOR_FIJO_DIRECTO and accion == "editar_individualmente":
+        elif issue.tipo in _TIPOS_EDITAR_INDIVIDUAL and accion == "editar_individualmente":
             clave = (issue.tipo, issue.columna, issue.fila)
             if clave in correcciones_individuales:
                 valor_nuevo = correcciones_individuales[clave]
