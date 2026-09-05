@@ -64,7 +64,7 @@ _PATRONES_ESTADO = ("estado", "status")
 # data_cleaner/patrones.py: VALORES_ESTADO_VALIDOS / es_valor_estado_valido
 # (misma logica, copiada aqui de forma autocontenida).
 _VALORES_ESTADO_VALIDOS = ("activo", "inactivo", "pendiente")
-_PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \\
+_PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + _PATRONES_ESTADO + \\
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
 # Identificadores alfanumericos/numericos que NO son telefono aunque su
 # CONTENIDO tenga una cantidad de digitos parecida a un celular: chasis/VIN,
