@@ -73,16 +73,16 @@ _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
 
 ACCIONES_SOPORTADAS_M = {
-    "faltante": {"reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "valor_fijo", "marcar_solo", "eliminar_fila"},
+    "faltante": {"reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "duplicado": {"eliminar_fila", "marcar_solo"},
-    "atipico": {"limitar", "reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "marcar_solo", "eliminar_fila"},
-    "tipo_invalido": {"marcar_solo", "valor_fijo", "eliminar_fila"},
-    "fecha_invalida": {"valor_fijo", "marcar_solo", "eliminar_fila"},
-    "email_invalido": {"valor_fijo", "marcar_solo", "eliminar_fila"},
+    "atipico": {"limitar", "reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "marcar_solo", "eliminar_fila", "editar_individualmente"},
+    "tipo_invalido": {"marcar_solo", "valor_fijo", "eliminar_fila", "editar_individualmente"},
+    "fecha_invalida": {"valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
+    "email_invalido": {"valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "telefono_invalido": {"valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
-    "id_duplicado": {"marcar_solo", "eliminar_fila"},
-    "formula_incorrecta": {"usar_sugerido", "marcar_solo", "eliminar_fila"},
-    "texto_inconsistente": {"usar_sugerido", "marcar_solo", "eliminar_fila"},
+    "id_duplicado": {"marcar_solo", "eliminar_fila", "editar_individualmente"},
+    "formula_incorrecta": {"usar_sugerido", "marcar_solo", "eliminar_fila", "editar_individualmente"},
+    "texto_inconsistente": {"usar_sugerido", "marcar_solo", "eliminar_fila", "editar_individualmente"},
 }
 
 # _columnas_por_patron y _es_columna_id ahora vienen de data_cleaner.patrones
@@ -355,6 +355,87 @@ def _m_funcion_correccion_digitos(filas_horneadas: List[Tuple[object, str, int, 
 '''
 
 
+def _preparar_correcciones_individuales_generico(df, correcciones_individuales, tipo, col, id_ref_col):
+    """Igual que `_preparar_correcciones_telefono` pero generico (para
+    cualquier tipo de hallazgo excepto 'telefono_invalido', que sigue usando
+    su propia tabla de digitos): compara cada valor corregido contra el
+    ORIGINAL de esa celda y arma (id_valor, columna, valor_corregido) para
+    hornear en TablaCorreccionesIndividuales. A diferencia del telefono, aqui
+    siempre se reemplaza el valor COMPLETO (no tiene sentido "corregir un
+    digito" en un texto, una fecha o un id)."""
+    filas: List[Tuple[object, str, object]] = []
+    if not correcciones_individuales:
+        return filas
+    for (t, columna, fila_idx), valor_corr in correcciones_individuales.items():
+        if t != tipo or columna != col:
+            continue
+        if fila_idx is None or fila_idx < 0 or fila_idx >= len(df):
+            continue
+        valor_original = df.iloc[fila_idx][col]
+        original_txt = "" if pd.isna(valor_original) else str(valor_original)
+        corregido_txt = "" if valor_corr is None else str(valor_corr)
+        if corregido_txt == original_txt:
+            continue  # se dejo igual al original -> no necesita cambio
+        id_valor = df.iloc[fila_idx][id_ref_col] if id_ref_col in df.columns else int(fila_idx)
+        filas.append((id_valor, col, valor_corr))
+    return filas
+
+
+def _m_valor_generico(valor) -> str:
+    """Renderiza un ValorCorregido para TablaCorreccionesIndividuales: null si
+    es None, o texto citado (las correcciones se escriben como texto en la
+    app; si la columna destino es numerica o fecha, el paso de conversion
+    correspondiente ya se encarga de interpretarlo, igual que con cualquier
+    valor que venga del origen)."""
+    if valor is None:
+        return "null"
+    return _m_str(valor)
+
+
+def _m_funcion_correccion_individual(filas_horneadas: List[Tuple[str, object, str, object]]) -> str:
+    if filas_horneadas:
+        cuerpo_filas = ",\n          ".join(
+            "{" + _m_str(tipo) + ", " + _m_valor_id(idv) + ", " + _m_str(colv) + ", " + _m_valor_generico(val) + "}"
+            for (tipo, idv, colv, val) in filas_horneadas
+        )
+    else:
+        cuerpo_filas = (
+            '// Ejemplo (quite el // de la linea para activarlo):\n'
+            '          // {"faltante", 12, "apellido_contacto", "Rojas"}   -> en el registro ID=12, columna "apellido_contacto", usa "Rojas"'
+        )
+    return f'''  // Tabla generica para corregir, registro por registro, cualquier hallazgo
+  // cuya accion se dejo en "Editar cada uno por separado" (el telefono usa
+  // su propia tabla de digitos, mas arriba). Si elegiste esa opcion en la
+  // app, esta tabla ya viene con las correcciones horneadas como filas;
+  // tambien puedes seguir agregando o ajustando filas a mano. Tipo = el
+  // nombre interno del hallazgo (ej. "faltante", "atipico", "email_invalido",
+  // igual que en el detalle de hallazgos de la app); ID = valor de la columna
+  // identificadora (o del indice de fila, 0-based, si el dataset no tiene
+  // ID); Columna = nombre EXACTO de la columna; ValorCorregido = el valor a
+  // usar (texto, o null para dejar vacio). Esta tabla sobrevive a los
+  // refrescos de datos porque esta escrita aqui, no calculada a partir del
+  // origen. OJO: si "Columna" es la misma que se usa como ID de referencia,
+  // edite esa fila de ultimo (una correccion sobre la propia columna ID hace
+  // que las demas correcciones de ese registro dejen de encontrarlo, porque
+  // el ID ya cambio).
+  TablaCorreccionesIndividuales = #table(
+      type table [Tipo = text, ID = any, Columna = text, ValorCorregido = any],
+      {{
+          {cuerpo_filas}
+      }}
+  ),
+
+  // Busca si hay una correccion para (tipo, idFila, columna) en
+  // TablaCorreccionesIndividuales; si la hay, usa ese valor en vez del
+  // original (sin tocar el dato de origen ni perderse en cada refresh).
+  AplicarCorreccionIndividual = (tipo as text, idFila as any, columna as text, valorOriginal as any) as any =>
+    let
+        correccion = Table.SelectRows(TablaCorreccionesIndividuales, each [Tipo] = tipo and [ID] = idFila and [Columna] = columna)
+    in
+        if Table.RowCount(correccion) > 0 then correccion{{0}}[ValorCorregido] else valorOriginal,
+'''
+
+
 class _ConstructorM:
     """Acumula pasos (nombre, formula) M en orden y arma el `let ... in` final."""
 
@@ -530,6 +611,56 @@ def generar_editor_m_puro(
         cb.agregar("SinConteoFila", 'Table.RemoveColumns({prev}, {"_conteo_fila"})')
         cb.bandera("Revisar_Duplicado")
 
+    # -- 1.5) ID de referencia + correcciones individuales genericas ------------
+    # Se resuelve aqui (despues de Duplicados, antes de cualquier otra regla)
+    # el ID/indice de fila que van a usar tanto el telefono como esta tabla
+    # generica, y se aplican YA las correcciones de "Editar cada uno por
+    # separado" sobre el valor CRUDO de origen (antes de convertir a numero,
+    # parsear fecha, etc.) para que el resto del pipeline (relleno de
+    # mediana, winsorizing, validacion de email, formula, etc.) trate el
+    # valor corregido igual que si viniera del origen. OJO: el indice de fila
+    # se agrega DESPUES de Table.Distinct (arriba) a proposito -- si se
+    # agregara antes, cada fila quedaria con un indice unico y
+    # Table.Distinct ya no podria detectar filas duplicadas.
+    _accion_por_tipo_individual = {
+        "faltante": a_faltante, "atipico": a_atipico, "tipo_invalido": a_tipo_invalido,
+        "fecha_invalida": a_fecha, "email_invalido": a_email, "id_duplicado": a_id,
+        "formula_incorrecta": a_formula, "texto_inconsistente": a_texto,
+    }
+    columnas_edicion_individual: List[Tuple[str, str]] = []
+    if correcciones_individuales:
+        _vistos_edicion = set()
+        for (_tipo_ci, _columna_ci, _fila_ci) in correcciones_individuales.keys():
+            if (_tipo_ci, _columna_ci) in _vistos_edicion:
+                continue
+            if (_accion_por_tipo_individual.get(_tipo_ci) == "editar_individualmente"
+                    and _columna_ci and _columna_ci in df.columns):
+                _vistos_edicion.add((_tipo_ci, _columna_ci))
+        columnas_edicion_individual = sorted(_vistos_edicion)
+
+    necesita_id_correccion_tel = bool(cols_tel) and (desglosar_digitos_telefono or a_tel == "editar_individualmente")
+    id_ref_col = cols_id[0] if cols_id else None
+    if (necesita_id_correccion_tel or columnas_edicion_individual) and id_ref_col is None:
+        cb.agregar("IndiceParaCorreccion", 'Table.AddIndexColumn({prev}, "_IndiceFila", 0, 1, Int64.Type)')
+        id_ref_col = "_IndiceFila"
+
+    filas_correccion_individual: List[Tuple[str, object, str, object]] = []
+    for _tipo_ci, _col_ci in columnas_edicion_individual:
+        for (idv, colv, val) in _preparar_correcciones_individuales_generico(
+                df, correcciones_individuales, _tipo_ci, _col_ci, id_ref_col):
+            filas_correccion_individual.append((_tipo_ci, idv, colv, val))
+
+    necesita_correccion_individual_fn = bool(columnas_edicion_individual)
+    for _tipo_ci, _col_ci in columnas_edicion_individual:
+        _nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', _col_ci)
+        _tipo_id = re.sub(r'[^A-Za-z0-9]', '', _tipo_ci)
+        cb.agregar(f"IndCorr_{_tipo_id}_{_nombre_col_id}",
+                   "Table.AddColumn({prev}, \"_ind_corr_" + _nombre_col_id + "\", each "
+                   f"AplicarCorreccionIndividual({_m_str(_tipo_ci)}, [{id_ref_col}], {_m_str(_col_ci)}, [{_col_ci}]), type any)")
+        cb.agregar(f"IndSinOriginal_{_tipo_id}_{_nombre_col_id}", 'Table.RemoveColumns({prev}, {' + _m_str(_col_ci) + '})')
+        cb.agregar(f"IndRenombrado_{_tipo_id}_{_nombre_col_id}",
+                   'Table.RenameColumns({prev}, {{"_ind_corr_' + _nombre_col_id + '", ' + _m_str(_col_ci) + '}})')
+
     # -- 2) Limpieza basica de texto (trim) ----------------------------------
     columnas_texto_trim = [c for c in df.columns
                             if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c])]
@@ -654,6 +785,36 @@ def generar_editor_m_puro(
                        f", each [{col}] = null, type logical)")
             cb.bandera(f"Revisar_Faltante_{col}")
 
+    # -- 6b) Texto: faltante (valor_fijo / marcar_solo / reemplazar_moda) -------
+    # Las columnas de puro texto (ej. linea_direccion2, region) no entran en
+    # columnas_numericas_potenciales, asi que sin este bloque quedaban fuera
+    # del bloque 6) de arriba por completo: elegir "Reemplazar por un valor
+    # fijo" (ej. "No aplica") para una columna de texto no generaba NINGUN
+    # paso M, y el valor fijo nunca se aplicaba al pegar el codigo en Power
+    # BI (los nulos de esa columna quedaban intactos).
+    columnas_excluidas_texto_faltante = columnas_excluidas_numerico | set(cols_fecha) | set(cols_email)
+    columnas_texto_faltante = [c for c in df.columns
+                                if c not in columnas_excluidas_texto_faltante
+                                and c not in columnas_numericas_potenciales]
+    for col in columnas_texto_faltante:
+        nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
+        if a_faltante == "valor_fijo":
+            valor_fijo_col = valores_fijos.get(col)
+            expr_relleno = repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
+            cb.agregar(f"SinFaltantesTexto_{nombre_col_id}",
+                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
+                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+        elif a_faltante == "reemplazar_moda":
+            expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
+            cb.agregar(f"SinFaltantesTexto_{nombre_col_id}",
+                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
+                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+        elif a_faltante == "marcar_solo" and _incluir_revision(f"Revisar_Faltante_{col}"):
+            cb.agregar(f"RevisarFaltanteTexto_{nombre_col_id}",
+                       "Table.AddColumn({prev}, " + _m_str(f"Revisar_Faltante_{col}") +
+                       f", each [{col}] = null, type logical)")
+            cb.bandera(f"Revisar_Faltante_{col}")
+
     if necesita_percentil_fn:
         pass  # la funcion se inyecta al final del bloque de atipicos
 
@@ -721,16 +882,11 @@ def generar_editor_m_puro(
 
     # Columna/indice usado para identificar cada registro en
     # TablaCorreccionesDigitosTelefono: se prefiere una columna ID real ya
-    # detectada; si el dataset no tiene, se agrega un indice de fila (0-based
-    # + 1) SOLO para esto. OJO: un indice de fila asume que el orden de los
-    # datos no cambia entre refrescos; si el origen puede reordenarse, es
-    # preferible tener una columna ID real.
-    necesita_id_correccion_tel = bool(cols_tel) and (desglosar_digitos_telefono or a_tel == "editar_individualmente")
-    id_ref_col = cols_id[0] if cols_id else None
-    if necesita_id_correccion_tel and id_ref_col is None:
-        cb.agregar("IndiceParaCorreccionTelefono",
-                   'Table.AddIndexColumn({prev}, "_IndiceFila", 0, 1, Int64.Type)')
-        id_ref_col = "_IndiceFila"
+    # detectada; si el dataset no tiene, se usa el indice de fila agregado en
+    # el bloque 1.5 (compartido con TablaCorreccionesIndividuales, para no
+    # agregar la misma columna de indice dos veces). OJO: un indice de fila
+    # asume que el orden de los datos no cambia entre refrescos; si el origen
+    # puede reordenarse, es preferible tener una columna ID real.
 
     # Filas horneadas para TablaCorreccionesDigitosTelefono a partir de lo
     # editado en el paso "Editar cada uno por separado" de la app (si lo hubo).
@@ -858,6 +1014,8 @@ def generar_editor_m_puro(
         funciones_extra += _M_FUNCION_PERCENTIL + "\n"
     if necesita_correccion_digitos_fn:
         funciones_extra += _m_funcion_correccion_digitos(filas_correccion_tel) + "\n"
+    if necesita_correccion_individual_fn:
+        funciones_extra += _m_funcion_correccion_individual(filas_correccion_individual) + "\n"
 
     cuerpo_m = cb.construir(funciones_extra)
     encabezado = (
