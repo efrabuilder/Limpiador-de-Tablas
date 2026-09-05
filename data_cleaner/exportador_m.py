@@ -62,6 +62,8 @@ from data_cleaner.patrones import (
     PATRONES_CANTIDAD as _PATRONES_CANTIDAD,
     PATRONES_PRECIO as _PATRONES_PRECIO,
     PATRONES_NO_TELEFONO as _PATRONES_NO_TELEFONO,
+    PATRONES_ESTADO as _PATRONES_ESTADO,
+    VALORES_ESTADO_VALIDOS as _VALORES_ESTADO_VALIDOS,
     columnas_por_patron as _columnas_por_patron,
     es_columna_id as _es_columna_id,
     detectar_columnas as _detectar_columnas,
@@ -85,6 +87,7 @@ ACCIONES_SOPORTADAS_M = {
     "id_duplicado": {"marcar_solo", "eliminar_fila", "editar_individualmente"},
     "formula_incorrecta": {"usar_sugerido", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "texto_inconsistente": {"usar_sugerido", "marcar_solo", "eliminar_fila", "editar_individualmente"},
+    "estado_invalido": {"valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
 }
 
 # _columnas_por_patron y _es_columna_id ahora vienen de data_cleaner.patrones
@@ -472,6 +475,7 @@ def generar_editor_m_puro(
     id_duplicado: str = "marcar_solo",
     formula_incorrecta: str = "marcar_solo",
     texto_inconsistente: str = "marcar_solo",
+    estado_invalido: str = "marcar_solo",
     columnas_fecha: Optional[List[str]] = None,
     fecha_min: Optional[str] = None,
     fecha_max: Optional[str] = None,
@@ -489,6 +493,8 @@ def generar_editor_m_puro(
     columnas_texto: Optional[List[str]] = None,
     umbral_similitud_texto: float = 0.85,
     max_cardinalidad_ratio_texto: float = 0.5,
+    columnas_estado: Optional[List[str]] = None,
+    valores_estado_validos: Optional[List[str]] = None,
     # --- correcciones puntuales (accion 'editar_individualmente') ---
     correcciones_individuales: Optional[Dict[tuple, object]] = None,
 ) -> str:
@@ -539,6 +545,7 @@ def generar_editor_m_puro(
     a_id = _accion_o_fallback("id_duplicado", id_duplicado, comentarios)
     a_formula = _accion_o_fallback("formula_incorrecta", formula_incorrecta, comentarios)
     a_texto = _accion_o_fallback("texto_inconsistente", texto_inconsistente, comentarios)
+    a_estado = _accion_o_fallback("estado_invalido", estado_invalido, comentarios)
 
     # Deteccion en 2 niveles: por nombre de columna primero (rapido); si
     # eso no encuentra nada, se revisan los VALORES reales como respaldo
@@ -555,6 +562,8 @@ def generar_editor_m_puro(
                             excluir_por_nombre=_PATRONES_NO_TELEFONO)
     cols_id = columnas_id if columnas_id is not None else [c for c in df.columns if _es_columna_id(c)]
     cols_texto = columnas_texto if columnas_texto is not None else _columnas_candidatas_texto(df, max_cardinalidad_ratio_texto)
+    cols_estado = columnas_estado if columnas_estado is not None else _columnas_por_patron(df, _PATRONES_ESTADO)
+    valores_estado = valores_estado_validos if valores_estado_validos is not None else _VALORES_ESTADO_VALIDOS
     col_total = columna_total or (_columnas_por_patron(df, _PATRONES_TOTAL) or [None])[0]
     col_cant = columna_cantidad or (_columnas_por_patron(df, _PATRONES_CANTIDAD) or [None])[0]
     col_precio = columna_precio or (_columnas_por_patron(df, _PATRONES_PRECIO) or [None])[0]
@@ -603,6 +612,7 @@ def generar_editor_m_puro(
         "faltante": a_faltante, "atipico": a_atipico, "tipo_invalido": a_tipo_invalido,
         "fecha_invalida": a_fecha, "email_invalido": a_email, "id_duplicado": a_id,
         "formula_incorrecta": a_formula, "texto_inconsistente": a_texto,
+        "estado_invalido": a_estado,
     }
     columnas_edicion_individual: List[Tuple[str, str]] = []
     if correcciones_individuales:
@@ -950,6 +960,29 @@ def generar_editor_m_puro(
                 f'  // AVISO: "email_invalido" quedo en "marcar_solo" para la columna '
                 f'"{col}", pero el codigo M puro no agrega columnas nuevas (ni '
                 f'Revisar_Email_{col}); solo se normalizo el formato del correo.'
+            )
+
+    # -- 10) Estado/status -------------------------------------------------------
+    lista_estado_m = "{" + ", ".join(_m_str(v.lower()) for v in valores_estado) + "}"
+    for col in cols_estado:
+        if col not in df.columns:
+            continue
+        nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
+        chequeo_estado_invalido = (
+            f"_ <> null and not List.Contains({lista_estado_m}, Text.Lower(Text.Trim(Text.From(_))))"
+        )
+        if a_estado == "valor_fijo":
+            valor_fijo_estado = valores_fijos.get(col, None)
+            reemplazo = _m_str(valor_fijo_estado) if valor_fijo_estado is not None else "null"
+            cb.agregar(f"EstadoValidado_{nombre_col_id}",
+                       "Table.TransformColumns({prev}, {{" + _m_str(col) +
+                       f", each if {chequeo_estado_invalido} then {reemplazo} else _, type text}}}})")
+        else:
+            comentarios.append(
+                f'  // AVISO: "estado_invalido" quedo en "{a_estado}" para la columna '
+                f'"{col}", pero el codigo M puro no agrega columnas nuevas (ni '
+                f'Revisar_Estado_{col}); no se genero ningun paso de marcado para esta columna. '
+                f'Valores validos configurados: {", ".join(valores_estado)}.'
             )
 
     funciones_extra = ""
