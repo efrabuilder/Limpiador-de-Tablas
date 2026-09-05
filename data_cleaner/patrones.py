@@ -102,6 +102,108 @@ def es_columna_id(col) -> bool:
 
 
 # -----------------------------------------------------------------------------
+# Identificadores alfanumericos/numericos que NO son telefono aunque su
+# CONTENIDO tenga una cantidad de digitos parecida (7-15) a un numero de
+# celular: numero de chasis (VIN), numero de motor, placa, numero de serie,
+# lote, SKU, IMEI, numero de cuenta/poliza/factura, etc. Sin esta lista, la
+# deteccion por CONTENIDO de telefono (Nivel 2 de detectar_columnas, el
+# respaldo que se usa cuando ninguna columna del dataset se llama "telefono"
+# o similar) podia marcar por error una de estas columnas como telefono solo
+# porque, al quitarle los caracteres no numericos, la cantidad de digitos
+# quedaba dentro del rango esperado. Se organiza por rubro para que sea facil
+# agregar mas terminos sin tener que revisar toda la lista de una vez.
+# -----------------------------------------------------------------------------
+PATRONES_IDENTIFICADORES_NO_TELEFONO: dict[str, Tuple[str, ...]] = {
+    "vehiculo": (
+        "chasis", "vin", "motor", "numero_motor", "serie_motor",
+        "placa", "matricula", "patente",
+    ),
+    "producto_inventario": (
+        "sku", "codigo_barras", "ean", "upc", "gtin", "numero_serie",
+        "serie", "numero_lote", "lote", "numero_parte", "part_number",
+        "numero_pieza", "referencia",
+    ),
+    "documento_financiero": (
+        "numero_cuenta", "cuenta", "iban", "swift", "numero_poliza",
+        "poliza", "numero_contrato", "contrato", "numero_factura",
+        "factura", "expediente", "numero_expediente",
+    ),
+    "dispositivo": (
+        "imei", "mac", "numero_serial", "serial",
+    ),
+}
+
+# Version "aplanada" (todos los rubros juntos) para usar directo como
+# `excluir_por_nombre` en detectar_columnas().
+PATRONES_NO_TELEFONO: Tuple[str, ...] = tuple(
+    p for patrones in PATRONES_IDENTIFICADORES_NO_TELEFONO.values() for p in patrones
+)
+
+
+# -----------------------------------------------------------------------------
+# Valores de texto que, dentro de una columna de fecha de COBRO, PAGO,
+# ENTREGA o INGRESO, significan "todavia no ocurrio" en vez de un dato
+# corrupto: la transaccion esta pendiente, no aplica, o simplemente no tiene
+# fecha aun. Sin esta lista, detectar_fechas_invalidas() marcaba "Pendiente",
+# "No aplica", etc. como "Formato de fecha no reconocido" -- un falso
+# positivo, porque esas columnas legitimamente no tienen fecha hasta que se
+# cobra/paga/entrega. Se organiza por concepto para poder agregar mas
+# variantes sin revisar toda la lista de una vez. Los valores se comparan ya
+# normalizados (sin acentos, minusculas, espacios colapsados) via
+# `es_valor_fecha_pendiente`.
+# -----------------------------------------------------------------------------
+VALORES_FECHA_PENDIENTE_POR_CONCEPTO: dict[str, Tuple[str, ...]] = {
+    "pendiente": (
+        "pendiente", "pendiente de pago", "pendiente de cobro",
+        "pendiente de entrega", "por cobrar", "por pagar", "por entregar",
+    ),
+    "no_aplica": (
+        "no aplica", "n/a", "na", "no corresponde",
+    ),
+    "sin_fecha": (
+        "sin fecha", "no fecha", "no definido", "no definida", "sin definir",
+        "null", "none", "-",
+    ),
+}
+
+VALORES_FECHA_PENDIENTE: Tuple[str, ...] = tuple(
+    v for valores in VALORES_FECHA_PENDIENTE_POR_CONCEPTO.values() for v in valores
+)
+
+# Columnas de fecha donde tiene sentido el concepto de "pendiente" (una
+# transaccion que aun no ocurre) -- a diferencia de, por ejemplo, una fecha
+# de nacimiento, donde "pendiente" no aplica y un valor asi seguiria siendo
+# un dato invalido.
+PATRONES_FECHA_CON_PENDIENTE: Tuple[str, ...] = ("cobro", "pago", "entrega", "ingreso")
+
+
+def _normalizar_valor_texto(valor) -> str:
+    """Normaliza un valor de celda (sin acentos, minusculas, espacios
+    colapsados) para compararlo contra VALORES_FECHA_PENDIENTE u otras
+    listas de valores de texto conocidos."""
+    s = str(valor).strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(s.split())
+
+
+def es_valor_fecha_pendiente(valor) -> bool:
+    """True si `valor` es un texto tipo 'Pendiente', 'No aplica', 'Sin fecha',
+    etc. (ver VALORES_FECHA_PENDIENTE) -- un estado valido para una fecha de
+    cobro/pago/entrega/ingreso que aun no ocurre, no un dato corrupto."""
+    if valor is None:
+        return False
+    return _normalizar_valor_texto(valor) in VALORES_FECHA_PENDIENTE
+
+
+def columna_admite_fecha_pendiente(col) -> bool:
+    """True si el NOMBRE de la columna corresponde a un concepto de fecha
+    donde 'pendiente'/'no aplica'/'sin fecha' es un valor legitimo (cobro,
+    pago, entrega, ingreso)."""
+    return coincide_patron(col, PATRONES_FECHA_CON_PENDIENTE)
+
+
+# -----------------------------------------------------------------------------
 # Vocabulario ampliado (bilingue espanol/ingles + sinonimos comunes de
 # distintos rubros: retail, nomina, salud, logistica, educacion).
 # -----------------------------------------------------------------------------
@@ -115,7 +217,7 @@ PATRONES_TELEFONO = (
 PATRONES_FECHA = (
     "fecha", "date", "fec", "dob", "birth", "nacimiento",
     "created_at", "updated_at", "timestamp", "vencimiento", "expiry",
-    "ingreso", "egreso",
+    "ingreso", "egreso", "cobro", "pago", "entrega",
 )
 PATRONES_TOTAL = (
     "total", "monto", "importe", "amount", "subtotal", "salario", "sueldo",
@@ -264,11 +366,21 @@ def detectar_columnas(
     patrones_nombre: Iterable[str],
     detector_contenido=None,
     excluir: Optional[Iterable[str]] = None,
+    excluir_por_nombre: Optional[Iterable[str]] = None,
 ) -> List[str]:
     """Nivel 1 (nombre) primero; si no encuentra NADA y hay un
     `detector_contenido` (funcion serie->bool), intenta Nivel 2 sobre las
     columnas de texto que no estén ya excluidas (ej. columnas ID, u otras
-    ya asignadas a otra regla)."""
+    ya asignadas a otra regla).
+
+    `excluir_por_nombre` (opcional) es una lista de patrones de NOMBRE
+    (ej. PATRONES_NO_TELEFONO) que descartan una columna del Nivel 2 aunque
+    su contenido parezca calzar: sirve para que un "chasis", "motor" o
+    "numero_de_serie" con muchos digitos no se confunda con un telefono
+    solo por la cantidad de digitos que tiene. No afecta al Nivel 1: si la
+    columna ya se detecto por nombre como la regla que se esta buscando
+    (ej. una columna que de verdad se llama "telefono"), este parametro no
+    la excluye."""
     excluir = set(excluir or [])
     por_nombre = [c for c in columnas_por_patron(df, patrones_nombre) if c not in excluir]
     if por_nombre or detector_contenido is None:
@@ -276,6 +388,8 @@ def detectar_columnas(
     candidatas = []
     for c in df.columns:
         if c in excluir or es_columna_id(c):
+            continue
+        if excluir_por_nombre is not None and coincide_patron(c, excluir_por_nombre):
             continue
         # Nivel 2 es un respaldo pensado para columnas de TEXTO (nombres
         # de columna que no dicen nada, ej. "contacto_1", "campo_7").
@@ -292,7 +406,7 @@ def detectar_columnas(
     return candidatas
 
 
-# -----------------------------------------------------------------------------
+
 # Columnas a excluir del chequeo estadistico de atipicos (IQR / Z-score)
 # -----------------------------------------------------------------------------
 def columnas_excluir_de_atipicos(df: pd.DataFrame) -> List[str]:
@@ -309,5 +423,6 @@ def columnas_excluir_de_atipicos(df: pd.DataFrame) -> List[str]:
     cercania estadistica a la media).
     """
     cols_id = [c for c in df.columns if es_columna_id(c)]
-    cols_tel = detectar_columnas(df, PATRONES_TELEFONO, parece_telefono, excluir=cols_id)
+    cols_tel = detectar_columnas(df, PATRONES_TELEFONO, parece_telefono, excluir=cols_id,
+                                  excluir_por_nombre=PATRONES_NO_TELEFONO)
     return list(dict.fromkeys(cols_id + cols_tel))
