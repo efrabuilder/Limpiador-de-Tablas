@@ -31,6 +31,7 @@ DEFAULT_CONFIG_EXPORT = {
     "id_duplicado": "marcar_solo",
     "formula_incorrecta": "marcar_solo",
     "texto_inconsistente": "marcar_solo",
+    "estado_invalido": "marcar_solo",
 }
 
 # -----------------------------------------------------------------------------
@@ -51,13 +52,18 @@ _PATRONES_FECHA_FUERTE = ("fecha", "date", "fec", "dob", "birth", "nacimiento",
 # "codigo_cobro" se detecten como columna de fecha solo por el token
 # "pago"/"cobro" (ver misma logica, comentada en detalle, en
 # data_cleaner/patrones.py: PATRONES_FECHA_DEBIL / columnas_fecha_por_nombre).
-_PATRONES_FECHA_DEBIL = ("ingreso", "egreso", "cobro", "pago", "entrega")
+_PATRONES_FECHA_DEBIL = ("ingreso", "egreso", "cobro", "pago", "entrega", "poder")
 _PATRONES_FECHA = _PATRONES_FECHA_FUERTE + _PATRONES_FECHA_DEBIL
 _PATRONES_TOTAL = ("total", "monto", "importe", "amount", "subtotal",
                     "salario", "sueldo", "costo", "cost")
 _PATRONES_CANTIDAD = ("cantidad", "qty", "quantity", "cant", "unidades",
                        "horas", "hours", "peso", "weight")
 _PATRONES_PRECIO = ("precio", "price", "tarifa", "rate", "valor_unitario", "unit_price")
+_PATRONES_ESTADO = ("estado", "status")
+# Valores validos conocidos para una columna de estado/status -- ver
+# data_cleaner/patrones.py: VALORES_ESTADO_VALIDOS / es_valor_estado_valido
+# (misma logica, copiada aqui de forma autocontenida).
+_VALORES_ESTADO_VALIDOS = ("activo", "inactivo", "pendiente")
 _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \\
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
 # Identificadores alfanumericos/numericos que NO son telefono aunque su
@@ -230,6 +236,14 @@ def _normalizar_texto(valor):
     return " ".join(s.split())
 
 
+def _es_valor_estado_valido(valor, valores_validos=None):
+    if valor is None:
+        return False
+    validos = valores_validos if valores_validos is not None else _VALORES_ESTADO_VALIDOS
+    validos_norm = {_normalizar_texto(v) for v in validos}
+    return _normalizar_texto(valor) in validos_norm
+
+
 def _columnas_fecha_por_nombre(df):
     """Ver columnas_fecha_por_nombre() en data_cleaner/patrones.py (misma
     logica, copiada aqui de forma autocontenida)."""
@@ -312,6 +326,19 @@ def _detectar_telefonos_invalidos(df, min_digitos=7, max_digitos=15, permitir_co
                 hallazgos.append({"tipo": "telefono_invalido", "columna": col, "fila": int(idx),
                                    "valor_original": val,
                                    "detalle": f"Formato/longitud de telefono invalido (se esperaban {min_digitos}-{max_digitos} digitos)"})
+    return hallazgos
+
+
+def _detectar_estados_invalidos(df, valores_validos=None):
+    hallazgos = []
+    for col in _columnas_por_patron(df, _PATRONES_ESTADO):
+        for idx, val in df[col].items():
+            if pd.isna(val):
+                continue
+            if not _es_valor_estado_valido(val, valores_validos):
+                hallazgos.append({"tipo": "estado_invalido", "columna": col, "fila": int(idx),
+                                   "valor_original": val,
+                                   "detalle": f"Valor de estado no reconocido (validos: {', '.join(valores_validos or _VALORES_ESTADO_VALIDOS)})"})
     return hallazgos
 
 
@@ -462,6 +489,7 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
     hallazgos += _detectar_ids_duplicados(df)
     hallazgos += _detectar_formula_incorrecta(df)
     hallazgos += _detectar_texto_inconsistente(df)
+    hallazgos += _detectar_estados_invalidos(df)
 
     for col in _columnas_para_atipicos(df):
         serie = pd.to_numeric(df[col], errors="coerce")
@@ -504,6 +532,7 @@ def _valor_reemplazo(df, columna, accion, valor_fijo=None):
 _TIPOS_VALOR_FIJO_DIRECTO = {
     "fecha_invalida", "email_invalido", "telefono_invalido",
     "id_duplicado", "formula_incorrecta", "texto_inconsistente",
+    "estado_invalido",
 }
 _TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente"}
 
@@ -511,12 +540,14 @@ _TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente"}
 def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, valores_fijos,
                    fecha_invalida="marcar_solo", email_invalido="marcar_solo",
                    telefono_invalido="marcar_solo", id_duplicado="marcar_solo",
-                   formula_incorrecta="marcar_solo", texto_inconsistente="marcar_solo"):
+                   formula_incorrecta="marcar_solo", texto_inconsistente="marcar_solo",
+                   estado_invalido="marcar_solo"):
     config = {"faltante": faltante, "duplicado": duplicado,
               "atipico": atipico, "tipo_invalido": tipo_invalido,
               "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
               "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
-              "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente}
+              "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+              "estado_invalido": estado_invalido}
 
     df_limpio = df.copy()
     hallazgos = _detectar_hallazgos(df, factor_iqr=factor_iqr)
@@ -615,6 +646,7 @@ def _bloque_config(config: Dict[str, str], factor_iqr: float, valores_fijos: Opt
         f"ACCION_ID_DUPLICADO = {cfg['id_duplicado']!r}\n"
         f"ACCION_FORMULA_INCORRECTA = {cfg['formula_incorrecta']!r}\n"
         f"ACCION_TEXTO_INCONSISTENTE = {cfg['texto_inconsistente']!r}\n"
+        f"ACCION_ESTADO_INVALIDO = {cfg['estado_invalido']!r}\n"
         f"FACTOR_IQR = {factor_iqr!r}\n"
         f"VALORES_FIJOS = {valores_fijos!r}\n"
     )
@@ -656,6 +688,7 @@ dataset_limpio, reporte_limpieza = limpiar_tabla(
     fecha_invalida=ACCION_FECHA_INVALIDA, email_invalido=ACCION_EMAIL_INVALIDO,
     telefono_invalido=ACCION_TELEFONO_INVALIDO, id_duplicado=ACCION_ID_DUPLICADO,
     formula_incorrecta=ACCION_FORMULA_INCORRECTA, texto_inconsistente=ACCION_TEXTO_INCONSISTENTE,
+    estado_invalido=ACCION_ESTADO_INVALIDO,
 )
 '''
     return cabecera + _bloque_config(config, factor_iqr, valores_fijos) + "\n\n" + _NUCLEO_LOGICA + pie
@@ -710,6 +743,7 @@ def _main_cli():
         fecha_invalida=ACCION_FECHA_INVALIDA, email_invalido=ACCION_EMAIL_INVALIDO,
         telefono_invalido=ACCION_TELEFONO_INVALIDO, id_duplicado=ACCION_ID_DUPLICADO,
         formula_incorrecta=ACCION_FORMULA_INCORRECTA, texto_inconsistente=ACCION_TEXTO_INCONSISTENTE,
+        estado_invalido=ACCION_ESTADO_INVALIDO,
     )
 
     base, _ext = os.path.splitext(os.path.basename(ruta))
