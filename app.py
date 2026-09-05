@@ -51,7 +51,7 @@ OPCIONES_ACCION = {
     "tipo_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
     "fecha_invalida": ["eliminar_fila", "valor_fijo", "marcar_solo"],
     "email_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
-    "telefono_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "telefono_invalido": ["editar_individualmente", "eliminar_fila", "valor_fijo", "marcar_solo"],
     "id_duplicado": ["eliminar_fila", "valor_fijo", "marcar_solo"],
     "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
     "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
@@ -92,6 +92,21 @@ NOMBRES_ACCION = {
     "usar_sugerido": "Usar el valor sugerido por el análisis",
     "eliminar_fila": "Eliminar la fila",
     "marcar_solo": "Solo marcar en el reporte (no modifica el dato)",
+    "editar_individualmente": "Editar cada uno por separado (corregir dígito a dígito)",
+}
+
+# País(es) disponibles para el rango de dígitos de teléfono/celular (ver
+# patrones.DIGITOS_TELEFONO_PAIS). Se usa tanto para el análisis inicial
+# como para la generación del M puro, para no repetir la lista.
+PAISES_TELEFONO_DISPONIBLES = {
+    "Costa Rica": "cr", "México": "mexico", "Colombia": "colombia",
+    "Argentina": "argentina", "España": "espana", "Estados Unidos": "us",
+    "Panamá": "panama", "Guatemala": "guatemala", "Honduras": "honduras",
+    "Nicaragua": "nicaragua", "El Salvador": "el_salvador", "Chile": "chile",
+    "Perú": "peru", "Ecuador": "ecuador", "Venezuela": "venezuela",
+    "Brasil": "brasil", "Uruguay": "uruguay", "Bolivia": "bolivia",
+    "República Dominicana": "republica_dominicana", "Reino Unido": "reino_unido",
+    "Alemania": "alemania", "Francia": "francia", "Canadá": "canada",
 }
 
 
@@ -188,6 +203,36 @@ with st.sidebar:
                                 "ambos": "Ambos (fusionados)"}[v],
     )
 
+    st.divider()
+    st.header("3. Teléfono")
+    st.caption("Rango de dígitos aceptado al analizar la columna de teléfono.")
+    modo_telefono_sidebar = st.radio(
+        "Rango de dígitos", ["Automático por país", "Rango manual"],
+        horizontal=True, key="modo_telefono_sidebar",
+    )
+    digitos_telefono_sidebar = None
+    paises_telefono_sidebar = None
+    if modo_telefono_sidebar == "Automático por país":
+        paises_sel_sidebar = st.multiselect(
+            "País(es) del teléfono",
+            options=list(PAISES_TELEFONO_DISPONIBLES.keys()),
+            default=["Costa Rica"],
+            help="Vacío = rango internacional amplio (7-15 dígitos, estándar E.164). "
+                 "Con varios países, se acepta la UNIÓN de sus rangos típicos de celular.",
+            key="paises_telefono_sidebar",
+        )
+        paises_telefono_sidebar = [PAISES_TELEFONO_DISPONIBLES[n] for n in paises_sel_sidebar] or None
+    else:
+        digitos_tel_sidebar = st.number_input(
+            "Dígitos exactos esperados", min_value=1, max_value=20, value=8,
+            key="digitos_tel_sidebar",
+        )
+        digitos_telefono_sidebar = (int(digitos_tel_sidebar), int(digitos_tel_sidebar))
+    permitir_codigo_pais_sidebar = st.checkbox(
+        "Aceptar el número con código de país adelante (ej. +506 ...)",
+        value=True, key="permitir_codigo_pais_sidebar",
+    )
+
     analizar_btn = st.button(
         "🔍 Analizar tabla", type="primary",
         disabled=st.session_state.get("df") is None,
@@ -205,10 +250,16 @@ st.caption(f"{len(df)} filas × {len(df.columns)} columnas")
 st.dataframe(df.head(20), use_container_width=True)
 
 if analizar_btn:
-    st.session_state.resultado = analizar(df, metodo_atipicos=metodo_atipicos)
+    st.session_state.resultado = analizar(
+        df, metodo_atipicos=metodo_atipicos,
+        digitos_telefono=digitos_telefono_sidebar,
+        paises_telefono=paises_telefono_sidebar,
+        permitir_codigo_pais_telefono=permitir_codigo_pais_sidebar,
+    )
     st.session_state.pop("df_limpio", None)
     st.session_state.pop("registro", None)
     st.session_state.pop("tablas_reporte", None)
+    st.session_state.pop("correcciones_individuales", None)
 
 resultado = st.session_state.get("resultado")
 if resultado is None:
@@ -265,6 +316,7 @@ st.caption("Elija qué hacer con cada tipo de problema encontrado.")
 
 config: dict[str, str] = {}
 valores_fijos: dict[str, object] = {}
+correcciones_individuales: dict[tuple, object] = {}
 
 for tipo, cantidad in por_tipo.items():
     if tipo not in OPCIONES_ACCION:
@@ -299,6 +351,35 @@ for tipo, cantidad in por_tipo.items():
                 if valor != "":
                     valores_fijos[col_name] = valor
 
+    elif accion == "editar_individualmente":
+        issues_tipo = [i for i in resultado.issues if i.tipo == tipo]
+        st.caption(
+            "Edite la columna **Valor corregido** fila por fila (puede corregir un solo "
+            "carácter/dígito sin retipear todo el número). Deje igual al original si ese "
+            "registro no necesita cambio."
+        )
+        tabla_edicion = pd.DataFrame([
+            {
+                "Fila": i.fila,
+                "Columna": i.columna,
+                "Valor original": "" if i.valor_original is None else str(i.valor_original),
+                "Valor corregido": "" if i.valor_original is None else str(i.valor_original),
+            }
+            for i in issues_tipo
+        ])
+        tabla_editada = st.data_editor(
+            tabla_edicion,
+            key=f"editor_individual_{tipo}",
+            use_container_width=True,
+            hide_index=True,
+            disabled=["Fila", "Columna", "Valor original"],
+            num_rows="fixed",
+        )
+        for _, fila_editada in tabla_editada.iterrows():
+            clave = (tipo, fila_editada["Columna"], int(fila_editada["Fila"]))
+            valor_corr = fila_editada["Valor corregido"]
+            correcciones_individuales[clave] = None if valor_corr == "" else valor_corr
+
     st.write("")
 
 limpiar_btn = st.button("🧽 Limpiar tabla y generar reporte", type="primary")
@@ -317,7 +398,10 @@ if limpiar_btn:
             "Escriba un valor fijo de reemplazo para cada columna indicada antes de continuar."
         )
     else:
-        df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos)
+        df_limpio, registro = limpiar(
+            df, resultado.issues, config=config, valores_fijos=valores_fijos,
+            correcciones_individuales=correcciones_individuales,
+        )
         tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=st.session_state.nombre_fuente)
         st.session_state.df_limpio = df_limpio
         st.session_state.registro = registro
@@ -438,16 +522,7 @@ if st.session_state.get("df_limpio") is not None:
             value="TuPasoAnterior", key="nombre_paso_puro",
         )
 
-        PAISES_TELEFONO_DISPONIBLES = {
-            "Costa Rica": "cr", "México": "mexico", "Colombia": "colombia",
-            "Argentina": "argentina", "España": "espana", "Estados Unidos": "us",
-            "Panamá": "panama", "Guatemala": "guatemala", "Honduras": "honduras",
-            "Nicaragua": "nicaragua", "El Salvador": "el_salvador", "Chile": "chile",
-            "Perú": "peru", "Ecuador": "ecuador", "Venezuela": "venezuela",
-            "Brasil": "brasil", "Uruguay": "uruguay", "Bolivia": "bolivia",
-            "República Dominicana": "republica_dominicana", "Reino Unido": "reino_unido",
-            "Alemania": "alemania", "Francia": "francia", "Canadá": "canada",
-        }
+        PAISES_TELEFONO_DISPONIBLES_M = PAISES_TELEFONO_DISPONIBLES
 
         col_tel1, col_tel2 = st.columns(2)
         with col_tel1:
@@ -455,6 +530,7 @@ if st.session_state.get("df_limpio") is not None:
                 "Rango de dígitos de teléfono",
                 ["Automático por país", "Rango manual"],
                 horizontal=True,
+                key="modo_telefono_mpuro",
             )
         digitos_telefono_manual = None
         paises_telefono_sel = None
@@ -462,16 +538,18 @@ if st.session_state.get("df_limpio") is not None:
             with col_tel2:
                 paises_sel_nombres = st.multiselect(
                     "País(es) del teléfono",
-                    options=list(PAISES_TELEFONO_DISPONIBLES.keys()),
+                    options=list(PAISES_TELEFONO_DISPONIBLES_M.keys()),
                     default=["Costa Rica"],
                     help="Vacío = rango internacional amplio (7-15 dígitos, estándar E.164). "
                          "Con varios países, se acepta la UNIÓN de sus rangos típicos de celular.",
+                    key="paises_telefono_mpuro",
                 )
-            paises_telefono_sel = [PAISES_TELEFONO_DISPONIBLES[n] for n in paises_sel_nombres] or None
+            paises_telefono_sel = [PAISES_TELEFONO_DISPONIBLES_M[n] for n in paises_sel_nombres] or None
         else:
             with col_tel2:
                 digitos_tel = st.number_input(
                     "Dígitos exactos esperados en teléfono", min_value=1, max_value=20, value=8,
+                    key="digitos_tel_mpuro",
                 )
             digitos_telefono_manual = (int(digitos_tel), int(digitos_tel))
 
@@ -481,11 +559,13 @@ if st.session_state.get("df_limpio") is not None:
                 "Primeros dígitos válidos de teléfono (coma-separado; vacío = no validar)",
                 value="2,4,5,6,7,8",
                 help="Ej. para Costa Rica: 2,4,5,6,7,8. Déjelo vacío si su país no aplica esta regla.",
+                key="primeros_digitos_mpuro",
             )
         with col_tel4:
             permitir_codigo_pais = st.checkbox(
                 "Aceptar el número con código de país adelante (ej. +506 ...)",
                 value=True,
+                key="permitir_codigo_pais_mpuro",
             )
         desglosar_digitos = st.checkbox(
             "Agregar columnas para ver y corregir cada dígito de teléfono por separado",
@@ -493,6 +573,7 @@ if st.session_state.get("df_limpio") is not None:
             help="Genera una columna por cada posición del teléfono y una tabla editable "
                  "(TablaCorreccionesDigitosTelefono) al inicio del código M, para corregir "
                  "un dígito puntual sin tocar el dato original y sin que se pierda al refrescar.",
+            key="desglosar_digitos_mpuro",
         )
         primeros_digitos_lista = (
             [d.strip() for d in primeros_digitos_txt.split(",") if d.strip()]
