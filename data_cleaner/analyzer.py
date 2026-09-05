@@ -16,6 +16,8 @@ reglas de negocio comunes en datasets tabulares:
                            operación sobre otras (ej. Total ≠ Cantidad × Precio)
     texto_inconsistente   Variantes / errores de tipeo de un mismo valor
                            categórico (ej. "San Jose" vs "San José")
+    estado_invalido        Valor de una columna de estado/status que no es
+                           activo, inactivo ni pendiente
 
 Todos estos chequeos son opcionales y auto-detectan columnas candidatas por
 el nombre (auto_detectar_columnas=True) si no se indican explícitamente,
@@ -36,7 +38,8 @@ from typing import Any, List, Optional, Tuple
 class Issue:
     tipo: str            # 'faltante' | 'duplicado' | 'atipico' | 'tipo_invalido' |
                           # 'fecha_invalida' | 'email_invalido' | 'telefono_invalido' |
-                          # 'id_duplicado' | 'formula_incorrecta' | 'texto_inconsistente'
+                          # 'id_duplicado' | 'formula_incorrecta' | 'texto_inconsistente' |
+                          # 'estado_invalido'
     columna: Optional[str]
     fila: int             # índice original del DataFrame (0-based)
     valor_original: Any
@@ -195,6 +198,9 @@ from data_cleaner.patrones import (
     PATRONES_IMPUESTO as _PATRONES_IMPUESTO,
     PATRONES_ENVIO as _PATRONES_ENVIO,
     PATRONES_NO_TELEFONO as _PATRONES_NO_TELEFONO,
+    PATRONES_ESTADO as _PATRONES_ESTADO,
+    VALORES_ESTADO_VALIDOS as _VALORES_ESTADO_VALIDOS,
+    es_valor_estado_valido as _es_valor_estado_valido,
     columna_admite_fecha_pendiente as _columna_admite_fecha_pendiente,
     es_valor_fecha_pendiente as _es_valor_fecha_pendiente,
     columnas_por_patron as _columnas_por_patron,
@@ -564,6 +570,35 @@ def detectar_formula_incorrecta(df: pd.DataFrame, columna_total: Optional[str] =
 
 
 # ---------------------------------------------------------------------------
+# Estado / status
+# ---------------------------------------------------------------------------
+
+def detectar_estados_invalidos(df: pd.DataFrame, columnas: Optional[List[str]] = None,
+                                valores_validos: Optional[List[str]] = None,
+                                auto: bool = True) -> List[Issue]:
+    """
+    Marca celdas de una columna de estado/status cuyo valor no está entre
+    los válidos conocidos (por defecto: activo, inactivo, pendiente). La
+    comparación ignora acentos, mayúsculas y espacios extra, así que
+    "Activo", "ACTIVO " o "áctivo" cuentan como válidos. Los valores
+    vacíos no se reportan aquí (ya los cubre detectar_faltantes).
+    """
+    issues = []
+    cols = columnas if columnas is not None else (_columnas_por_patron(df, _PATRONES_ESTADO) if auto else [])
+    validos = valores_validos if valores_validos is not None else _VALORES_ESTADO_VALIDOS
+    for col in cols:
+        if col not in df.columns:
+            continue
+        for idx, val in df[col].items():
+            if pd.isna(val):
+                continue
+            if not _es_valor_estado_valido(val, validos):
+                issues.append(Issue("estado_invalido", col, int(idx), val,
+                                     f"Valor de estado no reconocido (válidos: {', '.join(validos)})"))
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # Texto inconsistente: variantes / errores de tipeo de un mismo valor categórico
 # ---------------------------------------------------------------------------
 
@@ -696,7 +731,9 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
              columna_envio: Optional[str] = None,
              tolerancia_formula: float = 0.01,
              detectar_texto: bool = True, columnas_texto: Optional[List[str]] = None,
-             umbral_similitud_texto: float = 0.85) -> AnalysisResult:
+             umbral_similitud_texto: float = 0.85,
+             detectar_estados: bool = True, columnas_estado: Optional[List[str]] = None,
+             valores_estado_validos: Optional[List[str]] = None) -> AnalysisResult:
     """
     Ejecuta todas las detecciones y consolida los resultados.
 
@@ -734,6 +771,9 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
     if detectar_texto:
         issues += detectar_texto_inconsistente(df, columnas=columnas_texto, auto=auto_detectar_columnas,
                                                 umbral_similitud=umbral_similitud_texto)
+    if detectar_estados:
+        issues += detectar_estados_invalidos(df, columnas=columnas_estado, valores_validos=valores_estado_validos,
+                                              auto=auto_detectar_columnas)
 
     if metodo_atipicos == "iqr":
         issues += detectar_atipicos_iqr(df, factor=factor_iqr, columnas=columnas_numericas)
