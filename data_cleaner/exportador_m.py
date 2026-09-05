@@ -61,6 +61,7 @@ from data_cleaner.patrones import (
     PATRONES_TOTAL as _PATRONES_TOTAL,
     PATRONES_CANTIDAD as _PATRONES_CANTIDAD,
     PATRONES_PRECIO as _PATRONES_PRECIO,
+    PATRONES_NO_TELEFONO as _PATRONES_NO_TELEFONO,
     columnas_por_patron as _columnas_por_patron,
     es_columna_id as _es_columna_id,
     detectar_columnas as _detectar_columnas,
@@ -549,7 +550,8 @@ def generar_editor_m_puro(
     cols_email = columnas_email if columnas_email is not None else \
         _detectar_columnas(df, _PATRONES_EMAIL, _parece_email, excluir=cols_fecha)
     cols_tel = columnas_telefono if columnas_telefono is not None else \
-        _detectar_columnas(df, _PATRONES_TELEFONO, _parece_telefono, excluir=cols_fecha + cols_email)
+        _detectar_columnas(df, _PATRONES_TELEFONO, _parece_telefono, excluir=cols_fecha + cols_email,
+                            excluir_por_nombre=_PATRONES_NO_TELEFONO)
     cols_id = columnas_id if columnas_id is not None else [c for c in df.columns if _es_columna_id(c)]
     cols_texto = columnas_texto if columnas_texto is not None else _columnas_candidatas_texto(df, max_cardinalidad_ratio_texto)
     col_total = columna_total or (_columnas_por_patron(df, _PATRONES_TOTAL) or [None])[0]
