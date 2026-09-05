@@ -36,7 +36,7 @@ OPCIONES_ACCION = {
     "tipo_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
     "fecha_invalida": ["eliminar_fila", "valor_fijo", "marcar_solo"],
     "email_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
-    "telefono_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "telefono_invalido": ["editar_individualmente", "eliminar_fila", "valor_fijo", "marcar_solo"],
     "id_duplicado": ["eliminar_fila", "valor_fijo", "marcar_solo"],
     "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
     "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
@@ -53,6 +53,20 @@ NOMBRES_TIPO = {
     "id_duplicado": "IDs duplicados",
     "formula_incorrecta": "Total ≠ Cantidad × Precio",
     "texto_inconsistente": "Variantes de texto",
+}
+
+# País(es) disponibles para el rango de dígitos de teléfono/celular (ver
+# patrones.DIGITOS_TELEFONO_PAIS), reutilizado tanto para configurar el
+# análisis como para la exportación de M puro.
+PAISES_TELEFONO_DISPONIBLES = {
+    "Costa Rica": "cr", "México": "mexico", "Colombia": "colombia",
+    "Argentina": "argentina", "España": "espana", "Estados Unidos": "us",
+    "Panamá": "panama", "Guatemala": "guatemala", "Honduras": "honduras",
+    "Nicaragua": "nicaragua", "El Salvador": "el_salvador", "Chile": "chile",
+    "Perú": "peru", "Ecuador": "ecuador", "Venezuela": "venezuela",
+    "Brasil": "brasil", "Uruguay": "uruguay", "Bolivia": "bolivia",
+    "República Dominicana": "republica_dominicana", "Reino Unido": "reino_unido",
+    "Alemania": "alemania", "Francia": "francia", "Canadá": "canada",
 }
 
 
@@ -74,6 +88,14 @@ class LimpiadorApp(tk.Tk):
 
         self.accion_vars: dict[str, tk.StringVar] = {}
         self.valor_fijo_vars: dict[str, tk.StringVar] = {}
+        # (tipo, columna, fila) -> valor corregido, para la accion
+        # "editar_individualmente" (ver _abrir_editor_individual).
+        self.correcciones_individuales: dict[tuple, object] = {}
+
+        # Configuracion de telefono para analizar_tabla (ver _configurar_telefono).
+        self.paises_telefono: list[str] | None = ["cr"]
+        self.digitos_telefono_manual: tuple[int, int] | None = None
+        self.permitir_codigo_pais_telefono: bool = True
 
         self._construir_layout()
 
@@ -85,6 +107,7 @@ class LimpiadorApp(tk.Tk):
         barra.pack(fill="x")
 
         ttk.Button(barra, text="📂 Abrir archivo (CSV/Excel)", command=self.abrir_archivo).pack(side="left")
+        ttk.Button(barra, text="🔌 Conectar a SQL...", command=self.conectar_sql).pack(side="left", padx=(6, 0))
         self.lbl_archivo = ttk.Label(barra, text="Ningún archivo cargado.")
         self.lbl_archivo.pack(side="left", padx=10)
 
@@ -93,6 +116,7 @@ class LimpiadorApp(tk.Tk):
         ttk.Combobox(barra, textvariable=self.metodo_var, values=["iqr", "zscore", "ambos"],
                      width=8, state="readonly").pack(side="left")
 
+        ttk.Button(barra, text="📞 Teléfono...", command=self.configurar_telefono).pack(side="left", padx=(10, 0))
         ttk.Button(barra, text="🔍 Analizar", command=self.analizar_tabla).pack(side="left", padx=10)
 
         # --- Panel central dividido: vista previa arriba, config abajo ---
@@ -190,6 +214,18 @@ class LimpiadorApp(tk.Tk):
         self.wait_window(ventana)
         return resultado["hoja"]
 
+    def _dataframe_cargado(self, df: pd.DataFrame, etiqueta: str) -> None:
+        """Pasos comunes tras cargar datos, sin importar el origen (archivo o SQL)."""
+        self.df = df
+        self.resultado = None
+        self.df_limpio = None
+        self.correcciones_individuales.clear()
+        self.lbl_archivo.config(text=f"{etiqueta}  ({len(df)} filas × {len(df.columns)} cols)")
+        self._llenar_tabla(self.tabla_datos, df)
+        for widget in self.marco_tipos.winfo_children():
+            widget.destroy()
+        self.status_var.set("Datos cargados. Presione Analizar.")
+
     def abrir_archivo(self) -> None:
         ruta = filedialog.askopenfilename(
             title="Seleccionar archivo",
@@ -216,15 +252,181 @@ class LimpiadorApp(tk.Tk):
             messagebox.showerror("Error al cargar", str(exc))
             return
 
-        self.df = df
         self.ruta_actual = ruta
-        self.resultado = None
-        self.df_limpio = None
-        self.lbl_archivo.config(text=f"{os.path.basename(ruta)}  ({len(df)} filas × {len(df.columns)} cols)")
-        self._llenar_tabla(self.tabla_datos, df)
-        for widget in self.marco_tipos.winfo_children():
-            widget.destroy()
-        self.status_var.set("Archivo cargado. Presione Analizar.")
+        self._dataframe_cargado(df, os.path.basename(ruta))
+
+    def conectar_sql(self) -> None:
+        """
+        Conecta a una base de datos existente via SQLAlchemy (load_table en
+        data_cleaner/loaders.py) y trae una tabla o el resultado de una
+        consulta al flujo normal de analisis/limpieza. Segun el motor
+        elegido hace falta el driver correspondiente instalado (ver
+        requirements.txt: psycopg2-binary/pymysql/pyodbc).
+        """
+        ventana = tk.Toplevel(self)
+        ventana.title("Conectar a una base de datos SQL")
+        ventana.geometry("440x420")
+        ventana.transient(self)
+        ventana.grab_set()
+
+        motores = ["PostgreSQL", "MySQL", "SQL Server", "SQLite", "Otra (cadena de conexión manual)"]
+        motor_var = tk.StringVar(value=motores[0])
+        ttk.Label(ventana, text="Motor de base de datos:").pack(anchor="w", padx=15, pady=(15, 2))
+        ttk.Combobox(ventana, textvariable=motor_var, values=motores, state="readonly").pack(fill="x", padx=15)
+
+        marco_campos = ttk.Frame(ventana)
+        marco_campos.pack(fill="x", padx=15, pady=10)
+
+        campos_vars = {
+            "host": tk.StringVar(value="localhost"), "puerto": tk.StringVar(),
+            "usuario": tk.StringVar(), "clave": tk.StringVar(), "basedatos": tk.StringVar(),
+            "ruta_sqlite": tk.StringVar(), "cadena_manual": tk.StringVar(),
+        }
+        _puertos_defecto = {"PostgreSQL": "5432", "MySQL": "3306", "SQL Server": "1433"}
+
+        def _redibujar_campos(*_args):
+            for w in marco_campos.winfo_children():
+                w.destroy()
+            motor = motor_var.get()
+            if motor == "SQLite":
+                ttk.Label(marco_campos, text="Ruta del archivo .db:").pack(anchor="w")
+                ttk.Entry(marco_campos, textvariable=campos_vars["ruta_sqlite"]).pack(fill="x")
+            elif motor == "Otra (cadena de conexión manual)":
+                ttk.Label(marco_campos, text="Cadena de conexión SQLAlchemy completa:").pack(anchor="w")
+                ttk.Entry(marco_campos, textvariable=campos_vars["cadena_manual"], show="•").pack(fill="x")
+            else:
+                campos_vars["puerto"].set(_puertos_defecto.get(motor, ""))
+                for etiqueta, clave, oculto in [
+                    ("Host", "host", False), ("Puerto", "puerto", False),
+                    ("Usuario", "usuario", False), ("Contraseña", "clave", True),
+                    ("Base de datos", "basedatos", False),
+                ]:
+                    ttk.Label(marco_campos, text=f"{etiqueta}:").pack(anchor="w")
+                    ttk.Entry(marco_campos, textvariable=campos_vars[clave],
+                              show="•" if oculto else "").pack(fill="x", pady=(0, 4))
+
+        motor_var.trace_add("write", _redibujar_campos)
+        _redibujar_campos()
+
+        ttk.Separator(ventana, orient="horizontal").pack(fill="x", padx=15, pady=6)
+
+        modo_var = tk.StringVar(value="tabla")
+        ttk.Radiobutton(ventana, text="Nombre de tabla", variable=modo_var, value="tabla").pack(anchor="w", padx=15)
+        ttk.Radiobutton(ventana, text="Consulta SQL personalizada", variable=modo_var, value="query").pack(anchor="w", padx=15)
+        tabla_o_query_var = tk.StringVar()
+        ttk.Entry(ventana, textvariable=tabla_o_query_var).pack(fill="x", padx=15, pady=(4, 15))
+
+        def _conectar():
+            motor = motor_var.get()
+            if motor == "SQLite":
+                if not campos_vars["ruta_sqlite"].get():
+                    messagebox.showwarning("Falta la ruta", "Indique la ruta del archivo .db.")
+                    return
+                cadena = f"sqlite:///{campos_vars['ruta_sqlite'].get()}"
+            elif motor == "Otra (cadena de conexión manual)":
+                cadena = campos_vars["cadena_manual"].get()
+                if not cadena:
+                    messagebox.showwarning("Falta la cadena", "Ingrese la cadena de conexión.")
+                    return
+            else:
+                driver = {"PostgreSQL": "postgresql+psycopg2", "MySQL": "mysql+pymysql",
+                          "SQL Server": "mssql+pyodbc"}[motor]
+                if not (campos_vars["host"].get() and campos_vars["usuario"].get() and campos_vars["basedatos"].get()):
+                    messagebox.showwarning("Faltan datos", "Complete host, usuario y base de datos.")
+                    return
+                cadena = (f"{driver}://{campos_vars['usuario'].get()}:{campos_vars['clave'].get()}"
+                          f"@{campos_vars['host'].get()}:{campos_vars['puerto'].get()}/{campos_vars['basedatos'].get()}")
+                if motor == "SQL Server":
+                    cadena += "?driver=ODBC+Driver+17+for+SQL+Server"
+
+            valor = tabla_o_query_var.get().strip()
+            if not valor:
+                messagebox.showwarning("Falta la tabla/consulta", "Indique una tabla o una consulta SQL.")
+                return
+
+            try:
+                if modo_var.get() == "tabla":
+                    df = load_table(cadena, kind="sql", table_name=valor)
+                else:
+                    df = load_table(cadena, kind="sql", query=valor)
+            except Exception as exc:
+                messagebox.showerror("Error de conexión", str(exc))
+                return
+
+            self.ruta_actual = f"sql::{motor}::{valor}"
+            self._dataframe_cargado(df, f"SQL: {valor}")
+            ventana.destroy()
+
+        ttk.Button(ventana, text="Conectar y cargar", command=_conectar).pack(pady=(0, 10))
+
+    def configurar_telefono(self) -> None:
+        """Ventana para elegir el rango de dígitos de teléfono a validar en
+        el próximo Analizar: automático por país(es), o un rango manual."""
+        ventana = tk.Toplevel(self)
+        ventana.title("Configurar validación de teléfono")
+        ventana.geometry("380x420")
+        ventana.transient(self)
+        ventana.grab_set()
+
+        modo_var = tk.StringVar(value="pais")
+        ttk.Radiobutton(ventana, text="Automático por país", variable=modo_var, value="pais").pack(anchor="w", padx=15, pady=(15, 0))
+        ttk.Radiobutton(ventana, text="Rango manual", variable=modo_var, value="manual").pack(anchor="w", padx=15)
+
+        ttk.Label(
+            ventana,
+            text="País(es) (Ctrl/Cmd+clic para elegir varios; ninguno = rango\ninternacional amplio, 7-15 dígitos):",
+            justify="left",
+        ).pack(anchor="w", padx=15, pady=(10, 2))
+        lista_paises = tk.Listbox(ventana, selectmode="extended", height=8, exportselection=False)
+        for nombre in PAISES_TELEFONO_DISPONIBLES:
+            lista_paises.insert("end", nombre)
+        for i, nombre in enumerate(PAISES_TELEFONO_DISPONIBLES):
+            if PAISES_TELEFONO_DISPONIBLES[nombre] in (self.paises_telefono or []):
+                lista_paises.selection_set(i)
+        lista_paises.pack(fill="both", expand=True, padx=15)
+
+        marco_manual = ttk.Frame(ventana)
+        ttk.Label(marco_manual, text="Dígitos exactos esperados:").pack(side="left")
+        digitos_var = tk.StringVar(value="8")
+        ttk.Entry(marco_manual, textvariable=digitos_var, width=6).pack(side="left", padx=6)
+
+        def _actualizar_modo(*_a):
+            if modo_var.get() == "manual":
+                marco_manual.pack(fill="x", padx=15, pady=8)
+                lista_paises.config(state="disabled")
+            else:
+                marco_manual.pack_forget()
+                lista_paises.config(state="normal")
+
+        modo_var.trace_add("write", _actualizar_modo)
+        _actualizar_modo()
+        if self.digitos_telefono_manual is not None:
+            modo_var.set("manual")
+            digitos_var.set(str(self.digitos_telefono_manual[0]))
+
+        permitir_codigo_pais_var = tk.BooleanVar(value=self.permitir_codigo_pais_telefono)
+        ttk.Checkbutton(
+            ventana, variable=permitir_codigo_pais_var,
+            text="Aceptar el número con código de país adelante (ej. +506 ...)",
+        ).pack(anchor="w", padx=15, pady=(4, 10))
+
+        def _guardar():
+            if modo_var.get() == "manual":
+                try:
+                    n = int(digitos_var.get())
+                except ValueError:
+                    messagebox.showwarning("Valor inválido", "Ingrese un número entero de dígitos.")
+                    return
+                self.digitos_telefono_manual = (n, n)
+                self.paises_telefono = None
+            else:
+                nombres_sel = [lista_paises.get(i) for i in lista_paises.curselection()]
+                self.paises_telefono = [PAISES_TELEFONO_DISPONIBLES[n] for n in nombres_sel] or None
+                self.digitos_telefono_manual = None
+            self.permitir_codigo_pais_telefono = permitir_codigo_pais_var.get()
+            ventana.destroy()
+
+        ttk.Button(ventana, text="Guardar", command=_guardar).pack(pady=(0, 15))
 
     def analizar_tabla(self) -> None:
         if self.df is None:
@@ -233,7 +435,12 @@ class LimpiadorApp(tk.Tk):
         self.status_var.set("Analizando...")
         self.update_idletasks()
 
-        self.resultado = analizar(self.df, metodo_atipicos=self.metodo_var.get())
+        self.resultado = analizar(
+            self.df, metodo_atipicos=self.metodo_var.get(),
+            digitos_telefono=self.digitos_telefono_manual,
+            paises_telefono=self.paises_telefono,
+            permitir_codigo_pais_telefono=self.permitir_codigo_pais_telefono,
+        )
         self.df_limpio = None
 
         filas_hallazgos = pd.DataFrame([
@@ -297,9 +504,64 @@ class LimpiadorApp(tk.Tk):
                         self.valor_fijo_vars[clave] = v
                         ttk.Label(marco, text=f"{col} =").pack(side="left")
                         ttk.Entry(marco, textvariable=v, width=8).pack(side="left", padx=(0, 6))
+                elif var.get() == "editar_individualmente":
+                    ttk.Button(
+                        marco, text="✏️ Editar valores...",
+                        command=lambda tipo=tipo: self._abrir_editor_individual(tipo),
+                    ).pack(side="left")
 
             var.trace_add("write", _actualizar_visibilidad)
             _actualizar_visibilidad()
+
+    def _abrir_editor_individual(self, tipo: str) -> None:
+        """Ventana con un campo editable por cada hallazgo de 'tipo', para la
+        acción 'editar_individualmente' (corregir uno por uno sin un único
+        valor fijo para todos). Guarda en self.correcciones_individuales."""
+        issues_tipo = [i for i in self.resultado.issues if i.tipo == tipo] if self.resultado else []
+        if not issues_tipo:
+            messagebox.showinfo("Sin hallazgos", "No hay registros de este tipo para editar.")
+            return
+
+        ventana = tk.Toplevel(self)
+        ventana.title(f"Editar {NOMBRES_TIPO.get(tipo, tipo)} — {len(issues_tipo)} registro(s)")
+        ventana.geometry("560x480")
+        ventana.transient(self)
+        ventana.grab_set()
+
+        marco_scroll = ttk.Frame(ventana)
+        marco_scroll.pack(fill="both", expand=True, padx=10, pady=10)
+        canvas = tk.Canvas(marco_scroll, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(marco_scroll, orient="vertical", command=canvas.yview)
+        marco_filas = ttk.Frame(canvas)
+        marco_filas.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=marco_filas, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        ttk.Label(marco_filas, text="Fila", width=6, font=("TkDefaultFont", 9, "bold")).grid(row=0, column=0, padx=4, pady=2)
+        ttk.Label(marco_filas, text="Columna", width=14, font=("TkDefaultFont", 9, "bold")).grid(row=0, column=1, padx=4, pady=2)
+        ttk.Label(marco_filas, text="Valor original", width=20, font=("TkDefaultFont", 9, "bold")).grid(row=0, column=2, padx=4, pady=2)
+        ttk.Label(marco_filas, text="Valor corregido", width=20, font=("TkDefaultFont", 9, "bold")).grid(row=0, column=3, padx=4, pady=2)
+
+        entradas: list[tuple[tuple, tk.StringVar]] = []
+        for r, issue in enumerate(issues_tipo, start=1):
+            clave = (tipo, issue.columna, issue.fila)
+            valor_original_txt = "" if issue.valor_original is None else str(issue.valor_original)
+            v = tk.StringVar(value=self.correcciones_individuales.get(clave, valor_original_txt))
+            ttk.Label(marco_filas, text=str(issue.fila)).grid(row=r, column=0, padx=4, pady=1)
+            ttk.Label(marco_filas, text=issue.columna or "").grid(row=r, column=1, padx=4, pady=1)
+            ttk.Label(marco_filas, text=valor_original_txt).grid(row=r, column=2, padx=4, pady=1)
+            ttk.Entry(marco_filas, textvariable=v, width=22).grid(row=r, column=3, padx=4, pady=1)
+            entradas.append((clave, v))
+
+        def _guardar():
+            for clave, v in entradas:
+                valor = v.get()
+                self.correcciones_individuales[clave] = None if valor == "" else valor
+            ventana.destroy()
+
+        ttk.Button(ventana, text="Guardar correcciones", command=_guardar).pack(pady=(0, 10))
 
     def limpiar_tabla(self) -> None:
         if self.resultado is None:
@@ -335,7 +597,8 @@ class LimpiadorApp(tk.Tk):
             return
 
         self.df_limpio, self.registro = limpiar(
-            self.df, self.resultado.issues, config=config, valores_fijos=valores_fijos
+            self.df, self.resultado.issues, config=config, valores_fijos=valores_fijos,
+            correcciones_individuales=self.correcciones_individuales,
         )
         self.config_aplicada = config
         self.valores_fijos_aplicados = valores_fijos
