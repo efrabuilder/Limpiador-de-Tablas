@@ -32,6 +32,7 @@ from .analyzer import Issue, detectar_atipicos_iqr
 ACCIONES_VALIDAS = {
     "eliminar_fila", "reemplazar_media", "reemplazar_mediana",
     "reemplazar_moda", "limitar", "marcar_solo", "valor_fijo", "usar_sugerido",
+    "editar_individualmente",
 }
 
 DEFAULT_CONFIG = {
@@ -87,15 +88,23 @@ def _valor_reemplazo(df: pd.DataFrame, columna: str, accion: str, valor_fijo=Non
 
 
 def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None,
-            valores_fijos: Dict[str, object] = None) -> tuple[pd.DataFrame, List[dict]]:
+            valores_fijos: Dict[str, object] = None,
+            correcciones_individuales: Dict[tuple, object] = None) -> tuple[pd.DataFrame, List[dict]]:
     """
     Aplica las acciones configuradas por tipo de problema.
+
+    `correcciones_individuales` es para la acción 'editar_individualmente'
+    (ej. corregir cada teléfono inválido por separado en vez de un único
+    valor fijo para todos): dict con clave (tipo, columna, fila) -> valor
+    corregido. Los hallazgos de ese tipo que no tengan una entrada aquí
+    quedan con su valor original (igual que 'marcar_solo').
 
     Devuelve (df_limpio, registro_acciones) donde registro_acciones es una
     lista de dicts lista para construir el reporte detallado.
     """
     config = {**DEFAULT_CONFIG, **(config or {})}
     valores_fijos = valores_fijos or {}
+    correcciones_individuales = correcciones_individuales or {}
     df_limpio = df.copy()
     registro = []
     filas_a_eliminar = set()
@@ -150,6 +159,14 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             valor_nuevo = valores_fijos.get(issue.columna)
             _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
+        elif issue.tipo in _TIPOS_VALOR_FIJO_DIRECTO and accion == "editar_individualmente":
+            clave = (issue.tipo, issue.columna, issue.fila)
+            if clave in correcciones_individuales:
+                valor_nuevo = correcciones_individuales[clave]
+                _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
+            else:
+                valor_nuevo = issue.valor_original
+
         else:
             valor_nuevo = issue.valor_original
 
@@ -169,7 +186,12 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
     # (solo para las filas que tuvieron al menos un hallazgo marcado así).
     marcas_calidad: Dict[int, List[str]] = {}
     for entry in registro:
-        if entry["accion_aplicada"] != "marcar_solo":
+        sin_corregir = (
+            entry["accion_aplicada"] == "marcar_solo"
+            or (entry["accion_aplicada"] == "editar_individualmente"
+                and entry["valor_nuevo"] == entry["valor_original"])
+        )
+        if not sin_corregir:
             continue
         etiqueta = (
             entry["tipo"] if entry["columna"] == "(fila completa)"
