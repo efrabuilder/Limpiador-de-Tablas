@@ -43,7 +43,7 @@ _NUCLEO_LOGICA = '''# --- Deteccion de columnas: por nombre (normalizado) y, si 
 # proyecto (Power BI, Tableau, Alteryx, etc.) y no puede importarlo. -----
 _PATRONES_EMAIL = ("email", "correo", "e_mail", "mail", "correo_electronico")
 _PATRONES_TELEFONO = ("telefono", "phone", "celular", "movil", "whatsapp",
-                       "numero_telefono", "phone_number", "tel", "mobile")
+                       "numero_telefono", "phone_number", "tel", "mobile", "fax")
 _PATRONES_FECHA = ("fecha", "date", "fec", "dob", "birth", "nacimiento",
                     "created_at", "updated_at", "timestamp", "vencimiento",
                     "expiry", "ingreso", "egreso")
@@ -162,10 +162,20 @@ def _columna_numerica_potencial(serie):
     return convertibles.notna().mean() > 0.7
 
 
+def _columnas_excluir_de_atipicos(df):
+    """Columnas que no deben pasar por IQR: identificadores y telefono/fax
+    (no son magnitudes continuas, no existe una "distribucion normal"
+    esperada para ellas -- ver la version completa en data_cleaner/patrones.py)."""
+    cols_id = [col for col in df.columns if _es_columna_id(col)]
+    cols_tel = _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col)
+    return set(cols_id) | set(cols_tel)
+
+
 def _columnas_para_atipicos(df):
-    columnas = df.select_dtypes(include=[np.number]).columns.tolist()
+    excluidas = _columnas_excluir_de_atipicos(df)
+    columnas = [c for c in df.select_dtypes(include=[np.number]).columns if c not in excluidas]
     for col in df.columns:
-        if col in columnas:
+        if col in columnas or col in excluidas:
             continue
         serie = df[col]
         es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
