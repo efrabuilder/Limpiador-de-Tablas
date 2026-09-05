@@ -131,6 +131,17 @@ PATRONES_IDENTIFICADORES_NO_TELEFONO: dict[str, Tuple[str, ...]] = {
     "dispositivo": (
         "imei", "mac", "numero_serial", "serial",
     ),
+    "pedidos_logistica": (
+        "codigo_producto", "numero_orden", "orden_compra", "numero_pedido",
+        "pedido", "codigo_pedido", "tracking", "numero_tracking",
+        "codigo_tracking", "guia", "numero_guia", "guia_envio", "awb",
+        "conocimiento_embarque", "folio_pago", "numero_folio",
+        "codigo_rastreo", "numero_seguimiento", "seguimiento",
+        "numero_referencia", "referencia_pago",
+        # Agregar aqui mas terminos de este rubro segun se detecten nuevos
+        # falsos positivos (columnas que un dataset llama "celular" solo
+        # porque su contenido tiene una cantidad de digitos parecida).
+    ),
 }
 
 # Version "aplanada" (todos los rubros juntos) para usar directo como
@@ -214,11 +225,22 @@ PATRONES_TELEFONO = (
     "telefono", "phone", "celular", "movil", "whatsapp",
     "numero_telefono", "phone_number", "tel", "mobile", "fax",
 )
-PATRONES_FECHA = (
+PATRONES_FECHA_FUERTE = (
     "fecha", "date", "fec", "dob", "birth", "nacimiento",
     "created_at", "updated_at", "timestamp", "vencimiento", "expiry",
-    "ingreso", "egreso", "cobro", "pago", "entrega",
 )
+# Palabras "debiles": por si solas son un indicio ambiguo de fecha, porque
+# tambien aparecen en nombres de columna que NO son fechas (ej.
+# "folio_pago", "codigo_cobro", "numero_entrega" -- identificadores, no
+# fechas). Solo cuentan como fecha si la columna, ademas, no es ya un
+# identificador (ver es_columna_id); si lo es, se asume que "pago"/"cobro"/
+# "entrega"/"ingreso"/"egreso" se refieren al folio/codigo de la
+# transaccion, no a su fecha. Antes esta distincion no existia y una
+# columna como "folio_pago" se detectaba como fecha solo por el token
+# "pago", marcando cada numero de folio como "Formato de fecha no
+# reconocido" (falso positivo).
+PATRONES_FECHA_DEBIL = ("ingreso", "egreso", "cobro", "pago", "entrega")
+PATRONES_FECHA = PATRONES_FECHA_FUERTE + PATRONES_FECHA_DEBIL
 PATRONES_TOTAL = (
     "total", "monto", "importe", "amount", "subtotal", "salario", "sueldo",
     "costo", "cost",
@@ -336,6 +358,27 @@ DIGITOS_TELEFONO_PAIS: dict[str, Tuple[int, int]] = {
 # internacional E.164 (numero nacional significativo de 7 a 15 digitos).
 DIGITOS_TELEFONO_INTERNACIONAL: Tuple[int, int] = (7, 15)
 
+# -----------------------------------------------------------------------------
+# Nombre visible -> clave de DIGITOS_TELEFONO_PAIS, para poblar el selector de
+# paises en las interfaces (app.py, desktop_app.py). Antes cada interfaz tenia
+# su propia copia de este diccionario (uno en app.py y otro en desktop_app.py,
+# ambos con la misma lista escrita a mano dos veces): quedaba facil que se
+# desincronizaran si se agregaba un pais en un lado y no en el otro (como paso
+# con Australia). Centralizado aqui, ambas interfaces importan la misma
+# fuente y siempre muestran el mismo listado.
+# -----------------------------------------------------------------------------
+PAISES_TELEFONO_DISPONIBLES: dict[str, str] = {
+    "Costa Rica": "cr", "México": "mexico", "Colombia": "colombia",
+    "Argentina": "argentina", "España": "espana", "Estados Unidos": "us",
+    "Panamá": "panama", "Guatemala": "guatemala", "Honduras": "honduras",
+    "Nicaragua": "nicaragua", "El Salvador": "el_salvador", "Chile": "chile",
+    "Perú": "peru", "Ecuador": "ecuador", "Venezuela": "venezuela",
+    "Brasil": "brasil", "Uruguay": "uruguay", "Bolivia": "bolivia",
+    "República Dominicana": "republica_dominicana", "Reino Unido": "reino_unido",
+    "Alemania": "alemania", "Francia": "francia", "Canadá": "canada",
+    "Australia": "australia",
+}
+
 
 def rango_digitos_telefono(paises: Optional[Iterable[str]] = None) -> Tuple[int, int]:
     """(min, max) de digitos aceptados para telefono/celular.
@@ -396,6 +439,47 @@ def detectar_columnas(
         # Las columnas numéricas (montos, cantidades, precios) quedan
         # fuera: un monto grande en colones puede tener 7-15 dígitos y
         # confundirse con un teléfono si no se excluye por tipo de dato.
+        if pd.api.types.is_numeric_dtype(df[c]):
+            continue
+        try:
+            if detector_contenido(df[c]):
+                candidatas.append(c)
+        except Exception:
+            continue
+    return candidatas
+
+
+
+def columnas_fecha_por_nombre(df: pd.DataFrame) -> List[str]:
+    """Nivel 1 de deteccion de columnas de fecha por nombre, con una
+    salvedad respecto a columnas_por_patron(df, PATRONES_FECHA): las
+    palabras "debiles" (ver PATRONES_FECHA_DEBIL) solo cuentan si la
+    columna no es ademas un identificador (folio, codigo, clave...) --
+    evita marcar "folio_pago" o "codigo_cobro" como columna de fecha.
+    Las palabras "fuertes" (fecha, date, dob...) siempre cuentan."""
+    cols = []
+    for c in df.columns:
+        if coincide_patron(c, PATRONES_FECHA_FUERTE):
+            cols.append(c)
+        elif coincide_patron(c, PATRONES_FECHA_DEBIL) and not es_columna_id(c):
+            cols.append(c)
+    return cols
+
+
+def detectar_columnas_fecha(df: pd.DataFrame, detector_contenido=None,
+                             excluir: Optional[Iterable[str]] = None) -> List[str]:
+    """Igual que detectar_columnas(df, PATRONES_FECHA, ...) pero usando
+    columnas_fecha_por_nombre() para el Nivel 1 (evita el falso positivo
+    de "folio_pago"/"codigo_cobro" descrito ahi). El Nivel 2 (por
+    contenido) es identico al de detectar_columnas()."""
+    excluir = set(excluir or [])
+    por_nombre = [c for c in columnas_fecha_por_nombre(df) if c not in excluir]
+    if por_nombre or detector_contenido is None:
+        return por_nombre
+    candidatas = []
+    for c in df.columns:
+        if c in excluir or es_columna_id(c):
+            continue
         if pd.api.types.is_numeric_dtype(df[c]):
             continue
         try:

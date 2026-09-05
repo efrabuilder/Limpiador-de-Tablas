@@ -26,6 +26,7 @@ from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
+from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_mediana", "reemplazar_media", "reemplazar_moda",
@@ -55,20 +56,9 @@ NOMBRES_TIPO = {
     "texto_inconsistente": "Variantes de texto",
 }
 
-# País(es) disponibles para el rango de dígitos de teléfono/celular (ver
-# patrones.DIGITOS_TELEFONO_PAIS), reutilizado tanto para configurar el
-# análisis como para la exportación de M puro.
-PAISES_TELEFONO_DISPONIBLES = {
-    "Costa Rica": "cr", "México": "mexico", "Colombia": "colombia",
-    "Argentina": "argentina", "España": "espana", "Estados Unidos": "us",
-    "Panamá": "panama", "Guatemala": "guatemala", "Honduras": "honduras",
-    "Nicaragua": "nicaragua", "El Salvador": "el_salvador", "Chile": "chile",
-    "Perú": "peru", "Ecuador": "ecuador", "Venezuela": "venezuela",
-    "Brasil": "brasil", "Uruguay": "uruguay", "Bolivia": "bolivia",
-    "República Dominicana": "republica_dominicana", "Reino Unido": "reino_unido",
-    "Alemania": "alemania", "Francia": "francia", "Canadá": "canada",
-    "Australia": "australia",
-}
+# Nota: PAISES_TELEFONO_DISPONIBLES ahora vive en data_cleaner/patrones.py
+# (importado arriba), compartido con app.py, para que ambas interfaces
+# siempre muestren exactamente el mismo listado de países.
 
 
 class LimpiadorApp(tk.Tk):

@@ -65,6 +65,7 @@ from data_cleaner.patrones import (
     columnas_por_patron as _columnas_por_patron,
     es_columna_id as _es_columna_id,
     detectar_columnas as _detectar_columnas,
+    detectar_columnas_fecha as _detectar_columnas_fecha,
     parece_email as _parece_email,
     parece_telefono as _parece_telefono,
     parece_fecha as _parece_fecha,
@@ -546,7 +547,7 @@ def generar_editor_m_puro(
     # las columnas que ya reclamo una regla anterior, para que una columna
     # de fecha con muchos digitos no se confunda con telefono, etc.
     cols_fecha = columnas_fecha if columnas_fecha is not None else \
-        _detectar_columnas(df, _PATRONES_FECHA, _parece_fecha)
+        _detectar_columnas_fecha(df, _parece_fecha)
     cols_email = columnas_email if columnas_email is not None else \
         _detectar_columnas(df, _PATRONES_EMAIL, _parece_email, excluir=cols_fecha)
     cols_tel = columnas_telefono if columnas_telefono is not None else \

@@ -87,16 +87,45 @@ def raiz():
     return {"servicio": "Limpiador de Tablas API", "docs": "/docs"}
 
 
+def _parsear_paises_telefono(valor: str) -> Optional[list[str]]:
+    """'cr,mexico' -> ['cr', 'mexico']. None si viene vacío (rango
+    internacional amplio de 7-15 dígitos por defecto)."""
+    if not valor:
+        return None
+    return [p.strip() for p in valor.split(",") if p.strip()]
+
+
 @app.post("/analizar", response_model=AnalisisOut)
 def analizar_endpoint(
     archivo: UploadFile = File(..., description="Archivo CSV o Excel a analizar."),
     metodo_atipicos: str = Form("iqr", description="iqr | zscore | ambos"),
+    paises_telefono: str = Form(
+        "", description='País(es) para el rango de dígitos de celular, coma-separados '
+                         '(ej. "cr,mexico"). Vacío = rango internacional amplio (7-15 dígitos).'
+    ),
+    digitos_telefono_min: Optional[int] = Form(
+        None, description="Rango explícito de dígitos (anula paises_telefono si se indica junto con el max)."
+    ),
+    digitos_telefono_max: Optional[int] = Form(None),
+    permitir_codigo_pais_telefono: bool = Form(
+        True, description="Acepta el mismo número con 1-3 dígitos extra al inicio (código de país sin '+')."
+    ),
 ):
     if metodo_atipicos not in ("iqr", "zscore", "ambos"):
         raise HTTPException(status_code=400, detail="metodo_atipicos debe ser iqr, zscore o ambos.")
 
+    digitos_telefono = (
+        (digitos_telefono_min, digitos_telefono_max)
+        if digitos_telefono_min is not None and digitos_telefono_max is not None
+        else None
+    )
     df = _leer_upload(archivo)
-    resultado = analizar(df, metodo_atipicos=metodo_atipicos)
+    resultado = analizar(
+        df, metodo_atipicos=metodo_atipicos,
+        digitos_telefono=digitos_telefono,
+        paises_telefono=_parsear_paises_telefono(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais_telefono,
+    )
 
     hallazgos = [
         HallazgoOut(
@@ -124,6 +153,19 @@ def limpiar_endpoint(
     duplicado: str = Form(DEFAULT_CONFIG["duplicado"]),
     atipico: str = Form(DEFAULT_CONFIG["atipico"]),
     tipo_invalido: str = Form(DEFAULT_CONFIG["tipo_invalido"]),
+    fecha_invalida: str = Form(DEFAULT_CONFIG["fecha_invalida"]),
+    email_invalido: str = Form(DEFAULT_CONFIG["email_invalido"]),
+    telefono_invalido: str = Form(DEFAULT_CONFIG["telefono_invalido"]),
+    id_duplicado: str = Form(DEFAULT_CONFIG["id_duplicado"]),
+    formula_incorrecta: str = Form(DEFAULT_CONFIG["formula_incorrecta"]),
+    texto_inconsistente: str = Form(DEFAULT_CONFIG["texto_inconsistente"]),
+    paises_telefono: str = Form(
+        "", description='País(es) para el rango de dígitos de celular, coma-separados '
+                         '(ej. "cr,mexico"). Vacío = rango internacional amplio (7-15 dígitos).'
+    ),
+    digitos_telefono_min: Optional[int] = Form(None),
+    digitos_telefono_max: Optional[int] = Form(None),
+    permitir_codigo_pais_telefono: bool = Form(True),
     valores_fijos: str = Form(
         "{}", description='JSON con valores fijos por columna, ej: {"edad": "0"}'
     ),
@@ -139,9 +181,22 @@ def limpiar_endpoint(
     config = {
         "faltante": faltante, "duplicado": duplicado,
         "atipico": atipico, "tipo_invalido": tipo_invalido,
+        "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
+        "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
+        "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
     }
 
-    resultado = analizar(df, metodo_atipicos=metodo_atipicos)
+    digitos_telefono = (
+        (digitos_telefono_min, digitos_telefono_max)
+        if digitos_telefono_min is not None and digitos_telefono_max is not None
+        else None
+    )
+    resultado = analizar(
+        df, metodo_atipicos=metodo_atipicos,
+        digitos_telefono=digitos_telefono,
+        paises_telefono=_parsear_paises_telefono(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais_telefono,
+    )
 
     faltan = [
         tipo for tipo, accion in config.items()
@@ -224,8 +279,14 @@ def exportar_script_m_puro_endpoint(
     fecha_invalida: str = Form("marcar_solo"),
     email_invalido: str = Form("marcar_solo"),
     telefono_invalido: str = Form("marcar_solo"),
-    digitos_telefono_min: int = Form(8),
-    digitos_telefono_max: int = Form(8),
+    paises_telefono: str = Form(
+        "", description='País(es) para el rango de dígitos de celular, coma-separados '
+                         '(ej. "cr,mexico"). Ignorado si se indican digitos_telefono_min/max. '
+                         'Si ninguno de los dos se indica: rango internacional amplio (7-15 dígitos).'
+    ),
+    digitos_telefono_min: Optional[int] = Form(None),
+    digitos_telefono_max: Optional[int] = Form(None),
+    permitir_codigo_pais_telefono: bool = Form(True),
     primeros_digitos_telefono_validos: str = Form(
         "", description='Coma-separado, ej: "2,4,5,6,7,8". Vacio = no validar.'
     ),
@@ -258,6 +319,11 @@ def exportar_script_m_puro_endpoint(
         or None
     )
 
+    digitos_telefono = (
+        (digitos_telefono_min, digitos_telefono_max)
+        if digitos_telefono_min is not None and digitos_telefono_max is not None
+        else None
+    )
     contenido = generar_editor_m_puro(
         df,
         config=config,
@@ -267,7 +333,9 @@ def exportar_script_m_puro_endpoint(
         fecha_invalida=fecha_invalida,
         email_invalido=email_invalido,
         telefono_invalido=telefono_invalido,
-        digitos_telefono=(digitos_telefono_min, digitos_telefono_max),
+        digitos_telefono=digitos_telefono,
+        paises_telefono=_parsear_paises_telefono(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais_telefono,
         primeros_digitos_telefono_validos=lista_primeros_digitos,
         id_duplicado=id_duplicado,
         formula_incorrecta=formula_incorrecta,

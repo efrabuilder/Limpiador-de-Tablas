@@ -28,6 +28,18 @@ OPCIONES_ACCION = {
     "atipico": ["limitar", "reemplazar_mediana", "reemplazar_media",
                 "eliminar_fila", "marcar_solo"],
     "tipo_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    # Los 6 chequeos siguientes (ver data_cleaner/analyzer.py) antes no
+    # aparecian aqui: analizar() ya los ejecuta por defecto, pero al no
+    # estar en este diccionario, elegir_config_interactiva() los saltaba en
+    # silencio y quedaban siempre en "marcar_solo" (el valor por defecto de
+    # DEFAULT_CONFIG) sin que la persona pudiera elegir otra accion, a
+    # diferencia de cli.py/app.py/desktop_app.py que si las exponen.
+    "fecha_invalida": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "email_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "telefono_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "id_duplicado": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
+    "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
 }
 
 NOMBRES_TIPO = {
@@ -35,6 +47,12 @@ NOMBRES_TIPO = {
     "duplicado": "Filas duplicadas",
     "atipico": "Valores atípicos (outliers)",
     "tipo_invalido": "Errores de tipo (texto en columna numérica)",
+    "fecha_invalida": "Fechas inválidas/fuera de rango",
+    "email_invalido": "Correos inválidos",
+    "telefono_invalido": "Teléfonos inválidos",
+    "id_duplicado": "IDs duplicados",
+    "formula_incorrecta": "Total ≠ Cantidad × Precio",
+    "texto_inconsistente": "Variantes/errores de tipeo de texto",
 }
 
 
@@ -123,16 +141,23 @@ def main():
         nombre_fuente = ruta
         config = DEFAULT_CONFIG
         metodo_atipicos = "iqr"
+        paises_telefono = None
     else:
         df, nombre_fuente = cargar_interactivo()
         metodo_atipicos = preguntar(
             "\n¿Qué método desea usar para detectar valores atípicos?",
             ["iqr", "zscore", "ambos"], defecto="iqr",
         )
+        paises_telefono_txt = preguntar(
+            "\nPaís(es) para validar el largo de los teléfonos/celulares "
+            "(coma-separados, ej. 'cr,mexico'; Enter = rango internacional amplio, 7-15 dígitos):",
+            defecto="",
+        )
+        paises_telefono = [p.strip() for p in paises_telefono_txt.split(",") if p.strip()] or None
 
     print(f"\nTabla cargada: {len(df)} filas x {len(df.columns)} columnas.")
 
-    resultado = analizar(df, metodo_atipicos=metodo_atipicos)
+    resultado = analizar(df, metodo_atipicos=metodo_atipicos, paises_telefono=paises_telefono)
     imprimir_resumen_consola(resultado)
 
     if not resultado.issues:

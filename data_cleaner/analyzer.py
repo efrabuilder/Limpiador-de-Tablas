@@ -200,6 +200,7 @@ from data_cleaner.patrones import (
     columnas_por_patron as _columnas_por_patron,
     es_columna_id as _es_columna_id,
     detectar_columnas as _detectar_columnas_por_contenido,
+    detectar_columnas_fecha as _detectar_columnas_fecha,
     parece_email as _parece_email,
     parece_telefono as _parece_telefono,
     parece_fecha as _parece_fecha,
@@ -245,7 +246,7 @@ def detectar_fechas_invalidas(df: pd.DataFrame, columnas: Optional[List[str]] = 
     Los valores vacíos no se reportan aquí (ya los cubre detectar_faltantes).
     """
     issues = []
-    cols = columnas if columnas is not None else (_detectar_columnas_por_contenido(df, _PATRONES_FECHA, _parece_fecha) if auto else [])
+    cols = columnas if columnas is not None else (_detectar_columnas_fecha(df, _parece_fecha) if auto else [])
     lim_min = pd.Timestamp(fecha_min) if fecha_min is not None else None
     lim_max = pd.Timestamp(fecha_max) if fecha_max is not None else None
 

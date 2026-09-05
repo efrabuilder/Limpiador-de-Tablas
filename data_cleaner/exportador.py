@@ -44,9 +44,15 @@ _NUCLEO_LOGICA = '''# --- Deteccion de columnas: por nombre (normalizado) y, si 
 _PATRONES_EMAIL = ("email", "correo", "e_mail", "mail", "correo_electronico")
 _PATRONES_TELEFONO = ("telefono", "phone", "celular", "movil", "whatsapp",
                        "numero_telefono", "phone_number", "tel", "mobile", "fax")
-_PATRONES_FECHA = ("fecha", "date", "fec", "dob", "birth", "nacimiento",
-                    "created_at", "updated_at", "timestamp", "vencimiento",
-                    "expiry", "ingreso", "egreso")
+_PATRONES_FECHA_FUERTE = ("fecha", "date", "fec", "dob", "birth", "nacimiento",
+                           "created_at", "updated_at", "timestamp", "vencimiento", "expiry")
+# Palabras "debiles": solo cuentan como fecha si la columna no es ademas un
+# identificador (folio, codigo, clave...) -- evita que "folio_pago" o
+# "codigo_cobro" se detecten como columna de fecha solo por el token
+# "pago"/"cobro" (ver misma logica, comentada en detalle, en
+# data_cleaner/patrones.py: PATRONES_FECHA_DEBIL / columnas_fecha_por_nombre).
+_PATRONES_FECHA_DEBIL = ("ingreso", "egreso", "cobro", "pago", "entrega")
+_PATRONES_FECHA = _PATRONES_FECHA_FUERTE + _PATRONES_FECHA_DEBIL
 _PATRONES_TOTAL = ("total", "monto", "importe", "amount", "subtotal",
                     "salario", "sueldo", "costo", "cost")
 _PATRONES_CANTIDAD = ("cantidad", "qty", "quantity", "cant", "unidades",
@@ -54,6 +60,23 @@ _PATRONES_CANTIDAD = ("cantidad", "qty", "quantity", "cant", "unidades",
 _PATRONES_PRECIO = ("precio", "price", "tarifa", "rate", "valor_unitario", "unit_price")
 _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \\
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
+# Identificadores alfanumericos/numericos que NO son telefono aunque su
+# CONTENIDO tenga una cantidad de digitos parecida a un celular: chasis/VIN,
+# SKU/codigo de barras, numero de cuenta/factura/poliza, IMEI, y (agregado)
+# codigos de pedido/logistica -- ver data_cleaner/patrones.py, version
+# completa de esta misma lista, comentada por rubro.
+_PATRONES_NO_TELEFONO = (
+    "chasis", "vin", "motor", "numero_motor", "serie_motor", "placa", "matricula", "patente",
+    "sku", "codigo_barras", "ean", "upc", "gtin", "numero_serie", "serie", "numero_lote", "lote",
+    "numero_parte", "part_number", "numero_pieza", "referencia",
+    "numero_cuenta", "cuenta", "iban", "swift", "numero_poliza", "poliza", "numero_contrato",
+    "contrato", "numero_factura", "factura", "expediente", "numero_expediente",
+    "imei", "mac", "numero_serial", "serial",
+    "codigo_producto", "numero_orden", "orden_compra", "numero_pedido", "pedido", "codigo_pedido",
+    "tracking", "numero_tracking", "codigo_tracking", "guia", "numero_guia", "guia_envio", "awb",
+    "conocimiento_embarque", "folio_pago", "numero_folio", "codigo_rastreo", "numero_seguimiento",
+    "seguimiento", "numero_referencia", "referencia_pago",
+)
 _REGEX_EMAIL = re.compile(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,}$")
 _REGEX_TELEFONO_FORMATO = re.compile(r"^[\\d\\s\\-\\+\\(\\)]+$")
 
@@ -135,16 +158,24 @@ def _parece_fecha_col(serie, umbral=0.7):
     return parseado.notna().mean() >= umbral
 
 
-def _detectar_columnas_combinado(df, patrones, detector_contenido):
+def _detectar_columnas_combinado(df, patrones, detector_contenido, excluir_por_nombre=None):
     """Nivel 1 (nombre normalizado) primero; si no encuentra nada, Nivel 2
     revisa el contenido real de las columnas de texto no-ID como respaldo
-    (cubre datasets con columnas mal nombradas: "col_1", "campo_7", etc.)."""
+    (cubre datasets con columnas mal nombradas: "col_1", "campo_7", etc.).
+
+    `excluir_por_nombre` (opcional, ej. _PATRONES_NO_TELEFONO) descarta del
+    Nivel 2 una columna cuyo NOMBRE calce con esos patrones, aunque su
+    contenido parezca calzar con `detector_contenido` -- evita que un
+    "chasis", "numero_orden" o "tracking" con muchos digitos se confunda
+    con un telefono solo por la cantidad de digitos que tiene."""
     por_nombre = _columnas_por_patron(df, patrones)
     if por_nombre:
         return por_nombre
     candidatas = []
     for col in df.columns:
         if _es_columna_id(col):
+            continue
+        if excluir_por_nombre is not None and _coincide_patron_columna(col, excluir_por_nombre):
             continue
         try:
             if detector_contenido(df[col]):
@@ -167,7 +198,8 @@ def _columnas_excluir_de_atipicos(df):
     (no son magnitudes continuas, no existe una "distribucion normal"
     esperada para ellas -- ver la version completa en data_cleaner/patrones.py)."""
     cols_id = [col for col in df.columns if _es_columna_id(col)]
-    cols_tel = _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col)
+    cols_tel = _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col,
+                                             excluir_por_nombre=_PATRONES_NO_TELEFONO)
     return set(cols_id) | set(cols_tel)
 
 
@@ -198,9 +230,37 @@ def _normalizar_texto(valor):
     return " ".join(s.split())
 
 
+def _columnas_fecha_por_nombre(df):
+    """Ver columnas_fecha_por_nombre() en data_cleaner/patrones.py (misma
+    logica, copiada aqui de forma autocontenida)."""
+    cols = []
+    for col in df.columns:
+        if _coincide_patron_columna(col, _PATRONES_FECHA_FUERTE):
+            cols.append(col)
+        elif _coincide_patron_columna(col, _PATRONES_FECHA_DEBIL) and not _es_columna_id(col):
+            cols.append(col)
+    return cols
+
+
+def _detectar_columnas_fecha(df, detector_contenido):
+    por_nombre = _columnas_fecha_por_nombre(df)
+    if por_nombre:
+        return por_nombre
+    candidatas = []
+    for col in df.columns:
+        if _es_columna_id(col):
+            continue
+        try:
+            if detector_contenido(df[col]):
+                candidatas.append(col)
+        except Exception:
+            continue
+    return candidatas
+
+
 def _detectar_fechas_invalidas(df):
     hallazgos = []
-    for col in _detectar_columnas_combinado(df, _PATRONES_FECHA, _parece_fecha_col):
+    for col in _detectar_columnas_fecha(df, _parece_fecha_col):
         serie = df[col]
         parseado = pd.to_datetime(serie, errors="coerce")
         for idx, val in serie.items():
@@ -235,7 +295,9 @@ def _detectar_telefonos_invalidos(df, min_digitos=7, max_digitos=15, permitir_co
     (codigo de pais sin "+"), para no marcar como invalido un numero
     valido solo por incluir codigo de pais (ej. "34916540145")."""
     hallazgos = []
-    for col in _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col):
+    cols_telefono = _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col,
+                                                  excluir_por_nombre=_PATRONES_NO_TELEFONO)
+    for col in cols_telefono:
         for idx, val in df[col].items():
             if pd.isna(val):
                 continue

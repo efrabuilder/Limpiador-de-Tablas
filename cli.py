@@ -83,6 +83,16 @@ def _parsear_lista_columnas(valor: Optional[str]) -> Optional[List[str]]:
     return [c.strip() for c in valor.split(",") if c.strip()]
 
 
+def _resolver_digitos_telefono(digitos_telefono: Optional[str]) -> Optional[tuple[int, int]]:
+    """Convierte 'min-max' en (min, max). None si no se indicó nada (deja
+    que el rango se calcule por --paises-telefono, o al internacional
+    amplio de 7-15 dígitos si tampoco se indican países)."""
+    if not digitos_telefono:
+        return None
+    min_dig, max_dig = (int(x) for x in digitos_telefono.split("-", 1))
+    return (min_dig, max_dig)
+
+
 @app.command("analizar")
 def analizar_cmd(
     input: str = typer.Option(..., "--input", "-i", help="Ruta del archivo CSV/Excel a analizar."),
@@ -96,7 +106,21 @@ def analizar_cmd(
     fecha_max: Optional[str] = typer.Option(None, "--fecha-max", help="Fecha máxima válida (AAAA-MM-DD)."),
     columnas_email: Optional[str] = typer.Option(None, "--columnas-email", help="Columnas de email (coma-separadas)."),
     columnas_telefono: Optional[str] = typer.Option(None, "--columnas-telefono", help="Columnas de teléfono (coma-separadas)."),
-    digitos_telefono: str = typer.Option("8-8", "--digitos-telefono", help="Rango de dígitos válido, formato min-max."),
+    digitos_telefono: Optional[str] = typer.Option(
+        None, "--digitos-telefono",
+        help="Rango de dígitos válido, formato min-max (ej. 8-8). Si no se indica, "
+             "se calcula por --paises-telefono, o al rango internacional amplio "
+             "(7-15 dígitos) si tampoco se indican países.",
+    ),
+    paises_telefono: Optional[str] = typer.Option(
+        None, "--paises-telefono",
+        help="País(es) para el rango de dígitos de celular (coma-separados, ej. 'cr,mexico'). "
+             "Ignorado si se indica --digitos-telefono explícitamente.",
+    ),
+    permitir_codigo_pais: bool = typer.Option(
+        True, "--permitir-codigo-pais/--no-permitir-codigo-pais",
+        help="Acepta el mismo número con 1-3 dígitos extra al inicio (código de país sin '+').",
+    ),
     columnas_id: Optional[str] = typer.Option(None, "--columnas-id", help="Columnas identificadoras (coma-separadas)."),
     total: Optional[str] = typer.Option(None, "--total", help="Columna de total (regla Total = Cantidad × Precio)."),
     cantidad: Optional[str] = typer.Option(None, "--cantidad", help="Columna de cantidad."),
@@ -108,14 +132,16 @@ def analizar_cmd(
         console.print(f"[red]No existe el archivo: {input}[/red]")
         raise typer.Exit(code=1)
 
-    min_dig, max_dig = (int(x) for x in digitos_telefono.split("-", 1))
     df = load_table(input, kind="auto")
     resultado = analizar(
         df, metodo_atipicos=metodo_atipicos,
         auto_detectar_columnas=not sin_auto_columnas,
         columnas_fecha=_parsear_lista_columnas(columnas_fecha), fecha_min=fecha_min, fecha_max=fecha_max,
         columnas_email=_parsear_lista_columnas(columnas_email),
-        columnas_telefono=_parsear_lista_columnas(columnas_telefono), digitos_telefono=(min_dig, max_dig),
+        columnas_telefono=_parsear_lista_columnas(columnas_telefono),
+        digitos_telefono=_resolver_digitos_telefono(digitos_telefono),
+        paises_telefono=_parsear_lista_columnas(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais,
         columnas_id=_parsear_lista_columnas(columnas_id),
         columna_total=total, columna_cantidad=cantidad, columna_precio=precio,
         columnas_texto=_parsear_lista_columnas(columnas_texto),
@@ -162,7 +188,21 @@ def limpiar_cmd(
     fecha_max: Optional[str] = typer.Option(None, "--fecha-max", help="Fecha máxima válida (AAAA-MM-DD)."),
     columnas_email: Optional[str] = typer.Option(None, "--columnas-email", help="Columnas de email (coma-separadas)."),
     columnas_telefono: Optional[str] = typer.Option(None, "--columnas-telefono", help="Columnas de teléfono (coma-separadas)."),
-    digitos_telefono: str = typer.Option("8-8", "--digitos-telefono", help="Rango de dígitos válido, formato min-max."),
+    digitos_telefono: Optional[str] = typer.Option(
+        None, "--digitos-telefono",
+        help="Rango de dígitos válido, formato min-max (ej. 8-8). Si no se indica, "
+             "se calcula por --paises-telefono, o al rango internacional amplio "
+             "(7-15 dígitos) si tampoco se indican países.",
+    ),
+    paises_telefono: Optional[str] = typer.Option(
+        None, "--paises-telefono",
+        help="País(es) para el rango de dígitos de celular (coma-separados, ej. 'cr,mexico'). "
+             "Ignorado si se indica --digitos-telefono explícitamente.",
+    ),
+    permitir_codigo_pais: bool = typer.Option(
+        True, "--permitir-codigo-pais/--no-permitir-codigo-pais",
+        help="Acepta el mismo número con 1-3 dígitos extra al inicio (código de país sin '+').",
+    ),
     columnas_id: Optional[str] = typer.Option(None, "--columnas-id", help="Columnas identificadoras (coma-separadas)."),
     total: Optional[str] = typer.Option(None, "--total", help="Columna de total (regla Total = Cantidad × Precio)."),
     cantidad: Optional[str] = typer.Option(None, "--cantidad", help="Columna de cantidad."),
@@ -197,7 +237,6 @@ def limpiar_cmd(
 
     valores_fijos = _parsear_valores_fijos(valor_fijo)
 
-    min_dig, max_dig = (int(x) for x in digitos_telefono.split("-", 1))
     os.makedirs(outdir, exist_ok=True)
     df = load_table(input, kind="auto")
     console.print(f"Tabla cargada: [bold]{len(df)}[/bold] filas x [bold]{len(df.columns)}[/bold] columnas.")
@@ -207,7 +246,10 @@ def limpiar_cmd(
         auto_detectar_columnas=not sin_auto_columnas,
         columnas_fecha=_parsear_lista_columnas(columnas_fecha), fecha_min=fecha_min, fecha_max=fecha_max,
         columnas_email=_parsear_lista_columnas(columnas_email),
-        columnas_telefono=_parsear_lista_columnas(columnas_telefono), digitos_telefono=(min_dig, max_dig),
+        columnas_telefono=_parsear_lista_columnas(columnas_telefono),
+        digitos_telefono=_resolver_digitos_telefono(digitos_telefono),
+        paises_telefono=_parsear_lista_columnas(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais,
         columnas_id=_parsear_lista_columnas(columnas_id),
         columna_total=total, columna_cantidad=cantidad, columna_precio=precio,
         columnas_texto=_parsear_lista_columnas(columnas_texto),
