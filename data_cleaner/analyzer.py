@@ -220,7 +220,7 @@ from data_cleaner.patrones import (
 # mas vocabulario (ingles + sinonimos de nomina/salud/logistica), y
 # _detectar_columnas_por_contenido permite reconocer una columna por sus
 # VALORES cuando el nombre no da ninguna pista (ej. "campo_7").
-_PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \
+_PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + _PATRONES_ESTADO + \
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
 
 
