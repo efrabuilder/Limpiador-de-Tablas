@@ -117,7 +117,7 @@ PAISES_TELEFONO_DISPONIBLES = {
 
 def _reset_estado() -> None:
     for key in ("df", "resultado", "nombre_fuente", "df_limpio", "registro", "tablas_reporte",
-                "config_aplicada", "valores_fijos_aplicados"):
+                "config_aplicada", "valores_fijos_aplicados", "correcciones_individuales_aplicadas"):
         st.session_state.pop(key, None)
 
 
@@ -483,6 +483,7 @@ if limpiar_btn:
         st.session_state.tablas_reporte = tablas_reporte
         st.session_state.config_aplicada = config
         st.session_state.valores_fijos_aplicados = valores_fijos
+        st.session_state.correcciones_individuales_aplicadas = correcciones_individuales
 
 # --------------------------------------------------------------------------
 # Paso 4 — Resultado y descargas
@@ -655,6 +656,27 @@ if st.session_state.get("df_limpio") is not None:
             if primeros_digitos_txt.strip() else None
         )
 
+        st.divider()
+        agregar_revision = st.checkbox(
+            "Agregar columnas de revisión (Revisar_*) para lo marcado como 'solo marcar'",
+            value=True,
+            help="Si lo desactiva, no se agrega ninguna columna Revisar_* (ni "
+                 "Requiere_Revision) para las reglas que quedaron en 'Solo marcar en "
+                 "el reporte'. Las reglas con otra acción (valor fijo, eliminar fila, "
+                 "editar individualmente, etc.) no se ven afectadas.",
+            key="agregar_revision_mpuro",
+        )
+        excluir_revision_txt = st.text_input(
+            "Excluir columnas Revisar_* puntuales (coma-separado; vacío = ninguna)",
+            value="",
+            help="Ej: Revisar_ID_Duplicado_codigo_postal, Revisar_ID_Duplicado_codigo_empleado_rep_ventas",
+            key="excluir_revision_mpuro",
+        )
+        excluir_revision_lista = (
+            [c.strip() for c in excluir_revision_txt.split(",") if c.strip()]
+            if excluir_revision_txt.strip() else None
+        )
+
         script_m_puro = generar_editor_m_puro(
             df,
             config=config_aplicada,
@@ -664,6 +686,7 @@ if st.session_state.get("df_limpio") is not None:
             fecha_invalida=config_aplicada.get("fecha_invalida", "marcar_solo"),
             email_invalido=config_aplicada.get("email_invalido", "marcar_solo"),
             telefono_invalido=config_aplicada.get("telefono_invalido", "marcar_solo"),
+            correcciones_individuales=st.session_state.get("correcciones_individuales_aplicadas"),
             digitos_telefono=digitos_telefono_manual,
             paises_telefono=paises_telefono_sel,
             permitir_codigo_pais_telefono=permitir_codigo_pais,
@@ -672,6 +695,8 @@ if st.session_state.get("df_limpio") is not None:
             id_duplicado=config_aplicada.get("id_duplicado", "marcar_solo"),
             formula_incorrecta=config_aplicada.get("formula_incorrecta", "marcar_solo"),
             texto_inconsistente=config_aplicada.get("texto_inconsistente", "marcar_solo"),
+            agregar_columnas_revision=agregar_revision,
+            columnas_excluir_revision=excluir_revision_lista,
         )
         st.code(script_m_puro, language="text")
         st.download_button(
