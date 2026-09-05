@@ -227,6 +227,7 @@ DIGITOS_TELEFONO_PAIS: dict[str, Tuple[int, int]] = {
     "de": (10, 11), "alemania": (10, 11), "germany": (10, 11),
     "fr": (9, 9), "francia": (9, 9), "france": (9, 9),
     "ca": (10, 10), "canada": (10, 10),
+    "au": (9, 9), "australia": (9, 9),
 }
 
 # Rango "por defecto" cuando no se especifica ningun pais: estandar
