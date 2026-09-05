@@ -227,7 +227,13 @@ def _detectar_emails_invalidos(df):
     return hallazgos
 
 
-def _detectar_telefonos_invalidos(df, min_digitos=8, max_digitos=8):
+def _detectar_telefonos_invalidos(df, min_digitos=7, max_digitos=15, permitir_codigo_pais=True):
+    """Rango por defecto: estandar internacional E.164 (7-15 digitos del
+    numero nacional), igual que data_cleaner/patrones.py, en vez de asumir
+    siempre 8 digitos (formato de Costa Rica). Con permitir_codigo_pais=True
+    tambien se acepta el mismo numero con 1-3 digitos extra al inicio
+    (codigo de pais sin "+"), para no marcar como invalido un numero
+    valido solo por incluir codigo de pais (ej. "34916540145")."""
     hallazgos = []
     for col in _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col):
         for idx, val in df[col].items():
@@ -236,11 +242,14 @@ def _detectar_telefonos_invalidos(df, min_digitos=8, max_digitos=8):
             texto = str(val).strip()
             solo_digitos = re.sub(r"\\D", "", texto)
             formato_ok = bool(_REGEX_TELEFONO_FORMATO.match(texto))
-            longitud_ok = min_digitos <= len(solo_digitos) <= max_digitos
+            n = len(solo_digitos)
+            longitud_ok = min_digitos <= n <= max_digitos
+            if not longitud_ok and permitir_codigo_pais:
+                longitud_ok = (min_digitos + 1) <= n <= (max_digitos + 3)
             if not (formato_ok and longitud_ok):
                 hallazgos.append({"tipo": "telefono_invalido", "columna": col, "fila": int(idx),
                                    "valor_original": val,
-                                   "detalle": "Formato/longitud de telefono invalido"})
+                                   "detalle": f"Formato/longitud de telefono invalido (se esperaban {min_digitos}-{max_digitos} digitos)"})
     return hallazgos
 
 
@@ -372,7 +381,10 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
                            "valor_original": df.loc[idx].to_dict(),
                            "detalle": "Fila duplicada (identica a una anterior)"})
 
+    cols_telefono_tipo = set(_detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col))
     for col in df.columns:
+        if col in cols_telefono_tipo:
+            continue
         serie = df[col]
         es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
         if es_texto and _columna_numerica_potencial(serie):
