@@ -649,38 +649,15 @@ if st.session_state.get("df_limpio") is not None:
                 value=True,
                 key="permitir_codigo_pais_mpuro",
             )
-        desglosar_digitos = st.checkbox(
-            "Agregar columnas para ver y corregir cada dígito de teléfono por separado",
-            value=True,
-            help="Genera una columna por cada posición del teléfono y una tabla editable "
-                 "(TablaCorreccionesDigitosTelefono) al inicio del código M, para corregir "
-                 "un dígito puntual sin tocar el dato original y sin que se pierda al refrescar.",
-            key="desglosar_digitos_mpuro",
-        )
         primeros_digitos_lista = (
             [d.strip() for d in primeros_digitos_txt.split(",") if d.strip()]
             if primeros_digitos_txt.strip() else None
         )
-
-        st.divider()
-        agregar_revision = st.checkbox(
-            "Agregar columnas de revisión (Revisar_*) para lo marcado como 'solo marcar'",
-            value=False,
-            help="Si lo desactiva, no se agrega ninguna columna Revisar_* (ni "
-                 "Requiere_Revision) para las reglas que quedaron en 'Solo marcar en "
-                 "el reporte'. Las reglas con otra acción (valor fijo, eliminar fila, "
-                 "editar individualmente, etc.) no se ven afectadas.",
-            key="agregar_revision_mpuro",
-        )
-        excluir_revision_txt = st.text_input(
-            "Excluir columnas Revisar_* puntuales (coma-separado; vacío = ninguna)",
-            value="",
-            help="Ej: Revisar_ID_Duplicado_codigo_postal, Revisar_ID_Duplicado_codigo_empleado_rep_ventas",
-            key="excluir_revision_mpuro",
-        )
-        excluir_revision_lista = (
-            [c.strip() for c in excluir_revision_txt.split(",") if c.strip()]
-            if excluir_revision_txt.strip() else None
+        st.caption(
+            "Este código nunca agrega columnas nuevas: no genera columnas "
+            "Revisar_*, Requiere_Revision, ni el desglose de teléfono por dígito. "
+            "Lo marcado como 'solo marcar en el reporte' queda documentado como "
+            "un comentario dentro del código, sin tocar la tabla."
         )
 
         script_m_puro = generar_editor_m_puro(
@@ -696,13 +673,10 @@ if st.session_state.get("df_limpio") is not None:
             digitos_telefono=digitos_telefono_manual,
             paises_telefono=paises_telefono_sel,
             permitir_codigo_pais_telefono=permitir_codigo_pais,
-            desglosar_digitos_telefono=desglosar_digitos,
             primeros_digitos_telefono_validos=primeros_digitos_lista,
             id_duplicado=config_aplicada.get("id_duplicado", "marcar_solo"),
             formula_incorrecta=config_aplicada.get("formula_incorrecta", "marcar_solo"),
             texto_inconsistente=config_aplicada.get("texto_inconsistente", "marcar_solo"),
-            agregar_columnas_revision=agregar_revision,
-            columnas_excluir_revision=excluir_revision_lista,
         )
         st.code(script_m_puro, language="text")
         st.download_button(
