@@ -692,8 +692,8 @@ class LimpiadorApp(tk.Tk):
         # Antes el rango de dígitos era fijo (8, formato de Costa Rica). Ahora se
         # puede elegir país(es) — la validación acepta la UNION de sus rangos
         # típicos de celular — o dejarlo vacío para el rango internacional amplio
-        # (7-15 dígitos, E.164). También se puede activar/desactivar el desglose
-        # por dígito (columnas Telefono_Digito_N + tabla de correcciones editable).
+        # (7-15 dígitos, E.164). El desglose por dígito (columnas Telefono_Digito_N)
+        # se eliminó: el código M puro ya no agrega columnas nuevas.
         frame_tel = ttk.LabelFrame(ventana, text="Teléfono (solo aplica al M puro)")
         frame_tel.pack(fill="x", padx=15, pady=(0, 8))
 
@@ -711,39 +711,18 @@ class LimpiadorApp(tk.Tk):
             text="Aceptar el mismo número con código de país adelante (ej. +506 ...)",
         ).pack(anchor="w", padx=8)
 
-        desglosar_digitos_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            frame_tel, variable=desglosar_digitos_var,
-            text="Agregar columnas para ver y corregir cada dígito por separado",
-        ).pack(anchor="w", padx=8, pady=(0, 6))
-
-        # -- Opciones de columnas de revisión (Revisar_*) ------------------------
-        frame_revision = ttk.LabelFrame(ventana, text="Columnas de revisión (Revisar_*)")
-        frame_revision.pack(fill="x", padx=15, pady=(0, 8))
-
-        agregar_revision_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            frame_revision, variable=agregar_revision_var,
-            text="Agregar columnas Revisar_* para lo marcado como 'solo marcar'",
-        ).pack(anchor="w", padx=8, pady=(6, 0))
-
         ttk.Label(
-            frame_revision,
-            text="Excluir columnas Revisar_* puntuales (coma-separado, ej: "
-                 "Revisar_ID_Duplicado_codigo_postal):",
+            frame_tel,
+            text="Este código nunca agrega columnas nuevas (ni Revisar_*, ni "
+                 "Requiere_Revision, ni desglose de teléfono por dígito). Lo marcado "
+                 "como 'solo marcar' queda como comentario en el código, sin tocar la tabla.",
             wraplength=420, justify="left",
-        ).pack(anchor="w", padx=8, pady=(4, 0))
-        excluir_revision_var = tk.StringVar(value="")
-        ttk.Entry(frame_revision, textvariable=excluir_revision_var).pack(fill="x", padx=8, pady=(2, 6))
+        ).pack(anchor="w", padx=8, pady=(0, 6))
 
         def _generar_m_puro():
             paises_lista = (
                 [p.strip() for p in paises_tel_var.get().split(",") if p.strip()]
                 if paises_tel_var.get().strip() else None
-            )
-            excluir_revision_lista = (
-                [c.strip() for c in excluir_revision_var.get().split(",") if c.strip()]
-                if excluir_revision_var.get().strip() else None
             )
             self._guardar_script(
                 generar_editor_m_puro(
@@ -757,12 +736,9 @@ class LimpiadorApp(tk.Tk):
                     correcciones_individuales=self.correcciones_individuales,
                     paises_telefono=paises_lista,
                     permitir_codigo_pais_telefono=permitir_codigo_pais_var.get(),
-                    desglosar_digitos_telefono=desglosar_digitos_var.get(),
                     id_duplicado=self.config_aplicada.get("id_duplicado", "marcar_solo"),
                     formula_incorrecta=self.config_aplicada.get("formula_incorrecta", "marcar_solo"),
                     texto_inconsistente=self.config_aplicada.get("texto_inconsistente", "marcar_solo"),
-                    agregar_columnas_revision=agregar_revision_var.get(),
-                    columnas_excluir_revision=excluir_revision_lista,
                 ),
                 "codigo_m_puro_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
             )
