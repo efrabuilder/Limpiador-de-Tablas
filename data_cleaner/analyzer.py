@@ -90,9 +90,19 @@ def detectar_duplicados(df: pd.DataFrame) -> List[Issue]:
 
 
 def detectar_tipo_invalido(df: pd.DataFrame) -> List[Issue]:
-    """Detecta celdas de texto no numérico dentro de columnas mayormente numéricas."""
+    """Detecta celdas de texto no numérico dentro de columnas mayormente numéricas.
+
+    Excluye columnas de telefono/fax: aunque sean mayormente dígitos, un
+    formato como "(33)5120578961" o "2 9261-2433" es un teléfono válido
+    con paréntesis/espacios/guiones, no un dato corrupto. La validación
+    correcta para esas columnas ya la hace detectar_telefonos_invalidos
+    (que sí entiende ese formato), no "se esperaba un valor numérico".
+    """
     issues = []
+    cols_telefono = set(_detectar_columnas_por_contenido(df, _PATRONES_TELEFONO, _parece_telefono))
     for col in df.columns:
+        if col in cols_telefono:
+            continue
         serie = df[col]
         es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
         if es_texto and _es_columna_numerica_potencial(serie):
@@ -169,7 +179,7 @@ def detectar_atipicos_zscore(df: pd.DataFrame, umbral: float = 3.0,
     return issues
 
 
-
+# ---------------------------------------------------------------------------
 # Detección de columnas candidatas por nombre (para auto_detectar_columnas=True)
 # ---------------------------------------------------------------------------
 
@@ -219,7 +229,7 @@ def _es_numero_con_sufijo(serie: pd.Series) -> bool:
     return con_numero_inicial.mean() > 0.7
 
 
-
+# ---------------------------------------------------------------------------
 # Fechas
 # ---------------------------------------------------------------------------
 
@@ -260,7 +270,7 @@ def detectar_fechas_invalidas(df: pd.DataFrame, columnas: Optional[List[str]] = 
     return issues
 
 
-
+# ---------------------------------------------------------------------------
 # Email
 # ---------------------------------------------------------------------------
 
@@ -283,7 +293,7 @@ def detectar_emails_invalidos(df: pd.DataFrame, columnas: Optional[List[str]] = 
     return issues
 
 
-
+# ---------------------------------------------------------------------------
 # Teléfono
 # ---------------------------------------------------------------------------
 
@@ -336,7 +346,7 @@ def detectar_telefonos_invalidos(df: pd.DataFrame, columnas: Optional[List[str]]
     return issues
 
 
-
+# ---------------------------------------------------------------------------
 # ID duplicado (distinto de fila duplicada completa)
 # ---------------------------------------------------------------------------
 
@@ -377,7 +387,7 @@ def detectar_ids_duplicados(df: pd.DataFrame, columnas: Optional[List[str]] = No
     return issues
 
 
-
+# ---------------------------------------------------------------------------
 # Fórmula / regla de negocio entre columnas (ej. Total = Cantidad × Precio)
 # ---------------------------------------------------------------------------
 
@@ -540,7 +550,7 @@ def detectar_formula_incorrecta(df: pd.DataFrame, columna_total: Optional[str] =
     return issues
 
 
-
+# ---------------------------------------------------------------------------
 # Texto inconsistente: variantes / errores de tipeo de un mismo valor categórico
 # ---------------------------------------------------------------------------
 
