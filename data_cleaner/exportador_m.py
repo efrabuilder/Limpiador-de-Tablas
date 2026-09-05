@@ -73,7 +73,7 @@ from data_cleaner.patrones import (
     parece_fecha as _parece_fecha,
     rango_digitos_telefono as _rango_digitos_telefono,
 )
-_PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + \
+_PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + _PATRONES_ESTADO + \
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
 
 ACCIONES_SOPORTADAS_M = {
