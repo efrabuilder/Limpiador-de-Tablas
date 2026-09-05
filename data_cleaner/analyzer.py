@@ -105,10 +105,17 @@ def detectar_tipo_invalido(df: pd.DataFrame) -> List[Issue]:
 
 
 def _columnas_numericas_o_potenciales(df: pd.DataFrame) -> List[str]:
-    """Columnas numéricas reales + columnas de texto que son mayormente numéricas."""
-    cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    """Columnas numéricas reales + columnas de texto que son mayormente numéricas.
+
+    Excluye columnas identificadoras (id, codigo, folio...) y de
+    telefono/fax (ver patrones.columnas_excluir_de_atipicos): no son
+    magnitudes continuas, asi que aplicarles IQR/Z-score solo genera
+    falsos positivos.
+    """
+    excluidas = set(_columnas_excluir_de_atipicos(df))
+    cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in excluidas]
     for col in df.columns:
-        if col in cols:
+        if col in cols or col in excluidas:
             continue
         serie = df[col]
         es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
@@ -162,7 +169,7 @@ def detectar_atipicos_zscore(df: pd.DataFrame, umbral: float = 3.0,
     return issues
 
 
-# ---------------------------------------------------------------------------
+
 # Detección de columnas candidatas por nombre (para auto_detectar_columnas=True)
 # ---------------------------------------------------------------------------
 
@@ -183,6 +190,7 @@ from data_cleaner.patrones import (
     parece_telefono as _parece_telefono,
     parece_fecha as _parece_fecha,
     rango_digitos_telefono as _rango_digitos_telefono,
+    columnas_excluir_de_atipicos as _columnas_excluir_de_atipicos,
 )
 # _PATRONES_*, _columnas_por_patron y _es_columna_id ahora vienen del modulo
 # compartido data_cleaner.patrones (mismo que usa exportador_m.py), en vez
@@ -211,7 +219,7 @@ def _es_numero_con_sufijo(serie: pd.Series) -> bool:
     return con_numero_inicial.mean() > 0.7
 
 
-# ---------------------------------------------------------------------------
+
 # Fechas
 # ---------------------------------------------------------------------------
 
@@ -252,7 +260,7 @@ def detectar_fechas_invalidas(df: pd.DataFrame, columnas: Optional[List[str]] = 
     return issues
 
 
-# ---------------------------------------------------------------------------
+
 # Email
 # ---------------------------------------------------------------------------
 
@@ -275,7 +283,7 @@ def detectar_emails_invalidos(df: pd.DataFrame, columnas: Optional[List[str]] = 
     return issues
 
 
-# ---------------------------------------------------------------------------
+
 # Teléfono
 # ---------------------------------------------------------------------------
 
@@ -328,7 +336,7 @@ def detectar_telefonos_invalidos(df: pd.DataFrame, columnas: Optional[List[str]]
     return issues
 
 
-# ---------------------------------------------------------------------------
+
 # ID duplicado (distinto de fila duplicada completa)
 # ---------------------------------------------------------------------------
 
@@ -369,7 +377,7 @@ def detectar_ids_duplicados(df: pd.DataFrame, columnas: Optional[List[str]] = No
     return issues
 
 
-# ---------------------------------------------------------------------------
+
 # Fórmula / regla de negocio entre columnas (ej. Total = Cantidad × Precio)
 # ---------------------------------------------------------------------------
 
@@ -532,7 +540,7 @@ def detectar_formula_incorrecta(df: pd.DataFrame, columna_total: Optional[str] =
     return issues
 
 
-# ---------------------------------------------------------------------------
+
 # Texto inconsistente: variantes / errores de tipeo de un mismo valor categórico
 # ---------------------------------------------------------------------------
 
