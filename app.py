@@ -44,18 +44,21 @@ st.set_page_config(
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_mediana", "reemplazar_media", "reemplazar_moda",
-                 "valor_fijo", "eliminar_fila", "marcar_solo"],
+                 "valor_fijo", "editar_individualmente", "eliminar_fila", "marcar_solo"],
     "duplicado": ["eliminar_fila", "marcar_solo"],
     "atipico": ["limitar", "reemplazar_mediana", "reemplazar_media",
-                "eliminar_fila", "marcar_solo"],
-    "tipo_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
-    "fecha_invalida": ["eliminar_fila", "valor_fijo", "marcar_solo"],
-    "email_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+                "editar_individualmente", "eliminar_fila", "marcar_solo"],
+    "tipo_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "fecha_invalida": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "email_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "telefono_invalido": ["editar_individualmente", "eliminar_fila", "valor_fijo", "marcar_solo"],
-    "id_duplicado": ["eliminar_fila", "valor_fijo", "marcar_solo"],
-    "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
-    "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
+    "id_duplicado": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
 }
+# "duplicado" (fila completa) queda fuera de "editar_individualmente": un
+# hallazgo de fila duplicada no tiene una sola columna/valor que editar (ver
+# Issue en analyzer.py, columna=None y valor_original=la fila completa).
 
 NOMBRES_TIPO = {
     "faltante": "Valores faltantes (vacíos/nulos)",
@@ -428,10 +431,13 @@ for tipo, cantidad in por_tipo.items():
 
     elif accion == "editar_individualmente":
         issues_tipo = [i for i in resultado.issues if i.tipo == tipo]
+        nota_telefono = (
+            " (puede corregir un solo carácter/dígito sin retipear todo el número)"
+            if tipo == "telefono_invalido" else ""
+        )
         st.caption(
-            "Edite la columna **Valor corregido** fila por fila (puede corregir un solo "
-            "carácter/dígito sin retipear todo el número). Deje igual al original si ese "
-            "registro no necesita cambio."
+            f"Edite la columna **Valor corregido** fila por fila{nota_telefono}. Deje igual "
+            "al original si ese registro no necesita cambio."
         )
         tabla_edicion = pd.DataFrame([
             {
@@ -659,7 +665,7 @@ if st.session_state.get("df_limpio") is not None:
         st.divider()
         agregar_revision = st.checkbox(
             "Agregar columnas de revisión (Revisar_*) para lo marcado como 'solo marcar'",
-            value=True,
+            value=False,
             help="Si lo desactiva, no se agrega ninguna columna Revisar_* (ni "
                  "Requiere_Revision) para las reglas que quedaron en 'Solo marcar en "
                  "el reporte'. Las reglas con otra acción (valor fijo, eliminar fila, "
