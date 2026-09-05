@@ -107,6 +107,7 @@ PAISES_TELEFONO_DISPONIBLES = {
     "Brasil": "brasil", "Uruguay": "uruguay", "Bolivia": "bolivia",
     "República Dominicana": "republica_dominicana", "Reino Unido": "reino_unido",
     "Alemania": "alemania", "Francia": "francia", "Canadá": "canada",
+    "Australia": "australia",
 }
 
 
