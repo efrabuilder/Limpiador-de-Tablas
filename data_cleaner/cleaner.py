@@ -18,7 +18,7 @@ Acciones disponibles:
 
 Tipos de hallazgo nuevos (además de faltante/duplicado/atipico/tipo_invalido):
   - 'fecha_invalida', 'email_invalido', 'telefono_invalido', 'id_duplicado',
-    'formula_incorrecta', 'texto_inconsistente'
+    'formula_incorrecta', 'texto_inconsistente', 'estado_invalido'
   Por defecto se dejan en 'marcar_solo' (corregirlos automáticamente es
   riesgoso: un email o teléfono "corregido" a ciegas puede quedar mal); se
   pueden pasar a 'valor_fijo', 'usar_sugerido' o 'eliminar_fila' vía config.
@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
     "id_duplicado": "marcar_solo",
     "formula_incorrecta": "marcar_solo",
     "texto_inconsistente": "marcar_solo",
+    "estado_invalido": "marcar_solo",
 }
 
 # Tipos nuevos para los que 'valor_fijo' reemplaza directamente el valor
@@ -53,6 +54,7 @@ DEFAULT_CONFIG = {
 _TIPOS_VALOR_FIJO_DIRECTO = {
     "fecha_invalida", "email_invalido", "telefono_invalido",
     "id_duplicado", "formula_incorrecta", "texto_inconsistente",
+    "estado_invalido",
 }
 # Tipos para los que existe un valor_sugerido calculado por el analizador.
 _TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente"}
