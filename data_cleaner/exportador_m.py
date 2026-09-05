@@ -442,7 +442,6 @@ class _ConstructorM:
     def __init__(self, paso_inicial: str):
         self.pasos: List[Tuple[str, str]] = []
         self.ultimo = paso_inicial
-        self.banderas: List[str] = []  # nombres de columnas Revisar_* generadas
 
     def agregar(self, nombre: str, formula_con_placeholder: str) -> str:
         """formula_con_placeholder puede usar el texto literal {prev} para referirse
@@ -452,9 +451,6 @@ class _ConstructorM:
         self.pasos.append((nombre, formula))
         self.ultimo = nombre
         return nombre
-
-    def bandera(self, nombre_col: str):
-        self.banderas.append(nombre_col)
 
     def construir(self, funciones_extra: str = "") -> str:
         cuerpo = ",\n\n".join(f"  {_m_ident(n)} = {f}" for n, f in self.pasos)
@@ -482,7 +478,6 @@ def generar_editor_m_puro(
     digitos_telefono: Optional[Tuple[int, int]] = None,
     paises_telefono: Optional[List[str]] = None,
     permitir_codigo_pais_telefono: bool = True,
-    desglosar_digitos_telefono: bool = True,
     primeros_digitos_telefono_validos: Optional[List[str]] = None,
     columnas_id: Optional[List[str]] = None,
     columna_total: Optional[str] = None,
@@ -492,11 +487,8 @@ def generar_editor_m_puro(
     columnas_texto: Optional[List[str]] = None,
     umbral_similitud_texto: float = 0.85,
     max_cardinalidad_ratio_texto: float = 0.5,
-    # --- correcciones puntuales (accion 'editar_individualmente') y control
-    # de las columnas Revisar_* (banderas de "marcar_solo") ---
+    # --- correcciones puntuales (accion 'editar_individualmente') ---
     correcciones_individuales: Optional[Dict[tuple, object]] = None,
-    agregar_columnas_revision: bool = True,
-    columnas_excluir_revision: Optional[List[str]] = None,
 ) -> str:
     """Genera codigo M 100% nativo (sin Python.Execute) equivalente a
     integraciones_bi/limpiador_powerbi.py, usando `df` (los datos YA cargados
@@ -518,27 +510,22 @@ def generar_editor_m_puro(
         acepta el mismo numero con 1-3 digitos extra al inicio (codigo de
         pais sin "+"), para no rechazar numeros que vienen con codigo de
         pais incluido.
-      - `desglosar_digitos_telefono`: si True (por defecto), por cada
-        columna de telefono se agregan columnas "<col>_Digito_1..N" (un
-        caracter cada una) y "<col>_Posiciones_Invalidas", para visualizar
-        exactamente donde esta el error. Ademas se inyecta al inicio del
-        query una tabla editable a mano (`TablaCorreccionesDigitosTelefono`)
-        donde se puede agregar una fila por cada digito puntual a corregir
-        (identificando el registro por ID, o por un indice de fila si el
-        dataset no tiene columna ID), sin tocar el dato de origen ni
-        perderse en cada refresh.
+
+    IMPORTANTE: este generador NUNCA agrega columnas nuevas al resultado
+    final (ni columnas Revisar_*, ni Requiere_Revision, ni el desglose de
+    telefono por digito). Cuando una regla queda en "marcar_solo" (o en
+    cualquier accion que antes se resolvia agregando una columna de
+    bandera), simplemente no se genera ningun paso para esa columna y se
+    deja un comentario aclarandolo en el M generado; el dato de origen no
+    se toca. Las columnas de correccion puntual usadas internamente
+    ("editar_individualmente") siguen funcionando porque reemplazan la
+    columna existente (via RemoveColumns + RenameColumns), no agregan una
+    nueva.
     """
     cfg_basico = {"faltante": "reemplazar_mediana", "duplicado": "eliminar_fila",
                   "atipico": "limitar", "tipo_invalido": "marcar_solo", **(config or {})}
     valores_fijos = valores_fijos or {}
     comentarios: List[str] = []
-    _columnas_excluir_revision = set(columnas_excluir_revision or [])
-
-    def _incluir_revision(nombre_bandera: str) -> bool:
-        """Decide si se agrega una columna Revisar_* concreta: False si el
-        interruptor general esta apagado, o si ese nombre puntual esta en la
-        lista de exclusion."""
-        return agregar_columnas_revision and nombre_bandera not in _columnas_excluir_revision
 
     a_faltante = _accion_o_fallback("faltante", cfg_basico["faltante"], comentarios)
     a_duplicado = _accion_o_fallback("duplicado", cfg_basico["duplicado"], comentarios)
@@ -586,30 +573,17 @@ def generar_editor_m_puro(
     cb = _ConstructorM(nombre_paso_anterior)
     necesita_fecha_fn = bool(cols_fecha)
     necesita_percentil_fn = (a_atipico in {"limitar"})
-    necesita_correccion_digitos_fn = bool(cols_tel) and (desglosar_digitos_telefono or a_tel == "editar_individualmente")
+    necesita_correccion_digitos_fn = bool(cols_tel) and a_tel == "editar_individualmente"
 
     # -- 1) Duplicados de fila completa --------------------------------------
     if a_duplicado == "eliminar_fila":
         cb.agregar("SinDuplicados", "Table.Distinct({prev})")
-    elif a_duplicado == "marcar_solo" and _incluir_revision("Revisar_Duplicado"):
-        cb.agregar("ConteoDupFila",
-                    "Table.Group({prev}, Table.ColumnNames(" + _m_ident(cb.ultimo) + "), "
-                    '{{"_conteo_dup_fila", each Table.RowCount(_), each Table.FirstN(_,1){0}, Table.ColumnNames(' + _m_ident(cb.ultimo) + ')}})')
-        # Nota: Table.Group con GroupKind.Local por defecto agrupa filas identicas;
-        # se anexa el conteo y se re-expande para no perder columnas originales.
-        # Implementacion simplificada: se marca via join en vez de Group+expand
-        # para evitar reordenar columnas.
-        cb.pasos.pop()  # descartar el intento anterior (queda mas simple con NestedJoin)
-        cb.ultimo = nombre_paso_anterior if not cb.pasos else cb.pasos[-1][0]
-        base_dup = _m_ident(cb.ultimo)
-        cb.agregar("ConteoPorFila",
-                    "Table.Group(" + base_dup + ", Table.ColumnNames(" + base_dup + "), "
-                    '{{"_conteo_fila", each Table.RowCount(_)}})')
-        cb.agregar("Revisar_Duplicado_col",
-                    "Table.AddColumn(Table.Join(" + base_dup + ", Table.ColumnNames(" + base_dup + "), "
-                    "{prev}, Table.ColumnNames(" + base_dup + ")), \"Revisar_Duplicado\", each [_conteo_fila] > 1, type logical)")
-        cb.agregar("SinConteoFila", 'Table.RemoveColumns({prev}, {"_conteo_fila"})')
-        cb.bandera("Revisar_Duplicado")
+    elif a_duplicado == "marcar_solo":
+        comentarios.append(
+            '  // AVISO: "duplicado" quedo en "marcar_solo", pero el codigo M puro '
+            'no agrega columnas nuevas (ni siquiera Revisar_Duplicado); no se genero '
+            'ningun paso para esta regla.'
+        )
 
     # -- 1.5) ID de referencia + correcciones individuales genericas ------------
     # Se resuelve aqui (despues de Duplicados, antes de cualquier otra regla)
@@ -638,7 +612,7 @@ def generar_editor_m_puro(
                 _vistos_edicion.add((_tipo_ci, _columna_ci))
         columnas_edicion_individual = sorted(_vistos_edicion)
 
-    necesita_id_correccion_tel = bool(cols_tel) and (desglosar_digitos_telefono or a_tel == "editar_individualmente")
+    necesita_id_correccion_tel = bool(cols_tel) and a_tel == "editar_individualmente"
     id_ref_col = cols_id[0] if cols_id else None
     if (necesita_id_correccion_tel or columnas_edicion_individual) and id_ref_col is None:
         cb.agregar("IndiceParaCorreccion", 'Table.AddIndexColumn({prev}, "_IndiceFila", 0, 1, Int64.Type)')
@@ -680,14 +654,12 @@ def generar_editor_m_puro(
                 formula = f'{{{_m_str(col)}, each if _ = null then null else {cadena}}}'
                 cb.agregar(f"Corregido_{re.sub(r"[^A-Za-z0-9]", "", col)}",
                            "Table.TransformColumns({prev}, {" + formula + "})")
-            else:  # marcar_solo -> columna Revisar_Texto_<col>
-                nombre_bandera = f"Revisar_Texto_{col}"
-                if _incluir_revision(nombre_bandera):
-                    variantes_lista = "{" + ", ".join(_m_str(v) for v in mapa.keys()) + "}"
-                    cb.agregar(f"Revisar_{re.sub(r'[^A-Za-z0-9]', '', col)}",
-                               "Table.AddColumn({prev}, " + _m_str(nombre_bandera) +
-                               f", each List.Contains({variantes_lista}, [{col}]), type logical)")
-                    cb.bandera(nombre_bandera)
+            else:  # marcar_solo -> el M puro ya no agrega columnas de bandera
+                comentarios.append(
+                    f'  // AVISO: "texto_inconsistente" quedo en "marcar_solo" para la '
+                    f'columna "{col}", pero el codigo M puro no agrega columnas nuevas '
+                    f'(ni Revisar_Texto_{col}); no se genero ningun paso para esta columna.'
+                )
 
     # -- 4) Fechas ------------------------------------------------------------
     for col in cols_fecha:
@@ -714,18 +686,23 @@ def generar_editor_m_puro(
                        "Table.TransformColumns({prev}, {{" + _m_str(col) + f", {cuerpo_parse}, type nullable date}}}})")
             if a_fecha == "marcar_solo":
                 nombre_bandera = f"Revisar_Fecha_{col}" if len(cols_fecha) > 1 else "Revisar_Fecha"
-                if _incluir_revision(nombre_bandera):
-                    cb.agregar(f"RevisarFecha_{re.sub(r'[^A-Za-z0-9]', '', col)}",
-                               "Table.AddColumn({prev}, " + _m_str(nombre_bandera) +
-                               f", each [{col}] = null, type logical)")
-                    cb.bandera(nombre_bandera)
+                comentarios.append(
+                    f'  // AVISO: "fecha_invalida" quedo en "marcar_solo" para la columna '
+                    f'"{col}", pero el codigo M puro no agrega columnas nuevas (ni '
+                    f'{nombre_bandera}); solo se convirtieron las fechas validas.'
+                )
 
     # -- 5) ID duplicado --------------------------------------------------------
     for col in cols_id:
         if col not in df.columns:
             continue
         nombre_bandera_id = f"Revisar_ID_Duplicado_{col}" if len(cols_id) > 1 else "Revisar_ID_Duplicado"
-        if a_id != "eliminar_fila" and not _incluir_revision(nombre_bandera_id):
+        if a_id != "eliminar_fila":
+            comentarios.append(
+                f'  // AVISO: "id_duplicado" quedo en "{a_id}" para la columna "{col}", '
+                f'pero el codigo M puro no agrega columnas nuevas (ni {nombre_bandera_id}); '
+                f'no se genero ningun paso para esta columna.'
+            )
             continue
         base = _m_ident(cb.ultimo)
         cb.agregar(f"ConteoID_{re.sub(r'[^A-Za-z0-9]', '', col)}",
@@ -740,14 +717,11 @@ def generar_editor_m_puro(
                    f"Table.NestedJoin({base}, {{{_m_str(col)}}}, {conteo_nombre}, {{{_m_str(col)}}}, \"_infoID\", JoinKind.LeftOuter)")
         cb.agregar(f"ExpandID_{re.sub(r'[^A-Za-z0-9]', '', col)}",
                    'Table.ExpandTableColumn({prev}, "_infoID", {"_conteo_id"})')
-        if a_id == "eliminar_fila":
-            cb.agregar(f"SinIDDup_{re.sub(r'[^A-Za-z0-9]', '', col)}",
-                       'Table.Distinct(Table.RemoveColumns(Table.Sort({prev}, {{"_conteo_id", Order.Ascending}}), {"_conteo_id"}), {' + _m_str(col) + '})')
-        else:
-            cb.agregar(f"RevisarIDDup_{re.sub(r'[^A-Za-z0-9]', '', col)}",
-                       "Table.AddColumn({prev}, " + _m_str(nombre_bandera_id) + ", each [_conteo_id] > 1, type logical)")
-            cb.agregar(f"SinConteoID_{re.sub(r'[^A-Za-z0-9]', '', col)}", 'Table.RemoveColumns({prev}, {"_conteo_id"})')
-            cb.bandera(nombre_bandera_id)
+        # Solo "eliminar_fila" llega hasta aqui (ver el "continue" de arriba
+        # para cualquier otra accion, ya que las demas requerian agregar una
+        # columna Revisar_ID_Duplicado_* que este generador ya no crea).
+        cb.agregar(f"SinIDDup_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                   'Table.Distinct(Table.RemoveColumns(Table.Sort({prev}, {{"_conteo_id", Order.Ascending}}), {"_conteo_id"}), {' + _m_str(col) + '})')
 
     # -- 6) Numericos: faltante / tipo_invalido / atipico ------------------------
     # Se excluyen las columnas que ya tienen su propia regla especializada
@@ -779,11 +753,12 @@ def generar_editor_m_puro(
             cb.agregar(f"SinFaltantes_{nombre_col_id}",
                        "Table.ReplaceValue({prev}, null, " + expr_relleno +
                        f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
-        elif a_faltante == "marcar_solo" and _incluir_revision(f"Revisar_Faltante_{col}"):
-            cb.agregar(f"RevisarFaltante_{nombre_col_id}",
-                       "Table.AddColumn({prev}, " + _m_str(f"Revisar_Faltante_{col}") +
-                       f", each [{col}] = null, type logical)")
-            cb.bandera(f"Revisar_Faltante_{col}")
+        elif a_faltante == "marcar_solo":
+            comentarios.append(
+                f'  // AVISO: "faltante" quedo en "marcar_solo" para la columna "{col}", '
+                f'pero el codigo M puro no agrega columnas nuevas (ni Revisar_Faltante_{col}); '
+                f'no se genero ningun paso para esta columna.'
+            )
 
     # -- 6b) Texto: faltante (valor_fijo / marcar_solo / reemplazar_moda) -------
     # Las columnas de puro texto (ej. linea_direccion2, region) no entran en
@@ -809,11 +784,12 @@ def generar_editor_m_puro(
             cb.agregar(f"SinFaltantesTexto_{nombre_col_id}",
                        "Table.ReplaceValue({prev}, null, " + expr_relleno +
                        f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
-        elif a_faltante == "marcar_solo" and _incluir_revision(f"Revisar_Faltante_{col}"):
-            cb.agregar(f"RevisarFaltanteTexto_{nombre_col_id}",
-                       "Table.AddColumn({prev}, " + _m_str(f"Revisar_Faltante_{col}") +
-                       f", each [{col}] = null, type logical)")
-            cb.bandera(f"Revisar_Faltante_{col}")
+        elif a_faltante == "marcar_solo":
+            comentarios.append(
+                f'  // AVISO: "faltante" quedo en "marcar_solo" para la columna "{col}", '
+                f'pero el codigo M puro no agrega columnas nuevas (ni Revisar_Faltante_{col}); '
+                f'no se genero ningun paso para esta columna.'
+            )
 
     if necesita_percentil_fn:
         pass  # la funcion se inyecta al final del bloque de atipicos
@@ -833,19 +809,12 @@ def generar_editor_m_puro(
                      f"if _ = null or _li = null then _ else if _ < _li then _li else if _ > _ls then _ls else _"
                      f", type number}}}})")
                 )
-            elif a_atipico == "marcar_solo" and _incluir_revision(f"Revisar_Atipico_{col}"):
-                cb.agregar(
-                    f"RevisarAtipico_{nombre_col_id}",
-                    (f"let _lista = List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})), "
-                     f"_q1 = Percentil(_lista, 0.25), _q3 = Percentil(_lista, 0.75), "
-                     f"_iqr = if _q1 = null or _q3 = null then null else _q3 - _q1, "
-                     f"_li = if _iqr = null then null else _q1 - {factor_iqr} * _iqr, "
-                     f"_ls = if _iqr = null then null else _q3 + {factor_iqr} * _iqr "
-                     f"in Table.AddColumn({{prev}}, {_m_str(f'Revisar_Atipico_{col}')}, each "
-                     f"[{col}] <> null and _li <> null and ([{col}] < _li or [{col}] > _ls), type logical)")
+            elif a_atipico == "marcar_solo":
+                comentarios.append(
+                    f'  // AVISO: "atipico" quedo en "marcar_solo" para la columna "{col}", '
+                    f'pero el codigo M puro no agrega columnas nuevas (ni Revisar_Atipico_{col}); '
+                    f'no se genero ningun paso para esta columna.'
                 )
-                cb.bandera(f"Revisar_Atipico_{col}")
-                necesita_percentil_fn = True
             if a_atipico == "limitar":
                 necesita_percentil_fn = True
 
@@ -863,13 +832,11 @@ def generar_editor_m_puro(
             cb.agregar("FormulaCorregida",
                        'Table.RenameColumns({prev}, {{"_total_esperado", ' + _m_str(col_total) + '}})')
         else:
-            if _incluir_revision("Revisar_Formula"):
-                tolerancia_check = (
-                    f"[_total_esperado] <> null and [{col_total}] <> null and "
-                    f"Number.Abs([{col_total}] - [_total_esperado]) > (Number.Abs([_total_esperado]) * {tolerancia_formula} + 0.01)"
-                )
-                cb.agregar("RevisarFormula", "Table.AddColumn({prev}, \"Revisar_Formula\", each " + tolerancia_check + ", type logical)")
-                cb.bandera("Revisar_Formula")
+            comentarios.append(
+                f'  // AVISO: "formula_incorrecta" quedo en "{a_formula}", pero el codigo '
+                f'M puro no agrega columnas nuevas (ni Revisar_Formula); no se genero '
+                f'ningun paso de marcado para esta regla.'
+            )
             cb.agregar("SinTotalEsperado", 'Table.RemoveColumns({prev}, {"_total_esperado"})')
 
     # -- 8) Telefono -----------------------------------------------------------
@@ -909,7 +876,7 @@ def generar_editor_m_puro(
         # adelante. Se hace via AddColumn + remove + rename (en vez de
         # TransformColumns) porque hace falta el ID de la fila, no solo el
         # valor de la celda.
-        if desglosar_digitos_telefono or a_tel == "editar_individualmente":
+        if a_tel == "editar_individualmente":
             cb.agregar(f"TelCorreccion_{nombre_col_id}",
                        "Table.AddColumn({prev}, \"_tel_corr_" + nombre_col_id + "\", each "
                        f"AplicarCorreccionDigito([{id_ref_col}], {_m_str(col)}, "
@@ -941,37 +908,16 @@ def generar_editor_m_puro(
                        f", each if _ = null then null else let _soloDigitos = Text.Select(_, {{\"0\"..\"9\"}}) "
                        f"in if ({chequeo_largo}{chequeo_primer_digito}) then _soloDigitos else null, type text}}}})")
         else:
-            lista_d_flag = ""
-            if primeros_digitos_telefono_validos:
-                lista_d = "{" + ", ".join(_m_str(d) for d in primeros_digitos_telefono_validos) + "}"
-                lista_d_flag = f" or not List.Contains({lista_d}, Text.Start(Text.Select(Text.From([{col}]), {{\"0\"..\"9\"}}), 1))"
-            chequeo_largo_col = chequeo_largo.replace('_soloDigitos', f'Text.Select(Text.From([{col}]), {{"0".."9"}})')
-            if _incluir_revision(f"Revisar_Telefono_{col}"):
-                cb.agregar(f"RevisarTelefono_{nombre_col_id}",
-                           "Table.AddColumn({prev}, " + _m_str(f"Revisar_Telefono_{col}") +
-                           f", each [{col}] = null or not ({chequeo_largo_col}){lista_d_flag}, type logical)")
-                cb.bandera(f"Revisar_Telefono_{col}")
+            comentarios.append(
+                f'  // AVISO: "telefono_invalido" quedo en "{a_tel}" para la columna '
+                f'"{col}", pero el codigo M puro no agrega columnas nuevas (ni '
+                f'Revisar_Telefono_{col}); no se genero ningun paso para esta columna.'
+            )
 
-        # 8c) Desglose caracter por caracter, para VISUALIZAR exactamente en
-        # que posicion esta el error (ej. una letra en vez de un digito, o
-        # un digito extra/faltante) y poder corregirlo agregando una fila en
-        # TablaCorreccionesDigitosTelefono (definida al inicio del query).
-        # Nota: se usan variables con nombre (_v, _t) en vez de "_" dentro de
-        # los "each" anidados, porque "_" se reasigna al elemento de la
-        # lista en List.Select/List.Transform y pisaria el valor de la fila.
-        if desglosar_digitos_telefono:
-            for n in range(1, max_d_tel + 1):
-                cb.agregar(f"{nombre_col_id}_Digito_{n}",
-                           "Table.AddColumn({prev}, " + _m_str(f"{col}_Digito_{n}") +
-                           f", each let _v = [{col}] in if _v = null then null else "
-                           f"let _t = Text.From(_v) in if Text.Length(_t) >= {n} "
-                           f"then Text.Range(_t, {n - 1}, 1) else null, type text)")
-            cb.agregar(f"{nombre_col_id}_PosicionesInvalidas",
-                       "Table.AddColumn({prev}, " + _m_str(f"{col}_Posiciones_Invalidas") +
-                       f", each let _v = [{col}] in if _v = null then null else "
-                       f"let _t = Text.From(_v) in Text.Combine(List.Transform(List.Select("
-                       f"List.Numbers(1, Text.Length(_t)), each not List.Contains({{\"0\"..\"9\"}}, "
-                       f"Text.Range(_t, _ - 1, 1))), Text.From), \", \"), type text)")
+        # 8c) El desglose caracter-por-caracter (columnas "<col>_Digito_N" y
+        # "<col>_Posiciones_Invalidas") se elimino: el codigo M puro ya no
+        # agrega columnas nuevas al resultado final, ni siquiera para
+        # visualizar donde esta el error de un telefono.
 
     # -- 9) Email ---------------------------------------------------------------
     for col in cols_email:
@@ -997,15 +943,11 @@ def generar_editor_m_puro(
             cb.agregar(f"EmailLimpio_{nombre_col_id}",
                        "Table.TransformColumns({prev}, {{" + _m_str(col) +
                        f", each if _ = null then null else Text.Lower(Text.Remove(Text.Trim(_), \" \")), type text}}}})")
-            if _incluir_revision(f"Revisar_Email_{col}"):
-                cb.agregar(f"RevisarEmail_{nombre_col_id}",
-                           "Table.AddColumn({prev}, " + _m_str(f"Revisar_Email_{col}") + f", each {chequeo_email}, type logical)")
-                cb.bandera(f"Revisar_Email_{col}")
-
-    # -- 10) Columna final Requiere_Revision -------------------------------------
-    if cb.banderas:
-        expr = " or ".join(f"[{b}]" for b in cb.banderas)
-        cb.agregar("RevisionFinal", "Table.AddColumn({prev}, \"Requiere_Revision\", each " + expr + ", type logical)")
+            comentarios.append(
+                f'  // AVISO: "email_invalido" quedo en "marcar_solo" para la columna '
+                f'"{col}", pero el codigo M puro no agrega columnas nuevas (ni '
+                f'Revisar_Email_{col}); solo se normalizo el formato del correo.'
+            )
 
     funciones_extra = ""
     if necesita_fecha_fn:
