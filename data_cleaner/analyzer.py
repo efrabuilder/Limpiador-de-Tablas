@@ -99,7 +99,8 @@ def detectar_tipo_invalido(df: pd.DataFrame) -> List[Issue]:
     (que sí entiende ese formato), no "se esperaba un valor numérico".
     """
     issues = []
-    cols_telefono = set(_detectar_columnas_por_contenido(df, _PATRONES_TELEFONO, _parece_telefono))
+    cols_telefono = set(_detectar_columnas_por_contenido(df, _PATRONES_TELEFONO, _parece_telefono,
+                                                          excluir_por_nombre=_PATRONES_NO_TELEFONO))
     for col in df.columns:
         if col in cols_telefono:
             continue
@@ -193,6 +194,9 @@ from data_cleaner.patrones import (
     PATRONES_DESCUENTO as _PATRONES_DESCUENTO,
     PATRONES_IMPUESTO as _PATRONES_IMPUESTO,
     PATRONES_ENVIO as _PATRONES_ENVIO,
+    PATRONES_NO_TELEFONO as _PATRONES_NO_TELEFONO,
+    columna_admite_fecha_pendiente as _columna_admite_fecha_pendiente,
+    es_valor_fecha_pendiente as _es_valor_fecha_pendiente,
     columnas_por_patron as _columnas_por_patron,
     es_columna_id as _es_columna_id,
     detectar_columnas as _detectar_columnas_por_contenido,
@@ -249,9 +253,16 @@ def detectar_fechas_invalidas(df: pd.DataFrame, columnas: Optional[List[str]] = 
         if col not in df.columns:
             continue
         serie = df[col]
+        # Fechas de cobro/pago/entrega/ingreso: "Pendiente", "No aplica",
+        # "Sin fecha", etc. son un estado valido (la transaccion aun no
+        # ocurre), no un formato de fecha corrupto -- se dejan pasar sin
+        # generar hallazgo para esas columnas especificas.
+        admite_pendiente = _columna_admite_fecha_pendiente(col)
         parseado = pd.to_datetime(serie, errors="coerce")
         for idx, val in serie.items():
             if pd.isna(val):
+                continue
+            if admite_pendiente and _es_valor_fecha_pendiente(val):
                 continue
             fecha = parseado.loc[idx]
             if pd.isna(fecha):
@@ -324,7 +335,8 @@ def detectar_telefonos_invalidos(df: pd.DataFrame, columnas: Optional[List[str]]
     else:
         min_d, max_d = _rango_digitos_telefono(paises)
     issues = []
-    cols = columnas if columnas is not None else (_detectar_columnas_por_contenido(df, _PATRONES_TELEFONO, _parece_telefono) if auto else [])
+    cols = columnas if columnas is not None else (_detectar_columnas_por_contenido(
+        df, _PATRONES_TELEFONO, _parece_telefono, excluir_por_nombre=_PATRONES_NO_TELEFONO) if auto else [])
     regex_formato = re.compile(patron) if patron else _REGEX_TELEFONO_FORMATO
     for col in cols:
         if col not in df.columns:
