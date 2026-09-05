@@ -40,7 +40,7 @@ from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
 
-# -----------------------------------------------------------------------------
+
 # Normalización de nombres de columna
 # -----------------------------------------------------------------------------
 def normalizar_nombre(col) -> str:
@@ -101,7 +101,7 @@ def es_columna_id(col) -> bool:
     return False
 
 
-# -----------------------------------------------------------------------------
+
 # Vocabulario ampliado (bilingue espanol/ingles + sinonimos comunes de
 # distintos rubros: retail, nomina, salud, logistica, educacion).
 # -----------------------------------------------------------------------------
@@ -110,7 +110,7 @@ PATRONES_EMAIL = (
 )
 PATRONES_TELEFONO = (
     "telefono", "phone", "celular", "movil", "whatsapp",
-    "numero_telefono", "phone_number", "tel", "mobile",
+    "numero_telefono", "phone_number", "tel", "mobile", "fax",
 )
 PATRONES_FECHA = (
     "fecha", "date", "fec", "dob", "birth", "nacimiento",
@@ -139,7 +139,7 @@ PATRONES_ENVIO = (
 )
 
 
-# -----------------------------------------------------------------------------
+
 # Nivel 2: deteccion por CONTENIDO (respaldo cuando el nombre no dice nada)
 # -----------------------------------------------------------------------------
 _REGEX_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
@@ -195,7 +195,6 @@ def parece_id(serie: pd.Series, umbral_unicidad: float = 0.95) -> bool:
     return no_nulos.nunique() / len(no_nulos) >= umbral_unicidad
 
 
-# -----------------------------------------------------------------------------
 # Rango de digitos de telefono/celular por pais (numero nacional, SIN codigo
 # de pais). Antes el proyecto asumia siempre 8 digitos (formato de Costa
 # Rica) sin importar el dataset. Esta tabla permite aceptar la mayoria de
@@ -290,3 +289,26 @@ def detectar_columnas(
         except Exception:
             continue
     return candidatas
+
+
+
+# Columnas a excluir del chequeo estadistico de atipicos (IQR / Z-score)
+# -----------------------------------------------------------------------------
+
+
+def columnas_excluir_de_atipicos(df: pd.DataFrame) -> List[str]:
+    """Columnas que NO deben pasar por el chequeo de atipicos por IQR/Z-score:
+    identificadores (id, codigo, folio, clave...) y telefono/fax.
+
+    Ninguna de ellas es una magnitud continua -- no existe una
+    "distribucion normal" esperada para un codigo postal o un numero de
+    telefono -- asi que aplicarles IQR/Z-score solo genera falsos
+    positivos (ej. un codigo postal valido de otra ciudad, o un telefono
+    con codigo de pais, marcados como "atipicos" por estar numericamente
+    lejos del grueso de los datos). El chequeo correcto para telefonos ya
+    existe en detectar_telefonos_invalidos (valida formato/longitud, no
+    cercania estadistica a la media).
+    """
+    cols_id = [c for c in df.columns if es_columna_id(c)]
+    cols_tel = detectar_columnas(df, PATRONES_TELEFONO, parece_telefono, excluir=cols_id)
+    return list(dict.fromkeys(cols_id + cols_tel))
