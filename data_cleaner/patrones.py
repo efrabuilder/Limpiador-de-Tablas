@@ -239,7 +239,7 @@ PATRONES_FECHA_FUERTE = (
 # columna como "folio_pago" se detectaba como fecha solo por el token
 # "pago", marcando cada numero de folio como "Formato de fecha no
 # reconocido" (falso positivo).
-PATRONES_FECHA_DEBIL = ("ingreso", "egreso", "cobro", "pago", "entrega")
+PATRONES_FECHA_DEBIL = ("ingreso", "egreso", "cobro", "pago", "entrega", "poder")
 PATRONES_FECHA = PATRONES_FECHA_FUERTE + PATRONES_FECHA_DEBIL
 PATRONES_TOTAL = (
     "total", "monto", "importe", "amount", "subtotal", "salario", "sueldo",
@@ -261,6 +261,28 @@ PATRONES_IMPUESTO = (
 PATRONES_ENVIO = (
     "envio", "flete", "shipping", "freight", "logistico",
 )
+PATRONES_ESTADO = (
+    "estado", "status",
+)
+
+# -----------------------------------------------------------------------------
+# Valores validos conocidos para una columna de estado/status. Comparados ya
+# normalizados (sin acentos, minusculas, espacios extra) via
+# `es_valor_estado_valido`, asi que "Activo", "ACTIVO ", "áctivo" cuentan
+# igual como validos.
+# -----------------------------------------------------------------------------
+VALORES_ESTADO_VALIDOS: Tuple[str, ...] = ("activo", "inactivo", "pendiente")
+
+
+def es_valor_estado_valido(valor, valores_validos: Optional[Iterable[str]] = None) -> bool:
+    """True si `valor` es uno de los estados aceptados (por defecto:
+    activo/inactivo/pendiente); se puede pasar `valores_validos` para usar
+    una lista distinta a la que trae el proyecto por defecto."""
+    if valor is None:
+        return False
+    validos = valores_validos if valores_validos is not None else VALORES_ESTADO_VALIDOS
+    validos_norm = {_normalizar_valor_texto(v) for v in validos}
+    return _normalizar_valor_texto(valor) in validos_norm
 
 
 # -----------------------------------------------------------------------------
