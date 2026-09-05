@@ -40,7 +40,7 @@ from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
 
-
+# -----------------------------------------------------------------------------
 # Normalización de nombres de columna
 # -----------------------------------------------------------------------------
 def normalizar_nombre(col) -> str:
@@ -101,7 +101,7 @@ def es_columna_id(col) -> bool:
     return False
 
 
-
+# -----------------------------------------------------------------------------
 # Vocabulario ampliado (bilingue espanol/ingles + sinonimos comunes de
 # distintos rubros: retail, nomina, salud, logistica, educacion).
 # -----------------------------------------------------------------------------
@@ -139,7 +139,7 @@ PATRONES_ENVIO = (
 )
 
 
-
+# -----------------------------------------------------------------------------
 # Nivel 2: deteccion por CONTENIDO (respaldo cuando el nombre no dice nada)
 # -----------------------------------------------------------------------------
 _REGEX_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
@@ -195,6 +195,7 @@ def parece_id(serie: pd.Series, umbral_unicidad: float = 0.95) -> bool:
     return no_nulos.nunique() / len(no_nulos) >= umbral_unicidad
 
 
+# -----------------------------------------------------------------------------
 # Rango de digitos de telefono/celular por pais (numero nacional, SIN codigo
 # de pais). Antes el proyecto asumia siempre 8 digitos (formato de Costa
 # Rica) sin importar el dataset. Esta tabla permite aceptar la mayoria de
@@ -291,11 +292,9 @@ def detectar_columnas(
     return candidatas
 
 
-
+# -----------------------------------------------------------------------------
 # Columnas a excluir del chequeo estadistico de atipicos (IQR / Z-score)
 # -----------------------------------------------------------------------------
-
-
 def columnas_excluir_de_atipicos(df: pd.DataFrame) -> List[str]:
     """Columnas que NO deben pasar por el chequeo de atipicos por IQR/Z-score:
     identificadores (id, codigo, folio, clave...) y telefono/fax.
