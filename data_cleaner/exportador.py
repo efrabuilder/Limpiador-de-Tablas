@@ -515,6 +515,15 @@ def _asignar(df, fila, columna, valor):
         df.at[fila, columna] = valor
 
 
+def _interpretar_valor_fijo(valor):
+    """Si el usuario escribio literalmente "null" (sin importar mayusculas)
+    como valor fijo, lo tratamos como el valor vacio real (None/NaN) en vez
+    del texto "null"."""
+    if isinstance(valor, str) and valor.strip().lower() == "null":
+        return None
+    return valor
+
+
 def _valor_reemplazo(df, columna, accion, valor_fijo=None):
     serie_num = pd.to_numeric(df[columna], errors="coerce")
     if accion == "reemplazar_media":
@@ -525,7 +534,7 @@ def _valor_reemplazo(df, columna, accion, valor_fijo=None):
         moda = df[columna].mode(dropna=True)
         return moda.iloc[0] if not moda.empty else None
     if accion == "valor_fijo":
-        return valor_fijo
+        return _interpretar_valor_fijo(valor_fijo)
     return None
 
 
@@ -602,7 +611,7 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
 
         elif h["tipo"] in _TIPOS_VALOR_FIJO_DIRECTO and accion == "valor_fijo":
-            valor_nuevo = _buscar_valor_fijo(valores_fijos, h["tipo"], h["columna"])
+            valor_nuevo = _interpretar_valor_fijo(_buscar_valor_fijo(valores_fijos, h["tipo"], h["columna"]))
             _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
 
         registro.append({
