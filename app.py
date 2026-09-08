@@ -221,21 +221,16 @@ with st.sidebar:
             if host_sql and basedatos_sql:
                 # Construcción de la cadena según el motor
                 if motor_sql == "SQL Server":
-                    # Para SQL Server con autenticación Windows:
-                    # Si no se proporciona usuario y contraseña, usamos Trusted_Connection=yes
+                    # Sufijo común: fuerza TLS con certificado autofirmado de confianza,
+                    # requerido por instalaciones de SQL Server que exigen cifrado por defecto.
+                    parametros_odbc = "driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+                    servidor_sql = f"{host_sql}:{puerto_sql}" if puerto_sql else host_sql
+
+                    # Sin usuario y contraseña: autenticación de Windows (Trusted_Connection)
                     if not usuario_sql and not clave_sql:
-                        # Usar autenticación de Windows
-                        # El puerto puede omitirse (se usará el predeterminado)
-                        if puerto_sql:
-                            cadena_conexion = f"{driver_sql}://@{host_sql}:{puerto_sql}/{basedatos_sql}?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
-                        else:
-                            cadena_conexion = f"{driver_sql}://@{host_sql}/{basedatos_sql}?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
+                        cadena_conexion = f"{driver_sql}://@{servidor_sql}/{basedatos_sql}?{parametros_odbc}&trusted_connection=yes"
                     else:
-                        # Autenticación SQL (usuario/contraseña)
-                        if puerto_sql:
-                            cadena_conexion = f"{driver_sql}://{usuario_sql}:{clave_sql}@{host_sql}:{puerto_sql}/{basedatos_sql}?driver=ODBC+Driver+17+for+SQL+Server"
-                        else:
-                            cadena_conexion = f"{driver_sql}://{usuario_sql}:{clave_sql}@{host_sql}/{basedatos_sql}?driver=ODBC+Driver+17+for+SQL+Server"
+                        cadena_conexion = f"{driver_sql}://{usuario_sql}:{clave_sql}@{servidor_sql}/{basedatos_sql}?{parametros_odbc}"
                 else:
                     # PostgreSQL / MySQL (siempre requieren usuario y contraseña)
                     if usuario_sql and basedatos_sql and host_sql:
