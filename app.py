@@ -433,7 +433,7 @@ for tipo, cantidad in por_tipo.items():
                     key=f"valor_fijo_{tipo}_{col_name}",
                 )
                 if valor != "":
-                    valores_fijos[col_name] = valor
+                    valores_fijos[(tipo, col_name)] = valor
 
     elif accion == "editar_individualmente":
         issues_tipo = [i for i in resultado.issues if i.tipo == tipo]
@@ -476,7 +476,7 @@ if limpiar_btn:
         tipo for tipo, accion in config.items()
         if accion == "valor_fijo"
         and not any(
-            issue.columna in valores_fijos
+            (tipo, issue.columna) in valores_fijos
             for issue in resultado.issues if issue.tipo == tipo
         )
     ]
