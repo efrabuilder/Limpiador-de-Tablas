@@ -475,7 +475,7 @@ if limpiar_btn:
     faltan_valores = [
         tipo for tipo, accion in config.items()
         if accion == "valor_fijo"
-        and not any(
+        and not all(
             (tipo, issue.columna) in valores_fijos
             for issue in resultado.issues if issue.tipo == tipo
         )
