@@ -215,7 +215,7 @@ with st.sidebar:
                 usuario_sql = st.text_input("Usuario", key="usuario_sql")
                 basedatos_sql = st.text_input("Base de datos", key="basedatos_sql")
             with col_sql_b:
-                puerto_sql = st.text_input("Puerto", value=puerto_defecto, key="puerto_sql")
+                puerto_sql = st.text_input("Puerto", value=puerto_defecto, key=f"puerto_sql_{motor_sql}")
                 clave_sql = st.text_input("Contraseña", type="password", key="clave_sql")
 
             if host_sql and basedatos_sql:
