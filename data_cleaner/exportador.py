@@ -529,6 +529,15 @@ def _valor_reemplazo(df, columna, accion, valor_fijo=None):
     return None
 
 
+def _buscar_valor_fijo(valores_fijos, tipo, columna):
+    """Busca el valor fijo especifico para (tipo, columna). Si no esta ahi,
+    cae al valor fijo generico por columna (compatibilidad con dicts viejos
+    que no distinguian el tipo de problema, ej. desde cli.py o api.py)."""
+    if (tipo, columna) in valores_fijos:
+        return valores_fijos[(tipo, columna)]
+    return valores_fijos.get(columna)
+
+
 _TIPOS_VALOR_FIJO_DIRECTO = {
     "fecha_invalida", "email_invalido", "telefono_invalido",
     "id_duplicado", "formula_incorrecta", "texto_inconsistente",
@@ -574,7 +583,7 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             valor_nuevo = "(fila eliminada)"
         elif h["tipo"] in ("faltante", "tipo_invalido") and accion in (
                 "reemplazar_media", "reemplazar_mediana", "reemplazar_moda", "valor_fijo"):
-            valor_nuevo = _valor_reemplazo(df, h["columna"], accion, valores_fijos.get(h["columna"]))
+            valor_nuevo = _valor_reemplazo(df, h["columna"], accion, _buscar_valor_fijo(valores_fijos, h["tipo"], h["columna"]))
             _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
         elif h["tipo"] == "atipico" and accion == "limitar":
             lim_inf, lim_sup = limites_iqr.get(h["columna"], (None, None))
@@ -593,7 +602,7 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
 
         elif h["tipo"] in _TIPOS_VALOR_FIJO_DIRECTO and accion == "valor_fijo":
-            valor_nuevo = valores_fijos.get(h["columna"])
+            valor_nuevo = _buscar_valor_fijo(valores_fijos, h["tipo"], h["columna"])
             _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
 
         registro.append({
