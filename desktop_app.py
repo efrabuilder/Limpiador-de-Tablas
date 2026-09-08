@@ -578,7 +578,7 @@ class LimpiadorApp(tk.Tk):
                 if valor == "":
                     faltan.append(f"{NOMBRES_TIPO.get(tipo, tipo)} → columna '{col}'")
                 else:
-                    valores_fijos[col] = valor
+                    valores_fijos[(tipo, col)] = valor
 
         if faltan:
             messagebox.showwarning(
