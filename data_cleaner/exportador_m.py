@@ -124,6 +124,51 @@ def _buscar_valor_fijo(valores_fijos: dict, tipo: str, columna: str):
     return valores_fijos.get(columna)
 
 
+def _paso_relleno_valor_fijo(cb, comentarios, nombre_paso: str, col: str,
+                              valores_fijos: dict, tipo: str) -> None:
+    """Agrega un paso Table.ReplaceValue que rellena nulos de 'col' con el
+    valor fijo configurado para (tipo, col). Si no hay ningun valor fijo
+    guardado (la app deberia haberlo exigido, pero por si llega vacio via
+    API/CLI), no genera un paso roto con el texto literal "None": deja un
+    aviso explicando que falta configurar el valor.
+    """
+def _es_null_explicito(valor) -> bool:
+    """True si el usuario escribio literalmente "null" (sin importar
+    mayusculas) como valor fijo -- lo interpretamos como el null real de M,
+    no como el texto "null". Util, por ejemplo, para forzar a null los datos
+    que no encajan al convertir una columna a booleano."""
+    return isinstance(valor, str) and valor.strip().lower() == "null"
+
+
+def _expr_valor_fijo_m(valor_fijo_col) -> str:
+    """Literal M para un valor fijo: null real si el usuario escribio
+    "null", numero sin comillas si es numerico, o texto citado si no."""
+    if _es_null_explicito(valor_fijo_col):
+        return "null"
+    return repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
+
+
+def _paso_relleno_valor_fijo(cb, comentarios, nombre_paso: str, col: str,
+                              valores_fijos: dict, tipo: str) -> None:
+    """Agrega un paso Table.ReplaceValue que rellena nulos de 'col' con el
+    valor fijo configurado para (tipo, col). Si no hay ningun valor fijo
+    guardado (la app deberia haberlo exigido, pero por si llega vacio via
+    API/CLI), no genera un paso roto con el texto literal "None": deja un
+    aviso explicando que falta configurar el valor.
+    """
+    valor_fijo_col = _buscar_valor_fijo(valores_fijos, tipo, col)
+    if valor_fijo_col is None:
+        comentarios.append(
+            f'  // AVISO: no hay un valor fijo configurado para "{tipo}" en la columna '
+            f'"{col}"; no se genero ningun paso de relleno para esta columna.'
+        )
+        return
+    expr_relleno = _expr_valor_fijo_m(valor_fijo_col)
+    cb.agregar(nombre_paso,
+               "Table.ReplaceValue({prev}, null, " + expr_relleno +
+               f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+
+
 def _m_ident(nombre: str) -> str:
     """Devuelve el identificador de paso M, citado con #"..." si hace falta."""
     if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', nombre):
@@ -732,23 +777,26 @@ def generar_editor_m_puro(
             )
         elif a_faltante == "valor_fijo":
             valor_fijo_col = _buscar_valor_fijo(valores_fijos, "faltante", col)
-            fecha_partes = None
-            if valor_fijo_col not in (None, ""):
-                try:
-                    fecha_partes = [int(x) for x in str(valor_fijo_col).split("-")]
-                except ValueError:
-                    fecha_partes = None
-            if fecha_partes and len(fecha_partes) == 3:
-                expr_relleno = f"#date({fecha_partes[0]}, {fecha_partes[1]}, {fecha_partes[2]})"
-                cb.agregar(f"SinFaltantesFecha_{nombre_col_id_fecha}",
-                           "Table.ReplaceValue({prev}, null, " + expr_relleno +
-                           f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+            if _es_null_explicito(valor_fijo_col):
+                pass  # el usuario quiere dejarlo en null real: no hace falta ningun paso
             else:
-                comentarios.append(
-                    f'  // AVISO: el valor fijo configurado para "faltante" en la columna de '
-                    f'fecha "{col}" ({valor_fijo_col!r}) no se pudo interpretar como fecha '
-                    f'AAAA-MM-DD; no se genero ningun paso de relleno para esta columna.'
-                )
+                fecha_partes = None
+                if valor_fijo_col not in (None, ""):
+                    try:
+                        fecha_partes = [int(x) for x in str(valor_fijo_col).split("-")]
+                    except ValueError:
+                        fecha_partes = None
+                if fecha_partes and len(fecha_partes) == 3:
+                    expr_relleno = f"#date({fecha_partes[0]}, {fecha_partes[1]}, {fecha_partes[2]})"
+                    cb.agregar(f"SinFaltantesFecha_{nombre_col_id_fecha}",
+                               "Table.ReplaceValue({prev}, null, " + expr_relleno +
+                               f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+                else:
+                    comentarios.append(
+                        f'  // AVISO: el valor fijo configurado para "faltante" en la columna de '
+                        f'fecha "{col}" ({valor_fijo_col!r}) no se pudo interpretar como fecha '
+                        f'AAAA-MM-DD; no se genero ningun paso de relleno para esta columna.'
+                    )
         elif a_faltante == "reemplazar_moda":
             expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             cb.agregar(f"SinFaltantesFecha_{nombre_col_id_fecha}",
@@ -809,19 +857,18 @@ def generar_editor_m_puro(
         if a_faltante != "marcar_solo" or a_tipo_invalido != "marcar_solo":
             pass  # el relleno de nulos ocurre mas abajo, comun a ambas reglas
         nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
-        if a_faltante in ("reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "valor_fijo"):
+        if a_faltante in ("reemplazar_mediana", "reemplazar_media", "reemplazar_moda"):
             if a_faltante == "reemplazar_mediana":
                 expr_relleno = f"List.Median(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             elif a_faltante == "reemplazar_media":
                 expr_relleno = f"List.Average(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
-            elif a_faltante == "reemplazar_moda":
-                expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             else:
-                valor_fijo_col = _buscar_valor_fijo(valores_fijos, "faltante", col)
-                expr_relleno = repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
+                expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             cb.agregar(f"SinFaltantes_{nombre_col_id}",
                        "Table.ReplaceValue({prev}, null, " + expr_relleno +
                        f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+        elif a_faltante == "valor_fijo":
+            _paso_relleno_valor_fijo(cb, comentarios, f"SinFaltantes_{nombre_col_id}", col, valores_fijos, "faltante")
         elif a_faltante == "marcar_solo":
             comentarios.append(
                 f'  // AVISO: "faltante" quedo en "marcar_solo" para la columna "{col}", '
@@ -843,11 +890,7 @@ def generar_editor_m_puro(
     for col in columnas_texto_faltante:
         nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
         if a_faltante == "valor_fijo":
-            valor_fijo_col = _buscar_valor_fijo(valores_fijos, "faltante", col)
-            expr_relleno = repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
-            cb.agregar(f"SinFaltantesTexto_{nombre_col_id}",
-                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
-                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+            _paso_relleno_valor_fijo(cb, comentarios, f"SinFaltantesTexto_{nombre_col_id}", col, valores_fijos, "faltante")
         elif a_faltante == "reemplazar_moda":
             expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             cb.agregar(f"SinFaltantesTexto_{nombre_col_id}",
@@ -944,11 +987,7 @@ def generar_editor_m_puro(
         # texto (6b), asi que sin este paso la accion configurada para
         # "faltante" nunca se aplicaba a los telefonos vacios.
         if a_faltante == "valor_fijo":
-            valor_fijo_col = _buscar_valor_fijo(valores_fijos, "faltante", col)
-            expr_relleno = repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
-            cb.agregar(f"SinFaltantesTelefono_{nombre_col_id}",
-                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
-                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+            _paso_relleno_valor_fijo(cb, comentarios, f"SinFaltantesTelefono_{nombre_col_id}", col, valores_fijos, "faltante")
         elif a_faltante == "reemplazar_moda":
             expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             cb.agregar(f"SinFaltantesTelefono_{nombre_col_id}",
@@ -1022,11 +1061,7 @@ def generar_editor_m_puro(
         # por un valor fijo") nunca se aplicara a esta columna: el bloque de
         # abajo solo miraba "email_invalido", no "faltante".
         if a_faltante == "valor_fijo":
-            valor_fijo_col = _buscar_valor_fijo(valores_fijos, "faltante", col)
-            expr_relleno = repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
-            cb.agregar(f"SinFaltantesEmail_{nombre_col_id}",
-                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
-                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+            _paso_relleno_valor_fijo(cb, comentarios, f"SinFaltantesEmail_{nombre_col_id}", col, valores_fijos, "faltante")
         elif a_faltante == "reemplazar_moda":
             expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             cb.agregar(f"SinFaltantesEmail_{nombre_col_id}",
@@ -1047,7 +1082,7 @@ def generar_editor_m_puro(
         )
         if a_email == "valor_fijo":
             valor_fijo_email = _buscar_valor_fijo(valores_fijos, "email_invalido", col)
-            reemplazo = _m_str(valor_fijo_email) if valor_fijo_email is not None else "null"
+            reemplazo = _expr_valor_fijo_m(valor_fijo_email) if valor_fijo_email is not None else "null"
             cb.agregar(f"EmailLimpio_{nombre_col_id}",
                        "Table.TransformColumns({prev}, {{" + _m_str(col) +
                        f", each if _ = null then null else Text.Lower(Text.Remove(Text.Trim(_), \" \")), type text}}}})")
@@ -1075,7 +1110,7 @@ def generar_editor_m_puro(
         )
         if a_estado == "valor_fijo":
             valor_fijo_estado = _buscar_valor_fijo(valores_fijos, "estado_invalido", col)
-            reemplazo = _m_str(valor_fijo_estado) if valor_fijo_estado is not None else "null"
+            reemplazo = _expr_valor_fijo_m(valor_fijo_estado) if valor_fijo_estado is not None else "null"
             cb.agregar(f"EstadoValidado_{nombre_col_id}",
                        "Table.TransformColumns({prev}, {{" + _m_str(col) +
                        f", each if {chequeo_estado_invalido} then {reemplazo} else _, type text}}}})")
