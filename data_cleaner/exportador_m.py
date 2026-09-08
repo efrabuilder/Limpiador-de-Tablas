@@ -115,6 +115,15 @@ def _m_str(valor) -> str:
     return '"' + str(valor).replace('"', '""') + '"'
 
 
+def _buscar_valor_fijo(valores_fijos: dict, tipo: str, columna: str):
+    """Busca el valor fijo especifico para (tipo, columna). Si no esta ahi,
+    cae al valor fijo generico por columna (compatibilidad con dicts viejos
+    que no distinguian el tipo de problema, ej. desde cli.py o api.py)."""
+    if (tipo, columna) in valores_fijos:
+        return valores_fijos[(tipo, columna)]
+    return valores_fijos.get(columna)
+
+
 def _m_ident(nombre: str) -> str:
     """Devuelve el identificador de paso M, citado con #"..." si hace falta."""
     if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', nombre):
@@ -705,6 +714,53 @@ def generar_editor_m_puro(
                     f'{nombre_bandera}); solo se convirtieron las fechas validas.'
                 )
 
+        # 4b) Faltantes: igual que con email, esta columna queda excluida del
+        # bloque generico de texto (6b) porque el relleno debe pasar por un
+        # #date(...) en vez de un simple string. OJO: esto solo es seguro si
+        # la columna ya quedo convertida a tipo fecha en el paso 4a de arriba
+        # (a_fecha en valor_fijo/marcar_solo); si "fecha_invalida" usa otra
+        # accion, la columna sigue en su tipo original y forzar un #date(...)
+        # ahi genera un choque de tipos en Power Query.
+        columna_ya_es_fecha = a_fecha in ("valor_fijo", "marcar_solo")
+        nombre_col_id_fecha = re.sub(r'[^A-Za-z0-9]', '', col)
+        if not columna_ya_es_fecha and a_faltante in ("valor_fijo", "reemplazar_moda"):
+            comentarios.append(
+                f'  // AVISO: "faltante" no se pudo aplicar a la columna de fecha "{col}" '
+                f'porque "fecha_invalida" no esta en valor_fijo/marcar_solo, asi que la '
+                f'columna nunca se convierte a tipo fecha; para rellenar los vacios, elija '
+                f'valor_fijo o marcar_solo para "fecha_invalida" en esta columna.'
+            )
+        elif a_faltante == "valor_fijo":
+            valor_fijo_col = _buscar_valor_fijo(valores_fijos, "faltante", col)
+            fecha_partes = None
+            if valor_fijo_col not in (None, ""):
+                try:
+                    fecha_partes = [int(x) for x in str(valor_fijo_col).split("-")]
+                except ValueError:
+                    fecha_partes = None
+            if fecha_partes and len(fecha_partes) == 3:
+                expr_relleno = f"#date({fecha_partes[0]}, {fecha_partes[1]}, {fecha_partes[2]})"
+                cb.agregar(f"SinFaltantesFecha_{nombre_col_id_fecha}",
+                           "Table.ReplaceValue({prev}, null, " + expr_relleno +
+                           f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+            else:
+                comentarios.append(
+                    f'  // AVISO: el valor fijo configurado para "faltante" en la columna de '
+                    f'fecha "{col}" ({valor_fijo_col!r}) no se pudo interpretar como fecha '
+                    f'AAAA-MM-DD; no se genero ningun paso de relleno para esta columna.'
+                )
+        elif a_faltante == "reemplazar_moda":
+            expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
+            cb.agregar(f"SinFaltantesFecha_{nombre_col_id_fecha}",
+                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
+                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+        elif a_faltante == "marcar_solo":
+            comentarios.append(
+                f'  // AVISO: "faltante" quedo en "marcar_solo" para la columna "{col}", '
+                f'pero el codigo M puro no agrega columnas nuevas (ni Revisar_Faltante_{col}); '
+                f'no se genero ningun paso para esta columna.'
+            )
+
     # -- 5) ID duplicado --------------------------------------------------------
     for col in cols_id:
         if col not in df.columns:
@@ -761,7 +817,7 @@ def generar_editor_m_puro(
             elif a_faltante == "reemplazar_moda":
                 expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             else:
-                valor_fijo_col = valores_fijos.get(col)
+                valor_fijo_col = _buscar_valor_fijo(valores_fijos, "faltante", col)
                 expr_relleno = repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
             cb.agregar(f"SinFaltantes_{nombre_col_id}",
                        "Table.ReplaceValue({prev}, null, " + expr_relleno +
@@ -787,7 +843,7 @@ def generar_editor_m_puro(
     for col in columnas_texto_faltante:
         nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
         if a_faltante == "valor_fijo":
-            valor_fijo_col = valores_fijos.get(col)
+            valor_fijo_col = _buscar_valor_fijo(valores_fijos, "faltante", col)
             expr_relleno = repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
             cb.agregar(f"SinFaltantesTexto_{nombre_col_id}",
                        "Table.ReplaceValue({prev}, null, " + expr_relleno +
@@ -883,6 +939,28 @@ def generar_editor_m_puro(
             continue
         nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
 
+        # 7a) Faltantes: igual que email/fecha, esta columna queda excluida
+        # del bloque numerico (para no perder ceros a la izquierda) y del de
+        # texto (6b), asi que sin este paso la accion configurada para
+        # "faltante" nunca se aplicaba a los telefonos vacios.
+        if a_faltante == "valor_fijo":
+            valor_fijo_col = _buscar_valor_fijo(valores_fijos, "faltante", col)
+            expr_relleno = repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
+            cb.agregar(f"SinFaltantesTelefono_{nombre_col_id}",
+                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
+                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+        elif a_faltante == "reemplazar_moda":
+            expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
+            cb.agregar(f"SinFaltantesTelefono_{nombre_col_id}",
+                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
+                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+        elif a_faltante == "marcar_solo":
+            comentarios.append(
+                f'  // AVISO: "faltante" quedo en "marcar_solo" para la columna "{col}", '
+                f'pero el codigo M puro no agrega columnas nuevas (ni Revisar_Faltante_{col}); '
+                f'no se genero ningun paso para esta columna.'
+            )
+
         # 8a) Aplicar primero las correcciones manuales de digitos puntuales
         # (si las hay en TablaCorreccionesDigitosTelefono), para que un
         # registro corregido deje de marcarse como invalido de aqui en
@@ -937,6 +1015,30 @@ def generar_editor_m_puro(
         if col not in df.columns:
             continue
         nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
+
+        # 9a) Faltantes: el email quedaba excluido del bloque 6b (texto) porque
+        # necesita su propio orden (rellenar antes de normalizar/validar), pero
+        # eso hacia que la accion configurada para "faltante" (ej. "Reemplazar
+        # por un valor fijo") nunca se aplicara a esta columna: el bloque de
+        # abajo solo miraba "email_invalido", no "faltante".
+        if a_faltante == "valor_fijo":
+            valor_fijo_col = _buscar_valor_fijo(valores_fijos, "faltante", col)
+            expr_relleno = repr(valor_fijo_col) if isinstance(valor_fijo_col, (int, float)) else _m_str(valor_fijo_col)
+            cb.agregar(f"SinFaltantesEmail_{nombre_col_id}",
+                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
+                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+        elif a_faltante == "reemplazar_moda":
+            expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
+            cb.agregar(f"SinFaltantesEmail_{nombre_col_id}",
+                       "Table.ReplaceValue({prev}, null, " + expr_relleno +
+                       f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+        elif a_faltante == "marcar_solo":
+            comentarios.append(
+                f'  // AVISO: "faltante" quedo en "marcar_solo" para la columna "{col}", '
+                f'pero el codigo M puro no agrega columnas nuevas (ni Revisar_Faltante_{col}); '
+                f'no se genero ningun paso para esta columna.'
+            )
+
         chequeo_email = (
             f"[{col}] = null or not Text.Contains([{col}], \"@\") "
             f"or Text.StartsWith([{col}], \"@\") or Text.EndsWith([{col}], \"@\") "
@@ -944,7 +1046,7 @@ def generar_editor_m_puro(
             f"or Text.EndsWith([{col}], \".\")"
         )
         if a_email == "valor_fijo":
-            valor_fijo_email = valores_fijos.get(col, None)
+            valor_fijo_email = _buscar_valor_fijo(valores_fijos, "email_invalido", col)
             reemplazo = _m_str(valor_fijo_email) if valor_fijo_email is not None else "null"
             cb.agregar(f"EmailLimpio_{nombre_col_id}",
                        "Table.TransformColumns({prev}, {{" + _m_str(col) +
@@ -972,7 +1074,7 @@ def generar_editor_m_puro(
             f"_ <> null and not List.Contains({lista_estado_m}, Text.Lower(Text.Trim(Text.From(_))))"
         )
         if a_estado == "valor_fijo":
-            valor_fijo_estado = valores_fijos.get(col, None)
+            valor_fijo_estado = _buscar_valor_fijo(valores_fijos, "estado_invalido", col)
             reemplazo = _m_str(valor_fijo_estado) if valor_fijo_estado is not None else "null"
             cb.agregar(f"EstadoValidado_{nombre_col_id}",
                        "Table.TransformColumns({prev}, {{" + _m_str(col) +
