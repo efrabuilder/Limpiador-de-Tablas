@@ -17,5 +17,5 @@ nbformat>=5.10
 # elegido en "Conectar a una base de datos SQL" (sqlalchemy por si solo NO
 # incluye ninguno). SQLite no necesita driver aparte (ya viene con Python).
 # psycopg2-binary>=2.9   # PostgreSQL
-pymysql>=1.1           # MySQL / MariaDB
-# pyodbc>=5.1            # SQL Server (además requiere el "ODBC Driver 17/18 for SQL Server" instalado en el sistema)
+#pymysql>=1.1           # MySQL / MariaDB
+pyodbc>=5.1            # SQL Server (además requiere el "ODBC Driver 17/18 for SQL Server" instalado en el sistema)
