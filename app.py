@@ -199,7 +199,7 @@ with st.sidebar:
             cadena_conexion = st.text_input(
                 "Cadena de conexión SQLAlchemy completa",
                 type="password",
-                help="Ej: mssql+pyodbc://usuario:clave@host/basedatos?driver=ODBC+Driver+17+for+SQL+Server",
+                help="Ej: mssql+pyodbc://usuario:clave@host/basedatos?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes",
             )
         else:
             # Mapeo de motor a driver y puerto por defecto
@@ -223,7 +223,7 @@ with st.sidebar:
                 if motor_sql == "SQL Server":
                     # Sufijo común: fuerza TLS con certificado autofirmado de confianza,
                     # requerido por instalaciones de SQL Server que exigen cifrado por defecto.
-                    parametros_odbc = "driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+                    parametros_odbc = "driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
                     servidor_sql = f"{host_sql}:{puerto_sql}" if puerto_sql else host_sql
 
                     # Sin usuario y contraseña: autenticación de Windows (Trusted_Connection)
