@@ -80,6 +80,16 @@ def _asignar(df: pd.DataFrame, fila: int, columna: str, valor) -> None:
         df.at[fila, columna] = valor
 
 
+def _interpretar_valor_fijo(valor):
+    """Si el usuario escribio literalmente "null" (sin importar mayusculas)
+    como valor fijo, lo tratamos como el valor vacio real (None/NaN) en vez
+    del texto "null" -- util, por ejemplo, para forzar a null los datos que
+    no encajan al convertir una columna a booleano."""
+    if isinstance(valor, str) and valor.strip().lower() == "null":
+        return None
+    return valor
+
+
 def _valor_reemplazo(df: pd.DataFrame, columna: str, accion: str, valor_fijo=None):
     serie_num = pd.to_numeric(df[columna], errors="coerce")
     if accion == "reemplazar_media":
@@ -90,7 +100,7 @@ def _valor_reemplazo(df: pd.DataFrame, columna: str, accion: str, valor_fijo=Non
         moda = df[columna].mode(dropna=True)
         return moda.iloc[0] if not moda.empty else None
     if accion == "valor_fijo":
-        return valor_fijo
+        return _interpretar_valor_fijo(valor_fijo)
     return None
 
 
@@ -172,7 +182,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
         elif issue.tipo in _TIPOS_VALOR_FIJO_DIRECTO and accion == "valor_fijo":
-            valor_nuevo = _buscar_valor_fijo(valores_fijos, issue.tipo, issue.columna)
+            valor_nuevo = _interpretar_valor_fijo(_buscar_valor_fijo(valores_fijos, issue.tipo, issue.columna))
             _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
         elif issue.tipo in _TIPOS_EDITAR_INDIVIDUAL and accion == "editar_individualmente":
