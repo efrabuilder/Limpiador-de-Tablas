@@ -94,6 +94,15 @@ def _valor_reemplazo(df: pd.DataFrame, columna: str, accion: str, valor_fijo=Non
     return None
 
 
+def _buscar_valor_fijo(valores_fijos: Dict, tipo: str, columna: str):
+    """Busca el valor fijo especifico para (tipo, columna). Si no esta ahi,
+    cae al valor fijo generico por columna (compatibilidad con dicts viejos
+    que no distinguian el tipo de problema, ej. desde cli.py o api.py)."""
+    if (tipo, columna) in valores_fijos:
+        return valores_fijos[(tipo, columna)]
+    return valores_fijos.get(columna)
+
+
 def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None,
             valores_fijos: Dict[str, object] = None,
             correcciones_individuales: Dict[tuple, object] = None) -> tuple[pd.DataFrame, List[dict]]:
@@ -140,7 +149,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             "reemplazar_media", "reemplazar_mediana", "reemplazar_moda", "valor_fijo"
         ):
             valor_nuevo = _valor_reemplazo(
-                df, issue.columna, accion, valores_fijos.get(issue.columna)
+                df, issue.columna, accion, _buscar_valor_fijo(valores_fijos, issue.tipo, issue.columna)
             )
             _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
@@ -163,7 +172,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
         elif issue.tipo in _TIPOS_VALOR_FIJO_DIRECTO and accion == "valor_fijo":
-            valor_nuevo = valores_fijos.get(issue.columna)
+            valor_nuevo = _buscar_valor_fijo(valores_fijos, issue.tipo, issue.columna)
             _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
         elif issue.tipo in _TIPOS_EDITAR_INDIVIDUAL and accion == "editar_individualmente":
