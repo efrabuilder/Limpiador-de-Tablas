@@ -183,11 +183,9 @@ with st.sidebar:
                 st.error(f"No se pudo leer el archivo: {exc}")
 
     elif origen == "Base de datos SQL":
-        # load_sql (en data_cleaner/loaders.py) ya existe y usa SQLAlchemy;
-        # esto solo arma la cadena de conexión y la muestra en la interfaz.
-        # OJO: segun el motor elegido hace falta el driver correspondiente
-        # instalado (psycopg2-binary para PostgreSQL, pymysql para MySQL,
-        # pyodbc para SQL Server) — agregarlo a requirements.txt si falta.
+        # ============================================================
+        # MODIFICACIÓN IMPORTANTE PARA SQL SERVER CON AUTENTICACIÓN WINDOWS
+        # ============================================================
         motor_sql = st.selectbox(
             "Motor de base de datos",
             ["PostgreSQL", "MySQL", "SQL Server", "SQLite", "Otra (cadena de conexión manual)"],
@@ -204,6 +202,7 @@ with st.sidebar:
                 help="Ej: mssql+pyodbc://usuario:clave@host/basedatos?driver=ODBC+Driver+17+for+SQL+Server",
             )
         else:
+            # Mapeo de motor a driver y puerto por defecto
             _driver_por_motor = {
                 "PostgreSQL": ("postgresql+psycopg2", "5432"),
                 "MySQL": ("mysql+pymysql", "3306"),
@@ -218,10 +217,32 @@ with st.sidebar:
             with col_sql_b:
                 puerto_sql = st.text_input("Puerto", value=puerto_defecto, key="puerto_sql")
                 clave_sql = st.text_input("Contraseña", type="password", key="clave_sql")
-            if usuario_sql and basedatos_sql and host_sql:
-                cadena_conexion = f"{driver_sql}://{usuario_sql}:{clave_sql}@{host_sql}:{puerto_sql}/{basedatos_sql}"
+
+            if host_sql and basedatos_sql:
+                # Construcción de la cadena según el motor
                 if motor_sql == "SQL Server":
-                    cadena_conexion += "?driver=ODBC+Driver+17+for+SQL+Server"
+                    # Para SQL Server con autenticación Windows:
+                    # Si no se proporciona usuario y contraseña, usamos Trusted_Connection=yes
+                    if not usuario_sql and not clave_sql:
+                        # Usar autenticación de Windows
+                        # El puerto puede omitirse (se usará el predeterminado)
+                        if puerto_sql:
+                            cadena_conexion = f"{driver_sql}://@{host_sql}:{puerto_sql}/{basedatos_sql}?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
+                        else:
+                            cadena_conexion = f"{driver_sql}://@{host_sql}/{basedatos_sql}?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
+                    else:
+                        # Autenticación SQL (usuario/contraseña)
+                        if puerto_sql:
+                            cadena_conexion = f"{driver_sql}://{usuario_sql}:{clave_sql}@{host_sql}:{puerto_sql}/{basedatos_sql}?driver=ODBC+Driver+17+for+SQL+Server"
+                        else:
+                            cadena_conexion = f"{driver_sql}://{usuario_sql}:{clave_sql}@{host_sql}/{basedatos_sql}?driver=ODBC+Driver+17+for+SQL+Server"
+                else:
+                    # PostgreSQL / MySQL (siempre requieren usuario y contraseña)
+                    if usuario_sql and basedatos_sql and host_sql:
+                        if puerto_sql:
+                            cadena_conexion = f"{driver_sql}://{usuario_sql}:{clave_sql}@{host_sql}:{puerto_sql}/{basedatos_sql}"
+                        else:
+                            cadena_conexion = f"{driver_sql}://{usuario_sql}:{clave_sql}@{host_sql}/{basedatos_sql}"
 
         modo_fuente_sql = st.radio(
             "¿Cómo traer los datos?", ["Nombre de tabla", "Consulta SQL personalizada"],
