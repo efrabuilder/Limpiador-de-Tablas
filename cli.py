@@ -96,7 +96,12 @@ def _resolver_digitos_telefono(digitos_telefono: Optional[str]) -> Optional[tupl
 
 @app.command("analizar")
 def analizar_cmd(
-    input: str = typer.Option(..., "--input", "-i", help="Ruta del archivo CSV/Excel a analizar."),
+    input: Optional[str] = typer.Option(None, "--input", "-i", help="Ruta del archivo CSV/Excel a analizar (o use --input-sql-conexion)."),
+    input_sql_conexion: Optional[str] = typer.Option(
+        None, "--input-sql-conexion", help="Cadena de conexión SQLAlchemy de origen, en vez de --input.",
+    ),
+    input_sql_tabla: Optional[str] = typer.Option(None, "--input-sql-tabla", help="Tabla a leer (o use --input-sql-query)."),
+    input_sql_query: Optional[str] = typer.Option(None, "--input-sql-query", help="Consulta SQL a ejecutar (o use --input-sql-tabla)."),
     metodo_atipicos: str = typer.Option("iqr", "--metodo-atipicos", "-m",
                                          help="Método de detección de atípicos: iqr | zscore | ambos."),
     sin_auto_columnas: bool = typer.Option(False, "--sin-auto-columnas",
@@ -129,11 +134,20 @@ def analizar_cmd(
     columnas_texto: Optional[str] = typer.Option(None, "--columnas-texto", help="Columnas categóricas (coma-separadas)."),
 ):
     """Analiza una tabla e imprime el resumen de hallazgos, sin modificar nada."""
-    if not os.path.exists(input):
-        console.print(f"[red]No existe el archivo: {input}[/red]")
-        raise typer.Exit(code=1)
-
-    df = load_table(input, kind="auto")
+    if not input and not (input_sql_conexion and (input_sql_tabla or input_sql_query)):
+        console.print("[red]Indique --input, o --input-sql-conexion junto con --input-sql-tabla/--input-sql-query.[/red]")
+        raise typer.Exit(code=2)
+    if input:
+        if not os.path.exists(input):
+            console.print(f"[red]No existe el archivo: {input}[/red]")
+            raise typer.Exit(code=1)
+        df = load_table(input, kind="auto")
+    else:
+        try:
+            df = load_table(input_sql_conexion, kind="sql", table_name=input_sql_tabla, query=input_sql_query)
+        except Exception as exc:
+            console.print(f"[red]No se pudo leer de la base de datos: {exc}[/red]")
+            raise typer.Exit(code=1)
     resultado = analizar(
         df, metodo_atipicos=metodo_atipicos,
         auto_detectar_columnas=not sin_auto_columnas,
@@ -153,7 +167,12 @@ def analizar_cmd(
 
 @app.command("limpiar")
 def limpiar_cmd(
-    input: str = typer.Option(..., "--input", "-i", help="Ruta del archivo CSV/Excel a limpiar."),
+    input: Optional[str] = typer.Option(None, "--input", "-i", help="Ruta del archivo CSV/Excel a limpiar (o use --input-sql-conexion)."),
+    input_sql_conexion: Optional[str] = typer.Option(
+        None, "--input-sql-conexion", help="Cadena de conexión SQLAlchemy de origen, en vez de --input.",
+    ),
+    input_sql_tabla: Optional[str] = typer.Option(None, "--input-sql-tabla", help="Tabla a leer (o use --input-sql-query)."),
+    input_sql_query: Optional[str] = typer.Option(None, "--input-sql-query", help="Consulta SQL a ejecutar (o use --input-sql-tabla)."),
     outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta donde guardar los resultados."),
     metodo_atipicos: str = typer.Option("iqr", "--metodo-atipicos", "-m",
                                          help="Método de detección de atípicos: iqr | zscore | ambos."),
@@ -182,7 +201,18 @@ def limpiar_cmd(
     valor_fijo: List[str] = typer.Option(
         [], "--valor-fijo", help="Valor fijo por columna, formato columna=valor. Repetible."
     ),
-    formato_salida: str = typer.Option("excel", "--formato-salida", help="Formato del archivo limpio: csv | excel."),
+    formato_salida: str = typer.Option("excel", "--formato-salida", help="Formato del archivo limpio: csv | excel | sql."),
+    salida_sql_conexion: Optional[str] = typer.Option(
+        None, "--salida-sql-conexion",
+        help="Cadena de conexión SQLAlchemy destino (solo si --formato-salida sql). "
+             "Ej: postgresql+psycopg2://usuario:clave@host/basedatos",
+    ),
+    salida_sql_tabla: Optional[str] = typer.Option(
+        None, "--salida-sql-tabla", help="Tabla destino (solo si --formato-salida sql).",
+    ),
+    salida_sql_si_existe: str = typer.Option(
+        "replace", "--salida-sql-si-existe", help="replace | append | fail (solo si --formato-salida sql).",
+    ),
     sin_auto_columnas: bool = typer.Option(False, "--sin-auto-columnas",
                                             help="Desactiva la auto-detección de columnas por nombre "
                                                  "para fecha/email/teléfono/id/fórmula/texto."),
@@ -213,7 +243,10 @@ def limpiar_cmd(
     columnas_texto: Optional[str] = typer.Option(None, "--columnas-texto", help="Columnas categóricas (coma-separadas)."),
 ):
     """Analiza, limpia y exporta la tabla + reporte, todo en un solo comando (sin preguntas)."""
-    if not os.path.exists(input):
+    if not input and not (input_sql_conexion and (input_sql_tabla or input_sql_query)):
+        console.print("[red]Indique --input, o --input-sql-conexion junto con --input-sql-tabla/--input-sql-query.[/red]")
+        raise typer.Exit(code=2)
+    if input and not os.path.exists(input):
         console.print(f"[red]No existe el archivo: {input}[/red]")
         raise typer.Exit(code=1)
 
@@ -236,14 +269,29 @@ def limpiar_cmd(
             console.print(f"[red]Acción inválida para {tipo}: '{accion}'. "
                            f"Válidas: {', '.join(acciones_validas[tipo])}[/red]")
             raise typer.Exit(code=2)
-    if formato_salida not in ("csv", "excel"):
-        console.print("[red]--formato-salida debe ser 'csv' o 'excel'[/red]")
+    if formato_salida not in ("csv", "excel", "sql"):
+        console.print("[red]--formato-salida debe ser 'csv', 'excel' o 'sql'[/red]")
+        raise typer.Exit(code=2)
+    if formato_salida == "sql" and not (salida_sql_conexion and salida_sql_tabla):
+        console.print("[red]--formato-salida sql requiere --salida-sql-conexion y --salida-sql-tabla[/red]")
+        raise typer.Exit(code=2)
+    if salida_sql_si_existe not in ("replace", "append", "fail"):
+        console.print("[red]--salida-sql-si-existe debe ser 'replace', 'append' o 'fail'[/red]")
         raise typer.Exit(code=2)
 
     valores_fijos = _parsear_valores_fijos(valor_fijo)
 
     os.makedirs(outdir, exist_ok=True)
-    df = load_table(input, kind="auto")
+    if input:
+        df = load_table(input, kind="auto")
+        nombre_fuente = input
+    else:
+        try:
+            df = load_table(input_sql_conexion, kind="sql", table_name=input_sql_tabla, query=input_sql_query)
+        except Exception as exc:
+            console.print(f"[red]No se pudo leer de la base de datos: {exc}[/red]")
+            raise typer.Exit(code=1)
+        nombre_fuente = input_sql_tabla or "consulta_sql"
     console.print(f"Tabla cargada: [bold]{len(df)}[/bold] filas x [bold]{len(df.columns)}[/bold] columnas.")
 
     resultado = analizar(
@@ -275,10 +323,21 @@ def limpiar_cmd(
         raise typer.Exit(code=2)
 
     df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos)
-    tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=input)
+    tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=nombre_fuente)
 
     ruta_reporte = os.path.join(outdir, "reporte_calidad_datos.xlsx")
     exportar_reporte_excel(tablas_reporte, ruta_reporte)
+
+    if formato_salida == "sql":
+        from data_cleaner.exporters import exportar_sql
+        mensaje_sql = exportar_sql(
+            df_limpio, salida_sql_conexion, salida_sql_tabla, if_exists=salida_sql_si_existe,
+        )
+        console.print("\n[bold green]✅ Proceso completado.[/bold green]")
+        console.print(f"   {mensaje_sql}")
+        console.print(f"   Reporte:         {ruta_reporte}")
+        console.print(f"   Filas finales:   {len(df_limpio)} (originales: {len(df)})")
+        raise typer.Exit(code=0)
 
     ext = "csv" if formato_salida == "csv" else "xlsx"
     ruta_limpio = os.path.join(outdir, f"datos_limpios.{ext}")
