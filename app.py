@@ -56,6 +56,7 @@ OPCIONES_ACCION = {
     "id_duplicado": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "estado_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
 }
 # "duplicado" (fila completa) queda fuera de "editar_individualmente": un
 # hallazgo de fila duplicada no tiene una sola columna/valor que editar (ver
@@ -72,6 +73,7 @@ NOMBRES_TIPO = {
     "id_duplicado": "IDs duplicados (columna identificadora)",
     "formula_incorrecta": "Total no coincide (Cantidad × Precio)",
     "texto_inconsistente": "Variantes / errores de tipeo en texto",
+    "estado_invalido": "Estados/valores de estado no reconocidos",
 }
 
 ICONOS_TIPO = {
@@ -85,6 +87,7 @@ ICONOS_TIPO = {
     "id_duplicado": "🆔",
     "formula_incorrecta": "🧮",
     "texto_inconsistente": "✏️",
+    "estado_invalido": "🚦",
 }
 
 NOMBRES_ACCION = {
