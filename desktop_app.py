@@ -144,6 +144,8 @@ class LimpiadorApp(tk.Tk):
                    command=self.limpiar_tabla).pack(side="left")
         ttk.Button(botones, text="💾 Guardar resultados...",
                    command=self.guardar_resultados).pack(side="left", padx=10)
+        ttk.Button(botones, text="🗄️ Exportar a SQL...",
+                   command=self.exportar_sql).pack(side="left", padx=(0, 10))
         ttk.Button(botones, text="📤 Exportar script portátil...",
                    command=self.exportar_script_portatil).pack(side="left")
 
@@ -328,13 +330,28 @@ class LimpiadorApp(tk.Tk):
             else:
                 driver = {"PostgreSQL": "postgresql+psycopg2", "MySQL": "mysql+pymysql",
                           "SQL Server": "mssql+pyodbc"}[motor]
-                if not (campos_vars["host"].get() and campos_vars["usuario"].get() and campos_vars["basedatos"].get()):
-                    messagebox.showwarning("Faltan datos", "Complete host, usuario y base de datos.")
+                if not (campos_vars["host"].get() and campos_vars["basedatos"].get()):
+                    messagebox.showwarning("Faltan datos", "Complete al menos host y base de datos.")
                     return
-                cadena = (f"{driver}://{campos_vars['usuario'].get()}:{campos_vars['clave'].get()}"
-                          f"@{campos_vars['host'].get()}:{campos_vars['puerto'].get()}/{campos_vars['basedatos'].get()}")
                 if motor == "SQL Server":
-                    cadena += "?driver=ODBC+Driver+17+for+SQL+Server"
+                    # OJO: ODBC Driver 18 (no 17) + Encrypt/TrustServerCertificate, porque
+                    # las instalaciones recientes de SQL Server exigen cifrado por
+                    # defecto y muchas maquinas ya no traen el driver 17 instalado.
+                    parametros_odbc = "driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+                    servidor = f"{campos_vars['host'].get()}:{campos_vars['puerto'].get()}" \
+                        if campos_vars["puerto"].get() else campos_vars["host"].get()
+                    if not campos_vars["usuario"].get() and not campos_vars["clave"].get():
+                        # Sin usuario/clave: autenticacion de Windows (Trusted_Connection)
+                        cadena = f"{driver}://@{servidor}/{campos_vars['basedatos'].get()}?{parametros_odbc}&trusted_connection=yes"
+                    else:
+                        cadena = (f"{driver}://{campos_vars['usuario'].get()}:{campos_vars['clave'].get()}"
+                                  f"@{servidor}/{campos_vars['basedatos'].get()}?{parametros_odbc}")
+                else:
+                    if not campos_vars["usuario"].get():
+                        messagebox.showwarning("Faltan datos", "Complete usuario para este motor.")
+                        return
+                    cadena = (f"{driver}://{campos_vars['usuario'].get()}:{campos_vars['clave'].get()}"
+                              f"@{campos_vars['host'].get()}:{campos_vars['puerto'].get()}/{campos_vars['basedatos'].get()}")
 
             valor = tabla_o_query_var.get().strip()
             if not valor:
@@ -633,6 +650,126 @@ class LimpiadorApp(tk.Tk):
 
         self.status_var.set(f"Guardado en {carpeta}")
         messagebox.showinfo("Guardado", f"Archivos guardados en:\n{carpeta}")
+
+    def exportar_sql(self) -> None:
+        """
+        Escribe self.df_limpio de vuelta en una base de datos SQL, via
+        exporters.exportar_sql (ya existia en data_cleaner pero no estaba
+        conectada a ninguna interfaz). Reutiliza el mismo esquema de
+        conexion que conectar_sql, pero para el sentido contrario (escribir
+        en vez de leer).
+        """
+        if self.df_limpio is None:
+            messagebox.showwarning("Nada que exportar", "Primero limpie la tabla.")
+            return
+
+        ventana = tk.Toplevel(self)
+        ventana.title("Exportar datos limpios a SQL")
+        ventana.geometry("440x460")
+        ventana.transient(self)
+        ventana.grab_set()
+
+        motores = ["PostgreSQL", "MySQL", "SQL Server", "SQLite", "Otra (cadena de conexión manual)"]
+        motor_var = tk.StringVar(value=motores[0])
+        ttk.Label(ventana, text="Motor de base de datos:").pack(anchor="w", padx=15, pady=(15, 2))
+        ttk.Combobox(ventana, textvariable=motor_var, values=motores, state="readonly").pack(fill="x", padx=15)
+
+        marco_campos = ttk.Frame(ventana)
+        marco_campos.pack(fill="x", padx=15, pady=10)
+
+        campos_vars = {
+            "host": tk.StringVar(value="localhost"), "puerto": tk.StringVar(),
+            "usuario": tk.StringVar(), "clave": tk.StringVar(), "basedatos": tk.StringVar(),
+            "ruta_sqlite": tk.StringVar(), "cadena_manual": tk.StringVar(),
+        }
+        _puertos_defecto = {"PostgreSQL": "5432", "MySQL": "3306", "SQL Server": "1433"}
+
+        def _redibujar_campos(*_args):
+            for w in marco_campos.winfo_children():
+                w.destroy()
+            motor = motor_var.get()
+            if motor == "SQLite":
+                ttk.Label(marco_campos, text="Ruta del archivo .db:").pack(anchor="w")
+                ttk.Entry(marco_campos, textvariable=campos_vars["ruta_sqlite"]).pack(fill="x")
+            elif motor == "Otra (cadena de conexión manual)":
+                ttk.Label(marco_campos, text="Cadena de conexión SQLAlchemy completa:").pack(anchor="w")
+                ttk.Entry(marco_campos, textvariable=campos_vars["cadena_manual"], show="•").pack(fill="x")
+            else:
+                campos_vars["puerto"].set(_puertos_defecto.get(motor, ""))
+                for etiqueta, clave, oculto in [
+                    ("Host", "host", False), ("Puerto", "puerto", False),
+                    ("Usuario", "usuario", False), ("Contraseña", "clave", True),
+                    ("Base de datos", "basedatos", False),
+                ]:
+                    ttk.Label(marco_campos, text=f"{etiqueta}:").pack(anchor="w")
+                    ttk.Entry(marco_campos, textvariable=campos_vars[clave],
+                              show="•" if oculto else "").pack(fill="x", pady=(0, 4))
+
+        motor_var.trace_add("write", _redibujar_campos)
+        _redibujar_campos()
+
+        ttk.Separator(ventana, orient="horizontal").pack(fill="x", padx=15, pady=6)
+
+        ttk.Label(ventana, text="Tabla destino:").pack(anchor="w", padx=15)
+        tabla_var = tk.StringVar()
+        ttk.Entry(ventana, textvariable=tabla_var).pack(fill="x", padx=15, pady=(0, 8))
+
+        ttk.Label(ventana, text="Si la tabla ya existe:").pack(anchor="w", padx=15)
+        si_existe_var = tk.StringVar(value="replace")
+        ttk.Combobox(ventana, textvariable=si_existe_var, values=["replace", "append", "fail"],
+                     state="readonly").pack(fill="x", padx=15, pady=(0, 15))
+
+        def _exportar():
+            motor = motor_var.get()
+            if motor == "SQLite":
+                if not campos_vars["ruta_sqlite"].get():
+                    messagebox.showwarning("Falta la ruta", "Indique la ruta del archivo .db.")
+                    return
+                cadena = f"sqlite:///{campos_vars['ruta_sqlite'].get()}"
+            elif motor == "Otra (cadena de conexión manual)":
+                cadena = campos_vars["cadena_manual"].get()
+                if not cadena:
+                    messagebox.showwarning("Falta la cadena", "Ingrese la cadena de conexión.")
+                    return
+            else:
+                driver = {"PostgreSQL": "postgresql+psycopg2", "MySQL": "mysql+pymysql",
+                          "SQL Server": "mssql+pyodbc"}[motor]
+                if not (campos_vars["host"].get() and campos_vars["basedatos"].get()):
+                    messagebox.showwarning("Faltan datos", "Complete al menos host y base de datos.")
+                    return
+                if motor == "SQL Server":
+                    parametros_odbc = "driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+                    servidor = f"{campos_vars['host'].get()}:{campos_vars['puerto'].get()}" \
+                        if campos_vars["puerto"].get() else campos_vars["host"].get()
+                    if not campos_vars["usuario"].get() and not campos_vars["clave"].get():
+                        cadena = f"{driver}://@{servidor}/{campos_vars['basedatos'].get()}?{parametros_odbc}&trusted_connection=yes"
+                    else:
+                        cadena = (f"{driver}://{campos_vars['usuario'].get()}:{campos_vars['clave'].get()}"
+                                  f"@{servidor}/{campos_vars['basedatos'].get()}?{parametros_odbc}")
+                else:
+                    if not campos_vars["usuario"].get():
+                        messagebox.showwarning("Faltan datos", "Complete usuario para este motor.")
+                        return
+                    cadena = (f"{driver}://{campos_vars['usuario'].get()}:{campos_vars['clave'].get()}"
+                              f"@{campos_vars['host'].get()}:{campos_vars['puerto'].get()}/{campos_vars['basedatos'].get()}")
+
+            tabla = tabla_var.get().strip()
+            if not tabla:
+                messagebox.showwarning("Falta la tabla", "Indique el nombre de la tabla destino.")
+                return
+
+            try:
+                from data_cleaner.exporters import exportar_sql as _exportar_sql
+                mensaje = _exportar_sql(self.df_limpio, cadena, tabla, if_exists=si_existe_var.get())
+            except Exception as exc:
+                messagebox.showerror("Error al exportar", str(exc))
+                return
+
+            self.status_var.set(mensaje)
+            messagebox.showinfo("Exportado", mensaje)
+            ventana.destroy()
+
+        ttk.Button(ventana, text="Exportar", command=_exportar).pack(pady=(0, 10))
 
     def exportar_script_portatil(self) -> None:
         """Genera un script autocontenido (Power BI / código M / universal) con la
