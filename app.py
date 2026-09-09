@@ -686,6 +686,7 @@ if st.session_state.get("df_limpio") is not None:
             id_duplicado=config_aplicada.get("id_duplicado", "marcar_solo"),
             formula_incorrecta=config_aplicada.get("formula_incorrecta", "marcar_solo"),
             texto_inconsistente=config_aplicada.get("texto_inconsistente", "marcar_solo"),
+            estado_invalido=config_aplicada.get("estado_invalido", "marcar_solo"),
         )
         st.code(script_m_puro, language="text")
         st.download_button(
