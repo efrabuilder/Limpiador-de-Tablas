@@ -661,7 +661,10 @@ class LimpiadorApp(tk.Tk):
         ttk.Button(
             ventana, text="Script para Power BI (.py)",
             command=lambda: self._guardar_script(
-                generar_script_powerbi(self.config_aplicada, 1.5, self.valores_fijos_aplicados),
+                generar_script_powerbi(
+                    self.config_aplicada, 1.5, self.valores_fijos_aplicados,
+                    correcciones_individuales=self.correcciones_individuales,
+                ),
                 "limpiador_powerbi_generado.py", [("Python", "*.py")], ventana,
             ),
         ).pack(fill="x", padx=15, pady=4)
@@ -669,7 +672,10 @@ class LimpiadorApp(tk.Tk):
         ttk.Button(
             ventana, text="Código M (Editor avanzado de Power Query)",
             command=lambda: self._guardar_script(
-                generar_editor_m(self.config_aplicada, 1.5, self.valores_fijos_aplicados),
+                generar_editor_m(
+                    self.config_aplicada, 1.5, self.valores_fijos_aplicados,
+                    correcciones_individuales=self.correcciones_individuales,
+                ),
                 "editor_avanzado_powerbi_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
             ),
         ).pack(fill="x", padx=15, pady=4)
@@ -677,7 +683,10 @@ class LimpiadorApp(tk.Tk):
         ttk.Button(
             ventana, text="Script universal (Tableau/Alteryx/Qlik) (.py)",
             command=lambda: self._guardar_script(
-                generar_script_universal(self.config_aplicada, 1.5, self.valores_fijos_aplicados),
+                generar_script_universal(
+                    self.config_aplicada, 1.5, self.valores_fijos_aplicados,
+                    correcciones_individuales=self.correcciones_individuales,
+                ),
                 "limpiador_universal_generado.py", [("Python", "*.py")], ventana,
             ),
         ).pack(fill="x", padx=15, pady=4)
