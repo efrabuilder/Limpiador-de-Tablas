@@ -13,9 +13,12 @@ matplotlib>=3.8
 nbformat>=5.10
 
  
-# Driver de base de datos SQL: descomente el que necesite según el motor
-# elegido en "Conectar a una base de datos SQL" (sqlalchemy por si solo NO
-# incluye ninguno). SQLite no necesita driver aparte (ya viene con Python).
-# psycopg2-binary>=2.9   # PostgreSQL
-#pymysql>=1.1           # MySQL / MariaDB
+# Driver de base de datos SQL: sqlalchemy por si solo NO incluye ninguno.
+# SQLite no necesita driver aparte (ya viene con Python). Los tres de abajo
+# vienen activos por defecto porque los 3 motores (PostgreSQL/MySQL/SQL
+# Server) son opciones de primera clase en la interfaz de conexión SQL
+# (tanto para importar como para exportar); si no usa alguno, puede
+# comentarlo para instalar menos dependencias.
+psycopg2-binary>=2.9   # PostgreSQL
+pymysql>=1.1           # MySQL / MariaDB
 pyodbc>=5.1            # SQL Server (además requiere el "ODBC Driver 17/18 for SQL Server" instalado en el sistema)
