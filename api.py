@@ -34,7 +34,8 @@ from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
-from data_cleaner.loaders import load_excel
+from data_cleaner.loaders import load_excel, load_table
+from data_cleaner.exporters import exportar_sql
 
 app = FastAPI(
     title="Limpiador de Tablas API",
@@ -62,6 +63,12 @@ class AnalisisOut(BaseModel):
     por_tipo: dict
     por_columna: dict
     hallazgos: list[HallazgoOut]
+
+
+class ExportarSqlIn(BaseModel):
+    connection_string: str
+    table_name: str
+    if_exists: str = "replace"  # replace | append | fail
 
 
 class LimpiezaOut(BaseModel):
@@ -127,6 +134,58 @@ def analizar_endpoint(
         permitir_codigo_pais_telefono=permitir_codigo_pais_telefono,
     )
 
+    hallazgos = [
+        HallazgoOut(
+            tipo=i.tipo, columna=i.columna, fila=i.fila,
+            valor_original=None if i.valor_original is None else str(i.valor_original),
+            detalle=i.detalle,
+        )
+        for i in resultado.issues
+    ]
+    return AnalisisOut(
+        filas_analizadas=resultado.filas_analizadas,
+        columnas_analizadas=resultado.columnas_analizadas,
+        total_hallazgos=len(resultado.issues),
+        por_tipo=resultado.por_tipo(),
+        por_columna=resultado.por_columna(),
+        hallazgos=hallazgos,
+    )
+
+
+@app.post("/analizar-sql", response_model=AnalisisOut)
+def analizar_sql_endpoint(
+    connection_string: str = Form(..., description="Cadena de conexión SQLAlchemy de origen."),
+    table_name: Optional[str] = Form(None, description="Tabla a leer (o use query)."),
+    query: Optional[str] = Form(None, description="Consulta SQL a ejecutar (o use table_name)."),
+    metodo_atipicos: str = Form("iqr", description="iqr | zscore | ambos"),
+    paises_telefono: str = Form(""),
+    digitos_telefono_min: Optional[int] = Form(None),
+    digitos_telefono_max: Optional[int] = Form(None),
+    permitir_codigo_pais_telefono: bool = Form(True),
+):
+    """Igual que /analizar, pero leyendo la tabla desde una base de datos SQL
+    en vez de un archivo subido."""
+    if not table_name and not query:
+        raise HTTPException(status_code=400, detail="Debe indicar table_name o query.")
+    if metodo_atipicos not in ("iqr", "zscore", "ambos"):
+        raise HTTPException(status_code=400, detail="metodo_atipicos debe ser iqr, zscore o ambos.")
+
+    try:
+        df = load_table(connection_string, kind="sql", table_name=table_name, query=query)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo leer de la base de datos: {exc}")
+
+    digitos_telefono = (
+        (digitos_telefono_min, digitos_telefono_max)
+        if digitos_telefono_min is not None and digitos_telefono_max is not None
+        else None
+    )
+    resultado = analizar(
+        df, metodo_atipicos=metodo_atipicos,
+        digitos_telefono=digitos_telefono,
+        paises_telefono=_parsear_paises_telefono(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais_telefono,
+    )
     hallazgos = [
         HallazgoOut(
             tipo=i.tipo, columna=i.columna, fila=i.fila,
@@ -211,6 +270,91 @@ def limpiar_endpoint(
 
     df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos_dict)
     tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=archivo.filename or "")
+
+    resultado_id = str(uuid.uuid4())
+    _RESULTADOS[resultado_id] = {"df_limpio": df_limpio, "tablas_reporte": tablas_reporte}
+
+    return LimpiezaOut(
+        id=resultado_id,
+        filas_originales=len(df),
+        filas_finales=len(df_limpio),
+        total_correcciones=len(registro),
+        resumen_por_tipo=resultado.por_tipo(),
+    )
+
+
+@app.post("/limpiar-sql", response_model=LimpiezaOut)
+def limpiar_sql_endpoint(
+    connection_string: str = Form(..., description="Cadena de conexión SQLAlchemy de origen."),
+    table_name: Optional[str] = Form(None, description="Tabla a leer (o use query)."),
+    query: Optional[str] = Form(None, description="Consulta SQL a ejecutar (o use table_name)."),
+    metodo_atipicos: str = Form("iqr"),
+    faltante: str = Form(DEFAULT_CONFIG["faltante"]),
+    duplicado: str = Form(DEFAULT_CONFIG["duplicado"]),
+    atipico: str = Form(DEFAULT_CONFIG["atipico"]),
+    tipo_invalido: str = Form(DEFAULT_CONFIG["tipo_invalido"]),
+    fecha_invalida: str = Form(DEFAULT_CONFIG["fecha_invalida"]),
+    email_invalido: str = Form(DEFAULT_CONFIG["email_invalido"]),
+    telefono_invalido: str = Form(DEFAULT_CONFIG["telefono_invalido"]),
+    id_duplicado: str = Form(DEFAULT_CONFIG["id_duplicado"]),
+    formula_incorrecta: str = Form(DEFAULT_CONFIG["formula_incorrecta"]),
+    texto_inconsistente: str = Form(DEFAULT_CONFIG["texto_inconsistente"]),
+    paises_telefono: str = Form(""),
+    digitos_telefono_min: Optional[int] = Form(None),
+    digitos_telefono_max: Optional[int] = Form(None),
+    permitir_codigo_pais_telefono: bool = Form(True),
+    valores_fijos: str = Form("{}"),
+):
+    """Igual que /limpiar, pero leyendo la tabla de origen desde SQL en vez
+    de un archivo subido. El resultado queda guardado bajo un id, igual que
+    /limpiar, para descargarlo por /descargar/{id}/{tipo} o escribirlo de
+    vuelta a SQL con /exportar-sql/{id}."""
+    if not table_name and not query:
+        raise HTTPException(status_code=400, detail="Debe indicar table_name o query.")
+    try:
+        df = load_table(connection_string, kind="sql", table_name=table_name, query=query)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo leer de la base de datos: {exc}")
+
+    try:
+        valores_fijos_dict = json.loads(valores_fijos) if valores_fijos else {}
+        if not isinstance(valores_fijos_dict, dict):
+            raise ValueError
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="valores_fijos debe ser un JSON de objeto (columna: valor).")
+
+    config = {
+        "faltante": faltante, "duplicado": duplicado,
+        "atipico": atipico, "tipo_invalido": tipo_invalido,
+        "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
+        "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
+        "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+    }
+    digitos_telefono = (
+        (digitos_telefono_min, digitos_telefono_max)
+        if digitos_telefono_min is not None and digitos_telefono_max is not None
+        else None
+    )
+    resultado = analizar(
+        df, metodo_atipicos=metodo_atipicos,
+        digitos_telefono=digitos_telefono,
+        paises_telefono=_parsear_paises_telefono(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais_telefono,
+    )
+
+    faltan = [
+        tipo for tipo, accion in config.items()
+        if accion == "valor_fijo"
+        and not any(i.columna in valores_fijos_dict for i in resultado.issues if i.tipo == tipo)
+    ]
+    if faltan:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Falta valor fijo en 'valores_fijos' para el/los tipo(s): {', '.join(faltan)}",
+        )
+
+    df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos_dict)
+    tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=table_name or "consulta_sql")
 
     resultado_id = str(uuid.uuid4())
     _RESULTADOS[resultado_id] = {"df_limpio": df_limpio, "tablas_reporte": tablas_reporte}
@@ -350,24 +494,51 @@ def exportar_script_m_puro_endpoint(
 
 
 @app.get("/descargar/{resultado_id}/{tipo}")
-def descargar_endpoint(resultado_id: str, tipo: str):
+def descargar_endpoint(resultado_id: str, tipo: str, formato: str = "excel"):
     if resultado_id not in _RESULTADOS:
         raise HTTPException(status_code=404, detail="No existe ese resultado (o ya expiró).")
     if tipo not in ("datos", "reporte"):
         raise HTTPException(status_code=400, detail="tipo debe ser 'datos' o 'reporte'.")
+    if formato not in ("excel", "csv"):
+        raise HTTPException(status_code=400, detail="formato debe ser 'excel' o 'csv'.")
+    if tipo == "reporte" and formato == "csv":
+        raise HTTPException(status_code=400, detail="El reporte de calidad solo está disponible en excel (tiene varias hojas).")
 
     datos = _RESULTADOS[resultado_id]
     buf = io.BytesIO()
-    if tipo == "datos":
+    if tipo == "datos" and formato == "csv":
+        exportar(datos["df_limpio"], buf, kind="csv")
+        nombre, media_type = "datos_limpios.csv", "text/csv"
+    elif tipo == "datos":
         exportar(datos["df_limpio"], buf, kind="excel")
         nombre = "datos_limpios.xlsx"
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     else:
         exportar_reporte_excel(datos["tablas_reporte"], buf)
         nombre = "reporte_calidad_datos.xlsx"
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     buf.seek(0)
     return StreamingResponse(
         buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{nombre}"'},
     )
+
+
+@app.post("/exportar-sql/{resultado_id}")
+def exportar_sql_endpoint(resultado_id: str, body: ExportarSqlIn):
+    """Escribe el df_limpio de un resultado de /limpiar o /limpiar-sql de
+    vuelta en una base de datos SQL destino (misma u otra que el origen)."""
+    if resultado_id not in _RESULTADOS:
+        raise HTTPException(status_code=404, detail="No existe ese resultado (o ya expiró).")
+    if body.if_exists not in ("replace", "append", "fail"):
+        raise HTTPException(status_code=400, detail="if_exists debe ser 'replace', 'append' o 'fail'.")
+
+    df_limpio = _RESULTADOS[resultado_id]["df_limpio"]
+    try:
+        mensaje = exportar_sql(df_limpio, body.connection_string, body.table_name, if_exists=body.if_exists)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo escribir en la base de datos: {exc}")
+
+    return {"mensaje": mensaje}
