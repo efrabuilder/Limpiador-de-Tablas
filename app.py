@@ -569,6 +569,7 @@ if st.session_state.get("df_limpio") is not None:
 
     config_aplicada = st.session_state.get("config_aplicada", {})
     valores_fijos_aplicados = st.session_state.get("valores_fijos_aplicados", {})
+    correcciones_individuales_aplicadas = st.session_state.get("correcciones_individuales_aplicadas", {})
 
     tab_pbi, tab_m, tab_m_puro, tab_universal = st.tabs(
         ["Script Power BI (.py)", "Código M (Editor avanzado)",
@@ -576,7 +577,10 @@ if st.session_state.get("df_limpio") is not None:
     )
 
     with tab_pbi:
-        script_pbi = generar_script_powerbi(config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados)
+        script_pbi = generar_script_powerbi(
+            config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados,
+            correcciones_individuales=correcciones_individuales_aplicadas,
+        )
         st.code(script_pbi, language="python")
         st.download_button(
             "⬇️ Descargar limpiador_powerbi_generado.py", script_pbi,
@@ -591,6 +595,7 @@ if st.session_state.get("df_limpio") is not None:
         script_m = generar_editor_m(
             config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados,
             nombre_paso_anterior=nombre_paso,
+            correcciones_individuales=correcciones_individuales_aplicadas,
         )
         st.code(script_m, language="text")
         st.download_button(
@@ -696,7 +701,8 @@ if st.session_state.get("df_limpio") is not None:
 
     with tab_universal:
         script_universal = generar_script_universal(
-            config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados
+            config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados,
+            correcciones_individuales=correcciones_individuales_aplicadas,
         )
         st.code(script_universal, language="python")
         st.download_button(
