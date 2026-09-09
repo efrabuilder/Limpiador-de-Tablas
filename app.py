@@ -556,6 +556,84 @@ if st.session_state.get("df_limpio") is not None:
         )
 
     # ----------------------------------------------------------------------
+    # Exportar datos limpios de vuelta a una base de datos SQL (adicional a
+    # las descargas CSV/Excel de arriba). Usa exportar_sql de data_cleaner,
+    # que ya existía pero no estaba conectada a ninguna interfaz.
+    # ----------------------------------------------------------------------
+    with st.expander("🗄️ Enviar datos limpios a una base de datos SQL"):
+        motor_sql_salida = st.selectbox(
+            "Motor de base de datos",
+            ["PostgreSQL", "MySQL", "SQL Server", "SQLite", "Otra (cadena de conexión manual)"],
+            key="motor_sql_salida",
+        )
+        cadena_conexion_salida = ""
+        if motor_sql_salida == "SQLite":
+            ruta_sqlite_salida = st.text_input("Ruta del archivo .db", key="ruta_sqlite_salida")
+            if ruta_sqlite_salida:
+                cadena_conexion_salida = f"sqlite:///{ruta_sqlite_salida}"
+        elif motor_sql_salida == "Otra (cadena de conexión manual)":
+            cadena_conexion_salida = st.text_input(
+                "Cadena de conexión SQLAlchemy completa", type="password",
+                key="cadena_conexion_salida",
+                help="Ej: mssql+pyodbc://usuario:clave@host/basedatos?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes",
+            )
+        else:
+            _driver_por_motor_salida = {
+                "PostgreSQL": ("postgresql+psycopg2", "5432"),
+                "MySQL": ("mysql+pymysql", "3306"),
+                "SQL Server": ("mssql+pyodbc", "1433"),
+            }
+            driver_sql_salida, puerto_defecto_salida = _driver_por_motor_salida[motor_sql_salida]
+            col_sqlout_a, col_sqlout_b = st.columns(2)
+            with col_sqlout_a:
+                host_sql_salida = st.text_input("Host", value="localhost", key="host_sql_salida")
+                usuario_sql_salida = st.text_input("Usuario", key="usuario_sql_salida")
+                basedatos_sql_salida = st.text_input("Base de datos", key="basedatos_sql_salida")
+            with col_sqlout_b:
+                puerto_sql_salida = st.text_input(
+                    "Puerto", value=puerto_defecto_salida, key=f"puerto_sql_salida_{motor_sql_salida}"
+                )
+                clave_sql_salida = st.text_input("Contraseña", type="password", key="clave_sql_salida")
+
+            if host_sql_salida and basedatos_sql_salida:
+                if motor_sql_salida == "SQL Server":
+                    parametros_odbc_salida = "driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+                    servidor_sql_salida = f"{host_sql_salida}:{puerto_sql_salida}" if puerto_sql_salida else host_sql_salida
+                    if not usuario_sql_salida and not clave_sql_salida:
+                        cadena_conexion_salida = (
+                            f"{driver_sql_salida}://@{servidor_sql_salida}/{basedatos_sql_salida}"
+                            f"?{parametros_odbc_salida}&trusted_connection=yes"
+                        )
+                    else:
+                        cadena_conexion_salida = (
+                            f"{driver_sql_salida}://{usuario_sql_salida}:{clave_sql_salida}@"
+                            f"{servidor_sql_salida}/{basedatos_sql_salida}?{parametros_odbc_salida}"
+                        )
+                else:
+                    cadena_conexion_salida = (
+                        f"{driver_sql_salida}://{usuario_sql_salida}:{clave_sql_salida}@"
+                        f"{host_sql_salida}:{puerto_sql_salida}/{basedatos_sql_salida}"
+                    )
+
+        tabla_sql_salida = st.text_input("Nombre de la tabla destino", key="tabla_sql_salida")
+        si_existe = st.selectbox(
+            "Si la tabla ya existe", ["replace", "append", "fail"], key="si_existe_sql_salida",
+            help="replace: la reemplaza por completo · append: agrega filas · fail: cancela con error.",
+        )
+        if st.button("Escribir datos limpios en la base de datos", key="btn_exportar_sql"):
+            if not cadena_conexion_salida or not tabla_sql_salida:
+                st.error("Completá la conexión y el nombre de la tabla destino.")
+            else:
+                try:
+                    from data_cleaner.exporters import exportar_sql
+                    mensaje = exportar_sql(
+                        df_limpio, cadena_conexion_salida, tabla_sql_salida, if_exists=si_existe,
+                    )
+                    st.success(mensaje)
+                except Exception as exc:
+                    st.error(f"No se pudo escribir en la base de datos: {exc}")
+
+    # ----------------------------------------------------------------------
     # Paso 5 — Exportar como script portátil (Power BI / Tableau / etc.)
     # ----------------------------------------------------------------------
     st.divider()
