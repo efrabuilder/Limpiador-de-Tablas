@@ -735,6 +735,7 @@ class LimpiadorApp(tk.Tk):
                     id_duplicado=self.config_aplicada.get("id_duplicado", "marcar_solo"),
                     formula_incorrecta=self.config_aplicada.get("formula_incorrecta", "marcar_solo"),
                     texto_inconsistente=self.config_aplicada.get("texto_inconsistente", "marcar_solo"),
+                    estado_invalido=self.config_aplicada.get("estado_invalido", "marcar_solo"),
                 ),
                 "codigo_m_puro_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
             )
