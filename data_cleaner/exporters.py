@@ -30,7 +30,7 @@ def exportar(df: pd.DataFrame, ruta_o_conn: str, kind: str = "auto", **kwargs) -
             kind = "csv"
         elif lower.endswith((".xlsx", ".xls")):
             kind = "excel"
-        elif lower.startswith(("sqlite:", "mysql", "postgresql", "postgres")):
+        elif lower.startswith(("sqlite:", "mysql", "postgresql", "postgres", "mssql")):
             kind = "sql"
         else:
             raise ValueError("No se pudo detectar el formato de salida; indique kind explícitamente.")
