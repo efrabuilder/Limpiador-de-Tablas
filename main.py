@@ -179,10 +179,24 @@ def main():
 
     if not args.demo:
         formato_salida = preguntar(
-            "\n¿En qué formato desea el archivo limpio?", ["csv", "excel"], defecto="excel"
+            "\n¿En qué formato desea el archivo limpio?", ["csv", "excel", "sql"], defecto="excel"
         )
     else:
         formato_salida = "excel"
+
+    if formato_salida == "sql":
+        conn_salida = preguntar("Connection string de destino (ej: sqlite:///salida.db):")
+        tabla_salida = preguntar("Nombre de la tabla destino:")
+        si_existe = preguntar(
+            "Si la tabla ya existe:", ["replace", "append", "fail"], defecto="replace"
+        )
+        from data_cleaner.exporters import exportar_sql
+        mensaje_sql = exportar_sql(df_limpio, conn_salida, tabla_salida, if_exists=si_existe)
+        print("\n✅ Proceso completado.")
+        print(f"   {mensaje_sql}")
+        print(f"   Reporte:         {ruta_reporte}")
+        print(f"   Filas finales:   {len(df_limpio)} (originales: {len(df)})")
+        return
 
     ext = "csv" if formato_salida == "csv" else "xlsx"
     ruta_limpio = os.path.join(args.outdir, f"datos_limpios.{ext}")
