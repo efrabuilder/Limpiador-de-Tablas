@@ -785,7 +785,7 @@ class LimpiadorApp(tk.Tk):
 
         ventana = tk.Toplevel(self)
         ventana.title("Exportar script portátil")
-        ventana.geometry("460x360")
+        ventana.geometry("460x560")
         ventana.transient(self)
         ventana.grab_set()
 
@@ -839,13 +839,46 @@ class LimpiadorApp(tk.Tk):
         frame_tel = ttk.LabelFrame(ventana, text="Teléfono (solo aplica al M puro)")
         frame_tel.pack(fill="x", padx=15, pady=(0, 8))
 
+        modo_tel_var = tk.StringVar(value="pais")
+        ttk.Radiobutton(
+            frame_tel, text="Automático por país", variable=modo_tel_var, value="pais",
+        ).pack(anchor="w", padx=8, pady=(6, 0))
+        ttk.Radiobutton(
+            frame_tel, text="Rango manual", variable=modo_tel_var, value="manual",
+        ).pack(anchor="w", padx=8)
+
+        marco_pais = ttk.Frame(frame_tel)
         ttk.Label(
-            frame_tel,
+            marco_pais,
             text="País(es) (coma-separado, ej: cr,mexico — vacío = rango internacional amplio):",
             wraplength=420, justify="left",
-        ).pack(anchor="w", padx=8, pady=(6, 0))
+        ).pack(anchor="w", pady=(4, 0))
         paises_tel_var = tk.StringVar(value="cr")
-        ttk.Entry(frame_tel, textvariable=paises_tel_var).pack(fill="x", padx=8, pady=(2, 6))
+        ttk.Entry(marco_pais, textvariable=paises_tel_var).pack(fill="x", pady=(2, 4))
+
+        marco_manual_tel = ttk.Frame(frame_tel)
+        ttk.Label(marco_manual_tel, text="Dígitos exactos esperados:").pack(side="left")
+        digitos_tel_var = tk.StringVar(value="8")
+        ttk.Entry(marco_manual_tel, textvariable=digitos_tel_var, width=6).pack(side="left", padx=6)
+
+        def _actualizar_modo_tel(*_a):
+            if modo_tel_var.get() == "manual":
+                marco_pais.pack_forget()
+                marco_manual_tel.pack(fill="x", padx=8, pady=(4, 4))
+            else:
+                marco_manual_tel.pack_forget()
+                marco_pais.pack(fill="x", padx=8)
+
+        modo_tel_var.trace_add("write", _actualizar_modo_tel)
+        _actualizar_modo_tel()
+
+        ttk.Label(
+            frame_tel,
+            text="Primeros dígitos válidos (coma-separado; vacío = no validar):",
+            wraplength=420, justify="left",
+        ).pack(anchor="w", padx=8, pady=(4, 0))
+        primeros_digitos_tel_var = tk.StringVar(value="2,4,5,6,7,8")
+        ttk.Entry(frame_tel, textvariable=primeros_digitos_tel_var).pack(fill="x", padx=8, pady=(2, 6))
 
         permitir_codigo_pais_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
@@ -862,9 +895,23 @@ class LimpiadorApp(tk.Tk):
         ).pack(anchor="w", padx=8, pady=(0, 6))
 
         def _generar_m_puro():
-            paises_lista = (
-                [p.strip() for p in paises_tel_var.get().split(",") if p.strip()]
-                if paises_tel_var.get().strip() else None
+            paises_lista = None
+            digitos_manual = None
+            if modo_tel_var.get() == "manual":
+                try:
+                    n = int(digitos_tel_var.get())
+                except ValueError:
+                    messagebox.showwarning("Valor inválido", "Ingrese un número entero de dígitos.")
+                    return
+                digitos_manual = (n, n)
+            else:
+                paises_lista = (
+                    [p.strip() for p in paises_tel_var.get().split(",") if p.strip()]
+                    if paises_tel_var.get().strip() else None
+                )
+            primeros_digitos_lista = (
+                [d.strip() for d in primeros_digitos_tel_var.get().split(",") if d.strip()]
+                if primeros_digitos_tel_var.get().strip() else None
             )
             self._guardar_script(
                 generar_editor_m_puro(
@@ -876,8 +923,10 @@ class LimpiadorApp(tk.Tk):
                     email_invalido=self.config_aplicada.get("email_invalido", "marcar_solo"),
                     telefono_invalido=self.config_aplicada.get("telefono_invalido", "marcar_solo"),
                     correcciones_individuales=self.correcciones_individuales,
+                    digitos_telefono=digitos_manual,
                     paises_telefono=paises_lista,
                     permitir_codigo_pais_telefono=permitir_codigo_pais_var.get(),
+                    primeros_digitos_telefono_validos=primeros_digitos_lista,
                     id_duplicado=self.config_aplicada.get("id_duplicado", "marcar_solo"),
                     formula_incorrecta=self.config_aplicada.get("formula_incorrecta", "marcar_solo"),
                     texto_inconsistente=self.config_aplicada.get("texto_inconsistente", "marcar_solo"),
