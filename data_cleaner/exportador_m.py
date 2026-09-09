@@ -309,6 +309,21 @@ _M_FUNCION_PERCENTIL = '''  // Percentil con interpolacion lineal (igual convenc
             valorPiso + fraccion * (valorTecho - valorPiso),
 '''
 
+_M_FUNCION_RECORTAR_TEXTO = '''  // Recorta espacios solo si el valor YA es texto en tiempo de ejecucion.
+  // Necesaria porque el trim se aplica a TODAS las columnas del origen: si
+  // se decidiera por columna segun el dtype visto por pandas al analizar
+  // (heuristica anterior), una columna que en Power Query ya llega tipada
+  // como numero/fecha (ej. por un Excel.Workbook + Int64.Type/type date
+  // previo) podia terminar recibiendo Text.Trim() y tronar en tiempo de
+  // ejecucion. Con este chequeo, los valores no-texto (numero, fecha,
+  // logico, null) se dejan intactos sin importar lo que haya detectado
+  // pandas.
+  RecortarSiEsTexto = (valor as any) as any =>
+    if valor = null then null
+    else if Value.Is(valor, type text) then Text.Trim(valor)
+    else valor,
+'''
+
 def _m_valor_id(valor) -> str:
     """Renderiza un valor de ID como literal M: numero si es numero, texto citado si no.
     OJO: los valores numericos de un DataFrame de pandas son numpy.int64/float64, no
@@ -640,6 +655,7 @@ def generar_editor_m_puro(
     necesita_fecha_fn = bool(cols_fecha)
     necesita_percentil_fn = (a_atipico in {"limitar"})
     necesita_correccion_digitos_fn = bool(cols_tel) and a_tel == "editar_individualmente"
+    necesita_recortar_fn = False
 
     # -- 1) Duplicados de fila completa --------------------------------------
     if a_duplicado == "eliminar_fila":
@@ -703,10 +719,16 @@ def generar_editor_m_puro(
                    'Table.RenameColumns({prev}, {{"_ind_corr_' + _nombre_col_id + '", ' + _m_str(_col_ci) + '}})')
 
     # -- 2) Limpieza basica de texto (trim) ----------------------------------
-    columnas_texto_trim = [c for c in df.columns
-                            if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c])]
-    if columnas_texto_trim:
-        pares = ", ".join(f'{{{_m_str(c)}, each if _ = null then null else Text.Trim(_)}}' for c in columnas_texto_trim)
+    # Se aplica a TODAS las columnas: el chequeo de "es texto de verdad" pasa
+    # a la funcion RecortarSiEsTexto, que corre en tiempo de ejecucion dentro
+    # de Power Query. Antes se decidia que columnas incluir segun el dtype
+    # que pandas veia al analizar (is_object_dtype / is_string_dtype), lo que
+    # rompia el paso si la columna real en Power Query ya llegaba tipada
+    # como numero/fecha desde un origen previo (ej. Excel.Workbook +
+    # Int64.Type/type date) aunque pandas la hubiera visto como texto.
+    if len(df.columns) > 0:
+        necesita_recortar_fn = True
+        pares = ", ".join(f'{{{_m_str(c)}, each RecortarSiEsTexto(_)}}' for c in df.columns)
         cb.agregar("EspaciosRecortados", "Table.TransformColumns({prev}, {" + pares + "})")
 
     # -- 3) Texto inconsistente (tabla de correccion horneada) ---------------
@@ -1123,6 +1145,8 @@ def generar_editor_m_puro(
             )
 
     funciones_extra = ""
+    if necesita_recortar_fn:
+        funciones_extra += _M_FUNCION_RECORTAR_TEXTO + "\n"
     if necesita_fecha_fn:
         funciones_extra += _M_FUNCION_FECHA + "\n"
     if necesita_percentil_fn:
