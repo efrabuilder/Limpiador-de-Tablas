@@ -102,6 +102,36 @@ def _parsear_paises_telefono(valor: str) -> Optional[list[str]]:
     return [p.strip() for p in valor.split(",") if p.strip()]
 
 
+def _parsear_correcciones_individuales_json(texto: str) -> dict:
+    """Convierte el JSON recibido por HTTP (una lista de objetos, ya que JSON
+    no soporta tuplas como llave) al dict {(tipo, columna, fila): valor} que
+    esperan generar_script_powerbi/universal/m y generar_editor_m_puro.
+    Formato esperado: [{"tipo": "faltante", "columna": "edad", "fila": 3,
+    "valor": "0"}, ...]."""
+    if not texto:
+        return {}
+    try:
+        lista = json.loads(texto)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="correcciones_individuales debe ser un JSON válido.")
+    if not isinstance(lista, list):
+        raise HTTPException(
+            status_code=400,
+            detail='correcciones_individuales debe ser una lista de objetos: '
+                   '[{"tipo": ..., "columna": ..., "fila": ..., "valor": ...}].',
+        )
+    resultado = {}
+    for item in lista:
+        if not isinstance(item, dict) or not {"tipo", "columna", "fila", "valor"} <= item.keys():
+            raise HTTPException(
+                status_code=400,
+                detail='Cada elemento de correcciones_individuales debe tener '
+                       '"tipo", "columna", "fila" y "valor".',
+            )
+        resultado[(item["tipo"], item["columna"], int(item["fila"]))] = item["valor"]
+    return resultado
+
+
 @app.post("/analizar", response_model=AnalisisOut)
 def analizar_endpoint(
     archivo: UploadFile = File(..., description="Archivo CSV o Excel a analizar."),
@@ -375,12 +405,23 @@ def exportar_script_endpoint(
     duplicado: str = Form(DEFAULT_CONFIG["duplicado"]),
     atipico: str = Form(DEFAULT_CONFIG["atipico"]),
     tipo_invalido: str = Form(DEFAULT_CONFIG["tipo_invalido"]),
+    fecha_invalida: str = Form(DEFAULT_CONFIG["fecha_invalida"]),
+    email_invalido: str = Form(DEFAULT_CONFIG["email_invalido"]),
+    telefono_invalido: str = Form(DEFAULT_CONFIG["telefono_invalido"]),
+    id_duplicado: str = Form(DEFAULT_CONFIG["id_duplicado"]),
+    formula_incorrecta: str = Form(DEFAULT_CONFIG["formula_incorrecta"]),
+    texto_inconsistente: str = Form(DEFAULT_CONFIG["texto_inconsistente"]),
+    estado_invalido: str = Form(DEFAULT_CONFIG["estado_invalido"]),
     factor_iqr: float = Form(1.5),
     valores_fijos: str = Form("{}", description='JSON con valores fijos por columna'),
+    correcciones_individuales: str = Form(
+        "[]", description='JSON: lista de objetos [{"tipo":..,"columna":..,"fila":..,"valor":..}] (opcional).'
+    ),
     nombre_paso_anterior: str = Form("TuPasoAnterior", description="Solo aplica a formato=m"),
 ):
     """Genera un script Python autocontenido (Power BI o universal) o el código M,
-    con la misma configuración de limpieza indicada, para usar en otras herramientas."""
+    con la misma configuración de limpieza indicada (las 11 categorías), para
+    usar en otras herramientas."""
     if formato not in ("powerbi", "universal", "m"):
         raise HTTPException(status_code=400, detail="formato debe ser 'powerbi', 'universal' o 'm'.")
 
@@ -390,20 +431,32 @@ def exportar_script_endpoint(
             raise ValueError
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(status_code=400, detail="valores_fijos debe ser un JSON de objeto (columna: valor).")
+    correcciones_individuales_dict = _parsear_correcciones_individuales_json(correcciones_individuales)
 
     config = {
         "faltante": faltante, "duplicado": duplicado,
         "atipico": atipico, "tipo_invalido": tipo_invalido,
+        "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
+        "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
+        "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+        "estado_invalido": estado_invalido,
     }
 
     if formato == "powerbi":
-        contenido = generar_script_powerbi(config, factor_iqr, valores_fijos_dict)
+        contenido = generar_script_powerbi(
+            config, factor_iqr, valores_fijos_dict, correcciones_individuales=correcciones_individuales_dict,
+        )
         nombre_archivo, media_type = "limpiador_powerbi_generado.py", "text/x-python"
     elif formato == "universal":
-        contenido = generar_script_universal(config, factor_iqr, valores_fijos_dict)
+        contenido = generar_script_universal(
+            config, factor_iqr, valores_fijos_dict, correcciones_individuales=correcciones_individuales_dict,
+        )
         nombre_archivo, media_type = "limpiador_universal_generado.py", "text/x-python"
     else:
-        contenido = generar_editor_m(config, factor_iqr, valores_fijos_dict, nombre_paso_anterior)
+        contenido = generar_editor_m(
+            config, factor_iqr, valores_fijos_dict, nombre_paso_anterior,
+            correcciones_individuales=correcciones_individuales_dict,
+        )
         nombre_archivo, media_type = "editor_avanzado_powerbi_generado.m", "text/plain"
 
     return StreamingResponse(
@@ -437,8 +490,12 @@ def exportar_script_m_puro_endpoint(
     id_duplicado: str = Form("marcar_solo"),
     formula_incorrecta: str = Form("marcar_solo"),
     texto_inconsistente: str = Form("marcar_solo"),
+    estado_invalido: str = Form("marcar_solo"),
     factor_iqr: float = Form(1.5),
     valores_fijos: str = Form("{}", description='JSON con valores fijos por columna'),
+    correcciones_individuales: str = Form(
+        "[]", description='JSON: lista de objetos [{"tipo":..,"columna":..,"fila":..,"valor":..}] (opcional).'
+    ),
     nombre_paso_anterior: str = Form("TuPasoAnterior"),
 ):
     """Genera codigo M 100% nativo (sin Python.Execute), a diferencia de
@@ -453,6 +510,7 @@ def exportar_script_m_puro_endpoint(
             raise ValueError
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(status_code=400, detail="valores_fijos debe ser un JSON de objeto (columna: valor).")
+    correcciones_individuales_dict = _parsear_correcciones_individuales_json(correcciones_individuales)
 
     config = {
         "faltante": faltante, "duplicado": duplicado,
@@ -484,6 +542,8 @@ def exportar_script_m_puro_endpoint(
         id_duplicado=id_duplicado,
         formula_incorrecta=formula_incorrecta,
         texto_inconsistente=texto_inconsistente,
+        estado_invalido=estado_invalido,
+        correcciones_individuales=correcciones_individuales_dict,
     )
 
     return StreamingResponse(
