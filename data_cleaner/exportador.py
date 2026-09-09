@@ -553,19 +553,24 @@ _TIPOS_VALOR_FIJO_DIRECTO = {
     "estado_invalido",
 }
 _TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente"}
+# Tipos para los que "editar_individualmente" tiene sentido (mismo criterio
+# que data_cleaner/cleaner.py): "duplicado" queda afuera porque su hallazgo
+# no tiene una sola columna/valor que editar (columna=None, fila completa).
+_TIPOS_EDITAR_INDIVIDUAL = _TIPOS_VALOR_FIJO_DIRECTO | {"faltante", "tipo_invalido", "atipico"}
 
 
 def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, valores_fijos,
                    fecha_invalida="marcar_solo", email_invalido="marcar_solo",
                    telefono_invalido="marcar_solo", id_duplicado="marcar_solo",
                    formula_incorrecta="marcar_solo", texto_inconsistente="marcar_solo",
-                   estado_invalido="marcar_solo"):
+                   estado_invalido="marcar_solo", correcciones_individuales=None):
     config = {"faltante": faltante, "duplicado": duplicado,
               "atipico": atipico, "tipo_invalido": tipo_invalido,
               "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
               "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
               "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
               "estado_invalido": estado_invalido}
+    correcciones_individuales = correcciones_individuales or {}
 
     df_limpio = df.copy()
     hallazgos = _detectar_hallazgos(df, factor_iqr=factor_iqr)
@@ -614,6 +619,14 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             valor_nuevo = _interpretar_valor_fijo(_buscar_valor_fijo(valores_fijos, h["tipo"], h["columna"]))
             _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
 
+        elif h["tipo"] in _TIPOS_EDITAR_INDIVIDUAL and accion == "editar_individualmente" and h["columna"]:
+            clave = (h["tipo"], h["columna"], h["fila"])
+            if clave in correcciones_individuales:
+                valor_nuevo = correcciones_individuales[clave]
+                _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
+            else:
+                valor_nuevo = h["valor_original"]
+
         registro.append({
             "tipo": h["tipo"],
             "columna": h["columna"] or "(fila completa)",
@@ -626,7 +639,12 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
 
     marcas = {}
     for r in registro:
-        if r["accion_aplicada"] != "marcar_solo":
+        sin_corregir = (
+            r["accion_aplicada"] == "marcar_solo"
+            or (r["accion_aplicada"] == "editar_individualmente"
+                and r["valor_nuevo"] == r["valor_original"])
+        )
+        if not sin_corregir:
             continue
         etiqueta = r["tipo"] if r["columna"] == "(fila completa)" else f"{r['tipo']}:{r['columna']}"
         marcas.setdefault(r["fila"], []).append(etiqueta)
@@ -650,9 +668,11 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
 '''
 
 
-def _bloque_config(config: Dict[str, str], factor_iqr: float, valores_fijos: Optional[dict]) -> str:
+def _bloque_config(config: Dict[str, str], factor_iqr: float, valores_fijos: Optional[dict],
+                    correcciones_individuales: Optional[dict] = None) -> str:
     cfg = {**DEFAULT_CONFIG_EXPORT, **(config or {})}
     valores_fijos = valores_fijos or {}
+    correcciones_individuales = correcciones_individuales or {}
     return (
         f"ACCION_FALTANTE = {cfg['faltante']!r}\n"
         f"ACCION_DUPLICADO = {cfg['duplicado']!r}\n"
@@ -667,11 +687,13 @@ def _bloque_config(config: Dict[str, str], factor_iqr: float, valores_fijos: Opt
         f"ACCION_ESTADO_INVALIDO = {cfg['estado_invalido']!r}\n"
         f"FACTOR_IQR = {factor_iqr!r}\n"
         f"VALORES_FIJOS = {valores_fijos!r}\n"
+        f"CORRECCIONES_INDIVIDUALES = {correcciones_individuales!r}\n"
     )
 
 
 def generar_script_powerbi(config: Dict[str, str], factor_iqr: float = 1.5,
-                            valores_fijos: Optional[dict] = None) -> str:
+                            valores_fijos: Optional[dict] = None,
+                            correcciones_individuales: Optional[dict] = None) -> str:
     """Script Python autocontenido para pegar en Power Query (Transformar -> Ejecutar script de Python)."""
     cabecera = '''# -*- coding: utf-8 -*-
 # =============================================================================
@@ -706,14 +728,16 @@ dataset_limpio, reporte_limpieza = limpiar_tabla(
     fecha_invalida=ACCION_FECHA_INVALIDA, email_invalido=ACCION_EMAIL_INVALIDO,
     telefono_invalido=ACCION_TELEFONO_INVALIDO, id_duplicado=ACCION_ID_DUPLICADO,
     formula_incorrecta=ACCION_FORMULA_INCORRECTA, texto_inconsistente=ACCION_TEXTO_INCONSISTENTE,
-    estado_invalido=ACCION_ESTADO_INVALIDO,
+    estado_invalido=ACCION_ESTADO_INVALIDO, correcciones_individuales=CORRECCIONES_INDIVIDUALES,
 )
 '''
-    return cabecera + _bloque_config(config, factor_iqr, valores_fijos) + "\n\n" + _NUCLEO_LOGICA + pie
+    return cabecera + _bloque_config(config, factor_iqr, valores_fijos, correcciones_individuales) \
+        + "\n\n" + _NUCLEO_LOGICA + pie
 
 
 def generar_script_universal(config: Dict[str, str], factor_iqr: float = 1.5,
-                              valores_fijos: Optional[dict] = None) -> str:
+                              valores_fijos: Optional[dict] = None,
+                              correcciones_individuales: Optional[dict] = None) -> str:
     """Script autocontenido para usar como libreria (Tableau Prep/TabPy, Alteryx, Qlik,
     notebooks) o como script de linea de comandos, con la misma configuracion elegida
     en la interfaz ya puesta como valor por defecto."""
@@ -761,7 +785,7 @@ def _main_cli():
         fecha_invalida=ACCION_FECHA_INVALIDA, email_invalido=ACCION_EMAIL_INVALIDO,
         telefono_invalido=ACCION_TELEFONO_INVALIDO, id_duplicado=ACCION_ID_DUPLICADO,
         formula_incorrecta=ACCION_FORMULA_INCORRECTA, texto_inconsistente=ACCION_TEXTO_INCONSISTENTE,
-        estado_invalido=ACCION_ESTADO_INVALIDO,
+        estado_invalido=ACCION_ESTADO_INVALIDO, correcciones_individuales=CORRECCIONES_INDIVIDUALES,
     )
 
     base, _ext = os.path.splitext(os.path.basename(ruta))
@@ -780,7 +804,8 @@ def _main_cli():
 if __name__ == "__main__":
     _main_cli()
 '''
-    return cabecera + _bloque_config(config, factor_iqr, valores_fijos) + "\n\n" + _NUCLEO_LOGICA + pie
+    return cabecera + _bloque_config(config, factor_iqr, valores_fijos, correcciones_individuales) \
+        + "\n\n" + _NUCLEO_LOGICA + pie
 
 
 def _escapar_m(texto: str) -> str:
@@ -805,9 +830,10 @@ def _referencia_m(nombre: str) -> str:
 
 def generar_editor_m(config: Dict[str, str], factor_iqr: float = 1.5,
                       valores_fijos: Optional[dict] = None,
-                      nombre_paso_anterior: str = "TuPasoAnterior") -> str:
+                      nombre_paso_anterior: str = "TuPasoAnterior",
+                      correcciones_individuales: Optional[dict] = None) -> str:
     """Codigo M listo para pegar en el Editor avanzado de Power Query."""
-    script_python = generar_script_powerbi(config, factor_iqr, valores_fijos)
+    script_python = generar_script_powerbi(config, factor_iqr, valores_fijos, correcciones_individuales)
     script_m = _escapar_m(script_python)
     referencia_paso_anterior = _referencia_m(nombre_paso_anterior)
     return f'''// =============================================================================
