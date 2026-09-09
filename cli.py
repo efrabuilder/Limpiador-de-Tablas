@@ -49,6 +49,7 @@ ACCIONES_TELEFONO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
 ACCIONES_ID_DUPLICADO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
 ACCIONES_FORMULA = ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"]
 ACCIONES_TEXTO = ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_ESTADO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
 
 
 def _parsear_valores_fijos(pares: Optional[List[str]]) -> dict:
@@ -176,6 +177,8 @@ def limpiar_cmd(
                                             help=f"Acción para Total≠Cantidad×Precio: {', '.join(ACCIONES_FORMULA)}."),
     texto_inconsistente: str = typer.Option(DEFAULT_CONFIG["texto_inconsistente"], "--texto-inconsistente",
                                              help=f"Acción para variantes de texto: {', '.join(ACCIONES_TEXTO)}."),
+    estado_invalido: str = typer.Option(DEFAULT_CONFIG["estado_invalido"], "--estado-invalido",
+                                         help=f"Acción para estados no reconocidos: {', '.join(ACCIONES_ESTADO)}."),
     valor_fijo: List[str] = typer.Option(
         [], "--valor-fijo", help="Valor fijo por columna, formato columna=valor. Repetible."
     ),
@@ -220,12 +223,14 @@ def limpiar_cmd(
         "fecha_invalida": ACCIONES_FECHA, "email_invalido": ACCIONES_EMAIL,
         "telefono_invalido": ACCIONES_TELEFONO, "id_duplicado": ACCIONES_ID_DUPLICADO,
         "formula_incorrecta": ACCIONES_FORMULA, "texto_inconsistente": ACCIONES_TEXTO,
+        "estado_invalido": ACCIONES_ESTADO,
     }
     config = {"faltante": faltante, "duplicado": duplicado,
               "atipico": atipico, "tipo_invalido": tipo_invalido,
               "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
               "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
-              "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente}
+              "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+              "estado_invalido": estado_invalido}
     for tipo, accion in config.items():
         if accion not in acciones_validas[tipo]:
             console.print(f"[red]Acción inválida para {tipo}: '{accion}'. "
