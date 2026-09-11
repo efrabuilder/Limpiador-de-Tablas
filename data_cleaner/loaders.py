@@ -169,6 +169,33 @@ def load_excel(path, sheet_name=None, detectar_encabezado: bool = True, **kwargs
     return pd.concat(marcos, ignore_index=True, sort=False)
 
 
+def load_excel_hojas(path, hojas=None, detectar_encabezado: bool = True, **kwargs) -> dict:
+    """
+    Carga varias hojas de un Excel como DataFrames SEPARADOS (a diferencia
+    de load_excel, que las concatena en una sola tabla). Util cuando cada
+    hoja es una tabla distinta (ej. un libro con "Clientes", "Inventario",
+    "Ventas") y se quiere escribir cada una a su propia tabla SQL.
+
+    hojas=None (por defecto): carga TODAS las hojas del archivo.
+    hojas=["Clientes", "Ventas"]: carga solo esas hojas, en ese orden.
+
+    Devuelve un diccionario {nombre_hoja: DataFrame}, aplicando la misma
+    deteccion de titulo/notas/columnas sin nombre que load_excel (ver
+    detectar_encabezado).
+    """
+    if "header" in kwargs:
+        detectar_encabezado = False
+
+    if not detectar_encabezado:
+        crudos = pd.read_excel(path, sheet_name=hojas, **kwargs)
+        return crudos if isinstance(crudos, dict) else {hojas: crudos}
+
+    crudos = pd.read_excel(path, sheet_name=hojas, header=None, **kwargs)
+    if not isinstance(crudos, dict):
+        crudos = {hojas: crudos}
+    return {nombre: _procesar_hoja_cruda(df) for nombre, df in crudos.items()}
+
+
 def load_sql(connection_string: str, query: str = None, table_name: str = None) -> pd.DataFrame:
     """
     Carga datos desde una base de datos SQL usando SQLAlchemy.
