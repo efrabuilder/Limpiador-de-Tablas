@@ -159,6 +159,8 @@ Documentación interactiva en `http://localhost:8000/docs`. Endpoints:
 - `POST /limpiar` — sube un archivo + configuración, devuelve un `id` de resultado.
 - `GET /descargar/{id}/datos` y `GET /descargar/{id}/reporte` — descargan los
   archivos Excel generados por `/limpiar`.
+- `POST /modelo-sql` y `POST /modelo-sql/diagrama` — modelo de datos
+  estrella/copo de nieve con PK/FK (ver sección más abajo).
 
 Ejemplo con `curl`:
 
@@ -248,20 +250,66 @@ exportar_sql(df_limpio, "sqlite:///datos.db", table_name="empleados_limpios")
 Compatible con SQLite, MySQL y PostgreSQL (vía SQLAlchemy) — solo cambia el
 `connection_string`.
 
+## Modelo de datos (estrella / copo de nieve)
+
+Además de limpiar y escribir **una** tabla a la vez, el proyecto puede
+tomar un Excel con **varias hojas** (cada una una tabla distinta) y
+escribirlas en SQL como un modelo dimensional: tablas de **dimensión**
+y de **hecho (fact)**, relacionadas con llave primaria (PK) y llave
+foránea (FK). Un modelo se define así (ver `data_cleaner/modelo_sql.py`):
+
+```python
+modelo = {
+    "dim_clientes": {"hoja": "Clientes", "clave_primaria": "id_cliente"},
+    "dim_productos": {"hoja": "Productos", "clave_primaria": "id_producto"},
+    "fact_ventas": {
+        "hoja": "Ventas",
+        "clave_primaria": "id_venta",
+        "claves_foraneas": [
+            {"columna": "id_cliente", "tabla_referencia": "dim_clientes", "columna_referencia": "id_cliente"},
+            {"columna": "id_producto", "tabla_referencia": "dim_productos", "columna_referencia": "id_producto"},
+        ],
+    },
+}
+```
+
+Para **copo de nieve**, agregue `claves_foraneas` también en una
+dimensión (ej. `dim_productos` -> `dim_categorias`). Formas de aplicarlo:
+
+- **Script:** edite `MODELO`, `ARCHIVO_EXCEL` y `CADENA_CONEXION` en
+  `excel_a_sql.py` y ejecute `python excel_a_sql.py`. Genera además
+  `diagrama_modelo.dot` (Graphviz) con el esquema resultante.
+- **CLI:** `python cli.py modelo-sql --input datos.xlsx --modelo modelo.json --conexion "..."`
+  (el modelo va en un archivo JSON con la misma forma de arriba).
+- **API:** `POST /modelo-sql` (sube el Excel + el modelo en JSON + la
+  conexión) y `POST /modelo-sql/diagrama` (solo el modelo, para
+  previsualizar el diagrama sin tocar la base de datos).
+- **Web (Streamlit) y escritorio (Tkinter):** en `app.py`, modo
+  "🗂️ Modelo de datos" en la barra lateral; en `desktop_app.py`, botón
+  "🗂️ Modelo de datos..." en la barra superior. Ambos permiten elegir
+  las hojas, definir rol/PK/FK con menús y ver el diagrama antes de
+  escribir a SQL.
+
+Nota: SQLite no soporta agregar PK/FK con `ALTER TABLE` (los datos igual
+se escriben, pero esas dos restricciones se omiten con un aviso).
+Funciona sin problema en SQL Server, MySQL y PostgreSQL.
+
 ## Estructura del proyecto
 
 ```
 data_cleaner/
 ├── data_cleaner/
-│   ├── loaders.py     # Carga CSV / Excel / SQL
+│   ├── loaders.py     # Carga CSV / Excel (una hoja, todas o varias por separado) / SQL
 │   ├── analyzer.py    # Detección de faltantes, duplicados, tipo y atípicos
 │   ├── cleaner.py      # Aplica las acciones de corrección elegidas
 │   ├── report.py       # Genera el reporte (Resumen + Detalle)
-│   └── exporters.py    # Exporta el archivo limpio (CSV/Excel/SQL)
+│   ├── exporters.py    # Exporta el archivo limpio (CSV/Excel/SQL)
+│   └── modelo_sql.py   # Modelo de datos estrella/copo de nieve (PK/FK + diagrama)
 ├── app.py                       # Interfaz web (Streamlit)
 ├── desktop_app.py                # Interfaz de escritorio (Tkinter)
 ├── cli.py                        # CLI por flags (automatización)
 ├── api.py                        # API REST (FastAPI)
+├── excel_a_sql.py                # Script: Excel (varias hojas) -> modelo SQL con PK/FK
 ├── notebook_interactivo.ipynb    # Notebook interactivo (Jupyter + ipywidgets)
 ├── main.py                       # CLI interactiva (con preguntas)
 ├── ejemplo_datos.csv             # Datos de ejemplo para probar
