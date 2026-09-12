@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 from typing import List, Optional
 
 import typer
@@ -347,6 +348,90 @@ def limpiar_cmd(
     console.print(f"   Archivo limpio:  {ruta_limpio}")
     console.print(f"   Reporte:         {ruta_reporte}")
     console.print(f"   Filas finales:   {len(df_limpio)} (originales: {len(df)})")
+
+
+@app.command("modelo-sql")
+def modelo_sql_cmd(
+    input: str = typer.Option(..., "--input", "-i", help="Ruta del Excel con las hojas del modelo."),
+    modelo: str = typer.Option(
+        ..., "--modelo",
+        help='Ruta a un archivo JSON con el modelo: {"nombre_tabla": {"hoja": "...", '
+             '"clave_primaria": "...", "claves_foraneas": [{"columna": "...", '
+             '"tabla_referencia": "...", "columna_referencia": "..."}]}, ...}. '
+             "Ver data_cleaner/modelo_sql.py y excel_a_sql.py para ejemplos.",
+    ),
+    conexion: str = typer.Option(..., "--conexion", help="Cadena de conexión SQLAlchemy destino."),
+    si_existe: str = typer.Option(
+        "replace", "--si-existe",
+        help="replace | append | fail. Con PK/FK conviene 'replace': con 'append' las "
+             "restricciones pueden fallar si ya hay valores repetidos o nulos.",
+    ),
+    diagrama_salida: Optional[str] = typer.Option(
+        None, "--diagrama-salida",
+        help="Si se indica, guarda el diagrama del modelo en formato Graphviz DOT en esa ruta "
+             "(péguelo en https://dreampuf.github.io/GraphvizOnline para verlo).",
+    ),
+):
+    """
+    Carga varias hojas de un Excel y las escribe en SQL como un modelo de
+    datos en ESTRELLA o COPO DE NIEVE (con llave primaria y llaves
+    foráneas), a partir de un JSON de modelo.
+
+    Ejemplo:
+        python cli.py modelo-sql --input datos.xlsx --modelo modelo.json \\
+            --conexion "mssql+pyodbc://@servidor/base?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes&trusted_connection=yes"
+    """
+    if not os.path.exists(input):
+        console.print(f"[red]No existe el archivo: {input}[/red]")
+        raise typer.Exit(code=1)
+    if not os.path.exists(modelo):
+        console.print(f"[red]No existe el archivo de modelo: {modelo}[/red]")
+        raise typer.Exit(code=1)
+    if si_existe not in ("replace", "append", "fail"):
+        console.print("[red]--si-existe debe ser 'replace', 'append' o 'fail'[/red]")
+        raise typer.Exit(code=2)
+
+    from data_cleaner.loaders import load_excel_hojas
+    from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo
+
+    try:
+        with open(modelo, "r", encoding="utf-8") as f:
+            modelo_dict = json.load(f)
+    except json.JSONDecodeError as exc:
+        console.print(f"[red]El archivo de modelo no es un JSON válido: {exc}[/red]")
+        raise typer.Exit(code=2)
+    if not isinstance(modelo_dict, dict) or not modelo_dict:
+        console.print("[red]El JSON de modelo debe ser un objeto no vacío (tabla -> definición).[/red]")
+        raise typer.Exit(code=2)
+
+    hojas_necesarias = sorted({definicion["hoja"] for definicion in modelo_dict.values()})
+    try:
+        hojas_cargadas = load_excel_hojas(input, hojas=hojas_necesarias)
+    except Exception as exc:
+        console.print(f"[red]No se pudo cargar el Excel: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        mensajes = aplicar_modelo_sql(modelo_dict, hojas_cargadas, conexion, if_exists=si_existe)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        console.print(f"[red]No se pudo crear el modelo en la base de datos: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    for m in mensajes:
+        if "⚠" in m:
+            console.print(f"[yellow]{m}[/yellow]")
+        else:
+            console.print(f"[green]{m}[/green]")
+
+    if diagrama_salida:
+        with open(diagrama_salida, "w", encoding="utf-8") as f:
+            f.write(generar_dot_modelo(modelo_dict))
+        console.print(f"\nDiagrama guardado en: {diagrama_salida}")
+
+    console.print("\n[bold green]✅ Modelo aplicado.[/bold green]")
 
 
 if __name__ == "__main__":
