@@ -32,6 +32,7 @@ DEFAULT_CONFIG_EXPORT = {
     "formula_incorrecta": "marcar_solo",
     "texto_inconsistente": "marcar_solo",
     "estado_invalido": "marcar_solo",
+    "capitalizacion_incorrecta": "marcar_solo",
 }
 
 # -----------------------------------------------------------------------------
@@ -66,6 +67,33 @@ _PATRONES_ESTADO = ("estado", "status")
 _VALORES_ESTADO_VALIDOS = ("activo", "inactivo", "pendiente")
 _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + _PATRONES_ESTADO + \\
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
+# Columnas de nombre propio (persona/empresa/lugar) -- ver
+# data_cleaner/patrones.py: PATRONES_NOMBRE_PROPIO (misma lista, copiada
+# aqui de forma autocontenida).
+_PATRONES_NOMBRE_PROPIO = (
+    "nombre", "apellido", "nombre_completo", "cliente", "vendedor",
+    "proveedor", "empleado", "encargado", "responsable", "representante",
+    "contacto", "gerente", "supervisor", "jefe", "doctor", "paciente",
+    "estudiante", "alumno", "profesor", "maestro", "autor", "titular",
+    "propietario", "empresa", "compania", "razon_social", "ciudad",
+    "provincia", "canton", "distrito", "pais", "direccion", "calle", "avenida",
+    "sucursal", "tienda", "local", "agencia", "oficina", "bodega",
+    "almacen", "punto_venta",
+)
+# Conectores que van en minuscula dentro de un nombre propio (salvo que
+# sean la primera palabra) y siglas/abreviaturas que se dejan en mayuscula
+# -- ver data_cleaner/patrones.py: CONECTORES_MINUSCULA_NOMBRES / SIGLAS_NOMBRES.
+_CONECTORES_MINUSCULA_NOMBRES = (
+    "de", "del", "la", "las", "los", "y", "e", "en", "a", "al", "con",
+    "para", "por", "van", "von", "der", "da", "do", "dos", "das",
+)
+_SIGLAS_NOMBRES = (
+    "sa", "srl", "ltda", "llc", "inc", "corp", "sac", "eirl", "cia",
+    "sl", "sau", "spa", "gmbh", "plc",
+    "ii", "iii", "iv", "vi", "vii", "viii", "ix",
+    "jr", "sr", "md", "phd",
+)
+_REGEX_PALABRA_NOMBRE = re.compile(r"[^\\s\\-]+")
 # Identificadores alfanumericos/numericos que NO son telefono aunque su
 # CONTENIDO tenga una cantidad de digitos parecida a un celular: chasis/VIN,
 # SKU/codigo de barras, numero de cuenta/factura/poliza, IMEI, y (agregado)
@@ -244,6 +272,49 @@ def _es_valor_estado_valido(valor, valores_validos=None):
     return _normalizar_texto(valor) in validos_norm
 
 
+def _es_sigla_conocida(palabra):
+    limpio = re.sub(r"[^a-zA-Z]", "", palabra).lower()
+    return limpio in _SIGLAS_NOMBRES
+
+
+def _capitalizar_nombre_propio(texto):
+    """Ver capitalizar_nombre_propio() en data_cleaner/patrones.py (misma
+    logica, copiada aqui de forma autocontenida)."""
+    if texto is None:
+        return texto
+    original = str(texto)
+    if not _REGEX_PALABRA_NOMBRE.search(original):
+        return original
+
+    def _cap_sub(sub):
+        return sub[:1].upper() + sub[1:].lower() if sub else sub
+
+    def _cap_palabra(palabra):
+        if _es_sigla_conocida(palabra):
+            return palabra.upper()
+        return "'".join(_cap_sub(p) for p in palabra.split("'"))
+
+    partes = []
+    pos = 0
+    for i, m in enumerate(_REGEX_PALABRA_NOMBRE.finditer(original)):
+        partes.append(original[pos:m.start()])
+        palabra = m.group()
+        norm = _normalizar_texto(palabra)
+        if i > 0 and norm in _CONECTORES_MINUSCULA_NOMBRES:
+            partes.append(palabra.lower())
+        else:
+            partes.append(_cap_palabra(palabra))
+        pos = m.end()
+    partes.append(original[pos:])
+    return "".join(partes)
+
+
+def _es_capitalizacion_correcta(texto):
+    if texto is None:
+        return True
+    return str(texto) == _capitalizar_nombre_propio(texto)
+
+
 def _columnas_fecha_por_nombre(df):
     """Ver columnas_fecha_por_nombre() en data_cleaner/patrones.py (misma
     logica, copiada aqui de forma autocontenida)."""
@@ -339,6 +410,23 @@ def _detectar_estados_invalidos(df, valores_validos=None):
                 hallazgos.append({"tipo": "estado_invalido", "columna": col, "fila": int(idx),
                                    "valor_original": val,
                                    "detalle": f"Valor de estado no reconocido (validos: {', '.join(valores_validos or _VALORES_ESTADO_VALIDOS)})"})
+    return hallazgos
+
+
+def _detectar_capitalizacion_incorrecta(df):
+    hallazgos = []
+    for col in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO):
+        if not (pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col])):
+            continue
+        for idx, val in df[col].items():
+            if pd.isna(val) or str(val).strip() == "":
+                continue
+            if not _es_capitalizacion_correcta(val):
+                sugerido = _capitalizar_nombre_propio(val)
+                hallazgos.append({"tipo": "capitalizacion_incorrecta", "columna": col, "fila": int(idx),
+                                   "valor_original": val,
+                                   "detalle": f"Capitalizacion inconsistente (sugerido: '{sugerido}')",
+                                   "valor_sugerido": sugerido})
     return hallazgos
 
 
@@ -490,6 +578,7 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
     hallazgos += _detectar_formula_incorrecta(df)
     hallazgos += _detectar_texto_inconsistente(df)
     hallazgos += _detectar_estados_invalidos(df)
+    hallazgos += _detectar_capitalizacion_incorrecta(df)
 
     for col in _columnas_para_atipicos(df):
         serie = pd.to_numeric(df[col], errors="coerce")
@@ -550,9 +639,9 @@ def _buscar_valor_fijo(valores_fijos, tipo, columna):
 _TIPOS_VALOR_FIJO_DIRECTO = {
     "fecha_invalida", "email_invalido", "telefono_invalido",
     "id_duplicado", "formula_incorrecta", "texto_inconsistente",
-    "estado_invalido",
+    "estado_invalido", "capitalizacion_incorrecta",
 }
-_TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente"}
+_TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente", "capitalizacion_incorrecta"}
 # Tipos para los que "editar_individualmente" tiene sentido (mismo criterio
 # que data_cleaner/cleaner.py): "duplicado" queda afuera porque su hallazgo
 # no tiene una sola columna/valor que editar (columna=None, fila completa).
@@ -563,13 +652,14 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
                    fecha_invalida="marcar_solo", email_invalido="marcar_solo",
                    telefono_invalido="marcar_solo", id_duplicado="marcar_solo",
                    formula_incorrecta="marcar_solo", texto_inconsistente="marcar_solo",
-                   estado_invalido="marcar_solo", correcciones_individuales=None):
+                   estado_invalido="marcar_solo", capitalizacion_incorrecta="marcar_solo",
+                   correcciones_individuales=None):
     config = {"faltante": faltante, "duplicado": duplicado,
               "atipico": atipico, "tipo_invalido": tipo_invalido,
               "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
               "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
               "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
-              "estado_invalido": estado_invalido}
+              "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta}
     correcciones_individuales = correcciones_individuales or {}
 
     df_limpio = df.copy()
@@ -685,6 +775,7 @@ def _bloque_config(config: Dict[str, str], factor_iqr: float, valores_fijos: Opt
         f"ACCION_FORMULA_INCORRECTA = {cfg['formula_incorrecta']!r}\n"
         f"ACCION_TEXTO_INCONSISTENTE = {cfg['texto_inconsistente']!r}\n"
         f"ACCION_ESTADO_INVALIDO = {cfg['estado_invalido']!r}\n"
+        f"ACCION_CAPITALIZACION_INCORRECTA = {cfg['capitalizacion_incorrecta']!r}\n"
         f"FACTOR_IQR = {factor_iqr!r}\n"
         f"VALORES_FIJOS = {valores_fijos!r}\n"
         f"CORRECCIONES_INDIVIDUALES = {correcciones_individuales!r}\n"
@@ -728,7 +819,7 @@ dataset_limpio, reporte_limpieza = limpiar_tabla(
     fecha_invalida=ACCION_FECHA_INVALIDA, email_invalido=ACCION_EMAIL_INVALIDO,
     telefono_invalido=ACCION_TELEFONO_INVALIDO, id_duplicado=ACCION_ID_DUPLICADO,
     formula_incorrecta=ACCION_FORMULA_INCORRECTA, texto_inconsistente=ACCION_TEXTO_INCONSISTENTE,
-    estado_invalido=ACCION_ESTADO_INVALIDO, correcciones_individuales=CORRECCIONES_INDIVIDUALES,
+    estado_invalido=ACCION_ESTADO_INVALIDO, capitalizacion_incorrecta=ACCION_CAPITALIZACION_INCORRECTA,\n    correcciones_individuales=CORRECCIONES_INDIVIDUALES,
 )
 '''
     return cabecera + _bloque_config(config, factor_iqr, valores_fijos, correcciones_individuales) \
@@ -785,7 +876,7 @@ def _main_cli():
         fecha_invalida=ACCION_FECHA_INVALIDA, email_invalido=ACCION_EMAIL_INVALIDO,
         telefono_invalido=ACCION_TELEFONO_INVALIDO, id_duplicado=ACCION_ID_DUPLICADO,
         formula_incorrecta=ACCION_FORMULA_INCORRECTA, texto_inconsistente=ACCION_TEXTO_INCONSISTENTE,
-        estado_invalido=ACCION_ESTADO_INVALIDO, correcciones_individuales=CORRECCIONES_INDIVIDUALES,
+        estado_invalido=ACCION_ESTADO_INVALIDO, capitalizacion_incorrecta=ACCION_CAPITALIZACION_INCORRECTA,\n    correcciones_individuales=CORRECCIONES_INDIVIDUALES,
     )
 
     base, _ext = os.path.splitext(os.path.basename(ruta))
