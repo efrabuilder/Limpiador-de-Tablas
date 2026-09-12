@@ -189,3 +189,50 @@ def generar_dot_modelo(modelo: dict) -> str:
             )
     lineas.append("}")
     return "\n".join(lineas)
+
+
+MOTORES_CREAR_BASE_DATOS = ["sql_server", "mysql", "postgresql"]
+
+
+def generar_script_crear_base_datos(nombre_base_datos: str, motor: str = "sql_server") -> str:
+    """
+    Genera el script SQL para crear la base de datos ANTES de aplicar el
+    modelo. Hace falta porque una cadena de conexión normal (la que usa
+    aplicar_modelo_sql) no puede apuntar a una base de datos que todavía
+    no existe: primero hay que crearla desde una consulta en SSMS / mysql
+    / psql (conectado al servidor o a una base por defecto), y DESPUÉS sí
+    armar la cadena de conexión apuntando a esa base ya creada.
+
+    motor: "sql_server" | "mysql" | "postgresql" (ver MOTORES_CREAR_BASE_DATOS).
+    """
+    nombre = (nombre_base_datos or "").strip()
+    if not nombre:
+        raise ValueError("Indique el nombre de la base de datos.")
+
+    if motor == "sql_server":
+        return (
+            "-- Pegue esto en una consulta de SSMS (o sqlcmd) conectado al SERVIDOR,\n"
+            "-- sin elegir ninguna base en particular (o conectado a 'master').\n"
+            f"CREATE DATABASE {nombre};\n"
+            "GO\n"
+            f"USE {nombre};\n"
+            "GO\n"
+        )
+    if motor == "mysql":
+        return (
+            "-- Pegue esto conectado al servidor MySQL/MariaDB (cualquier base).\n"
+            f"CREATE DATABASE IF NOT EXISTS {nombre};\n"
+            f"USE {nombre};\n"
+        )
+    if motor == "postgresql":
+        return (
+            "-- PostgreSQL NO permite crear y usar la base en la misma sesión/conexión.\n"
+            "-- 1) Conectado a cualquier base existente (ej. 'postgres'), ejecute:\n"
+            f"CREATE DATABASE {nombre};\n"
+            "-- 2) Cierre esa conexión y vuelva a conectarse, esta vez directo a\n"
+            f"--    '{nombre}', antes de correr el modelo (ahí sí puede usar\n"
+            "--    'USE' o el selector de base de su cliente SQL).\n"
+        )
+    raise ValueError(
+        f"Motor no soportado: '{motor}'. Use uno de: {', '.join(MOTORES_CREAR_BASE_DATOS)}."
+    )
