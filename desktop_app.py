@@ -1278,12 +1278,43 @@ class LimpiadorApp(tk.Tk):
             wraplength=420, justify="left",
         ).pack(padx=15, pady=(15, 10), anchor="w")
 
+        # Columnas que tuvieron hallazgos REALES en el análisis ya mostrado en
+        # el reporte (por tipo), para el modo "solo configuración" de abajo.
+        columnas_reales_por_tipo: dict = {}
+        if self.resultado:
+            for issue in self.resultado.issues:
+                if issue.columna:
+                    columnas_reales_por_tipo.setdefault(issue.tipo, set()).add(issue.columna)
+            columnas_reales_por_tipo = {t: sorted(c) for t, c in columnas_reales_por_tipo.items()}
+
+        incluir_generico_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            ventana, variable=incluir_generico_var,
+            text="Incluir detección genérica de columnas (por nombre/patrón)",
+        ).pack(anchor="w", padx=15, pady=(0, 2))
+        ttk.Label(
+            ventana,
+            text="Desmarcado: el código generado (los 3 tipos) solo procesa las "
+                 "columnas que ya tuvieron un hallazgo real en el análisis de arriba, "
+                 "en vez de volver a revisar cualquier columna que coincida con un "
+                 "patrón de nombre (fecha/email/teléfono/id/texto/estado/nombre "
+                 "propio/fórmula).",
+            wraplength=420, justify="left", foreground="#555555",
+        ).pack(anchor="w", padx=15, pady=(0, 8))
+
+        def _kwargs_generico():
+            return dict(
+                incluir_generico=incluir_generico_var.get(),
+                columnas_reales_por_tipo=columnas_reales_por_tipo,
+            )
+
         ttk.Button(
             ventana, text="Script para Power BI (.py)",
             command=lambda: self._guardar_script(
                 generar_script_powerbi(
                     self.config_aplicada, 1.5, self.valores_fijos_aplicados,
                     correcciones_individuales=self.correcciones_individuales,
+                    **_kwargs_generico(),
                 ),
                 "limpiador_powerbi_generado.py", [("Python", "*.py")], ventana,
             ),
@@ -1295,6 +1326,7 @@ class LimpiadorApp(tk.Tk):
                 generar_editor_m(
                     self.config_aplicada, 1.5, self.valores_fijos_aplicados,
                     correcciones_individuales=self.correcciones_individuales,
+                    **_kwargs_generico(),
                 ),
                 "editor_avanzado_powerbi_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
             ),
@@ -1306,6 +1338,7 @@ class LimpiadorApp(tk.Tk):
                 generar_script_universal(
                     self.config_aplicada, 1.5, self.valores_fijos_aplicados,
                     correcciones_individuales=self.correcciones_individuales,
+                    **_kwargs_generico(),
                 ),
                 "limpiador_universal_generado.py", [("Python", "*.py")], ventana,
             ),
@@ -1415,6 +1448,7 @@ class LimpiadorApp(tk.Tk):
                     texto_inconsistente=self.config_aplicada.get("texto_inconsistente", "marcar_solo"),
                     estado_invalido=self.config_aplicada.get("estado_invalido", "marcar_solo"),
                     capitalizacion_incorrecta=self.config_aplicada.get("capitalizacion_incorrecta", "marcar_solo"),
+                    **_kwargs_generico(),
                 ),
                 "codigo_m_puro_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
             )
