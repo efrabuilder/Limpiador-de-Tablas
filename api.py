@@ -34,8 +34,9 @@ from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
-from data_cleaner.loaders import load_excel, load_table
+from data_cleaner.loaders import load_excel, load_table, load_excel_hojas
 from data_cleaner.exporters import exportar_sql
+from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo
 
 app = FastAPI(
     title="Limpiador de Tablas API",
@@ -69,6 +70,14 @@ class ExportarSqlIn(BaseModel):
     connection_string: str
     table_name: str
     if_exists: str = "replace"  # replace | append | fail
+
+
+class AplicarModeloSqlOut(BaseModel):
+    mensajes: list[str]
+
+
+class DiagramaModeloIn(BaseModel):
+    modelo: dict
 
 
 class LimpiezaOut(BaseModel):
@@ -602,3 +611,59 @@ def exportar_sql_endpoint(resultado_id: str, body: ExportarSqlIn):
         raise HTTPException(status_code=400, detail=f"No se pudo escribir en la base de datos: {exc}")
 
     return {"mensaje": mensaje}
+
+
+@app.post("/modelo-sql", response_model=AplicarModeloSqlOut)
+def modelo_sql_endpoint(
+    archivo: UploadFile = File(..., description="Excel con las hojas del modelo (una tabla por hoja)."),
+    modelo: str = Form(
+        ..., description='JSON con el modelo: {"nombre_tabla": {"hoja": "...", '
+                          '"clave_primaria": "...", "claves_foraneas": [{"columna": "...", '
+                          '"tabla_referencia": "...", "columna_referencia": "..."}]}, ...}. '
+                          "Ver data_cleaner/modelo_sql.py.",
+    ),
+    connection_string: str = Form(..., description="Cadena de conexión SQLAlchemy destino."),
+    if_exists: str = Form("replace", description="replace | append | fail."),
+):
+    """
+    Carga varias hojas del Excel subido y las escribe en SQL como un
+    modelo de datos en ESTRELLA o COPO DE NIEVE: escribe los datos y
+    agrega las restricciones de llave primaria (PK) y llave foránea (FK).
+    Con PK/FK conviene if_exists='replace': con 'append' las restricciones
+    pueden fallar si la tabla ya tiene valores repetidos o nulos.
+    """
+    if if_exists not in ("replace", "append", "fail"):
+        raise HTTPException(status_code=400, detail="if_exists debe ser 'replace', 'append' o 'fail'.")
+    try:
+        modelo_dict = json.loads(modelo)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="modelo debe ser un JSON válido.")
+    if not isinstance(modelo_dict, dict) or not modelo_dict:
+        raise HTTPException(status_code=400, detail="modelo debe ser un objeto JSON no vacío (tabla -> definición).")
+
+    contenido = archivo.file.read()
+    hojas_necesarias = sorted({definicion.get("hoja") for definicion in modelo_dict.values()})
+    try:
+        hojas_cargadas = load_excel_hojas(io.BytesIO(contenido), hojas=hojas_necesarias)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo leer el Excel: {exc}")
+
+    try:
+        mensajes = aplicar_modelo_sql(modelo_dict, hojas_cargadas, connection_string, if_exists=if_exists)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo crear el modelo: {exc}")
+
+    return AplicarModeloSqlOut(mensajes=mensajes)
+
+
+@app.post("/modelo-sql/diagrama")
+def modelo_sql_diagrama_endpoint(body: DiagramaModeloIn):
+    """
+    Devuelve el diagrama del modelo (formato Graphviz DOT), sin necesidad
+    de subir el Excel ni tocar la base de datos — útil para previsualizar
+    antes de aplicar /modelo-sql (péguelo en
+    https://dreampuf.github.io/GraphvizOnline para verlo).
+    """
+    return {"dot": generar_dot_modelo(body.modelo)}
