@@ -213,25 +213,25 @@ def generar_script_crear_base_datos(nombre_base_datos: str, motor: str = "sql_se
         return (
             "-- Pegue esto en una consulta de SSMS (o sqlcmd) conectado al SERVIDOR,\n"
             "-- sin elegir ninguna base en particular (o conectado a 'master').\n"
-            f"CREATE DATABASE {nombre};\n"
-            "GO\n"
-            f"USE {nombre};\n"
-            "GO\n"
+            f"create database {nombre};\n"
+            "go\n"
+            f"use {nombre};\n"
+            "go\n"
         )
     if motor == "mysql":
         return (
             "-- Pegue esto conectado al servidor MySQL/MariaDB (cualquier base).\n"
-            f"CREATE DATABASE IF NOT EXISTS {nombre};\n"
-            f"USE {nombre};\n"
+            f"create database if not exists {nombre};\n"
+            f"use {nombre};\n"
         )
     if motor == "postgresql":
         return (
             "-- PostgreSQL NO permite crear y usar la base en la misma sesión/conexión.\n"
             "-- 1) Conectado a cualquier base existente (ej. 'postgres'), ejecute:\n"
-            f"CREATE DATABASE {nombre};\n"
+            f"create database {nombre};\n"
             "-- 2) Cierre esa conexión y vuelva a conectarse, esta vez directo a\n"
             f"--    '{nombre}', antes de correr el modelo (ahí sí puede usar\n"
-            "--    'USE' o el selector de base de su cliente SQL).\n"
+            "--    'use' o el selector de base de su cliente SQL).\n"
         )
     raise ValueError(
         f"Motor no soportado: '{motor}'. Use uno de: {', '.join(MOTORES_CREAR_BASE_DATOS)}."
@@ -268,13 +268,13 @@ def _tipo_sql_columna(serie, motor: str) -> str:
     import pandas as pd
 
     if pd.api.types.is_bool_dtype(serie):
-        return {"sql_server": "BIT", "mysql": "TINYINT(1)", "postgresql": "BOOLEAN"}[motor]
+        return {"sql_server": "bit", "mysql": "tinyint(1)", "postgresql": "boolean"}[motor]
     if pd.api.types.is_integer_dtype(serie):
-        return {"sql_server": "BIGINT", "mysql": "BIGINT", "postgresql": "BIGINT"}[motor]
+        return {"sql_server": "bigint", "mysql": "bigint", "postgresql": "bigint"}[motor]
     if pd.api.types.is_float_dtype(serie):
-        return {"sql_server": "FLOAT", "mysql": "DOUBLE", "postgresql": "DOUBLE PRECISION"}[motor]
+        return {"sql_server": "float", "mysql": "double", "postgresql": "double precision"}[motor]
     if pd.api.types.is_datetime64_any_dtype(serie):
-        return {"sql_server": "DATETIME2", "mysql": "DATETIME", "postgresql": "TIMESTAMP"}[motor]
+        return {"sql_server": "datetime2", "mysql": "datetime", "postgresql": "timestamp"}[motor]
 
     # Texto: se mide el largo real de los valores para no quedarse corto,
     # con un mínimo de 50 y, si hay textos muy largos, se pasa a un tipo
@@ -282,11 +282,11 @@ def _tipo_sql_columna(serie, motor: str) -> str:
     largo_max = serie.dropna().astype(str).map(len).max()
     largo_max = 50 if pd.isna(largo_max) else max(50, int(largo_max) + 20)
     if largo_max > 4000:
-        return {"sql_server": "NVARCHAR(MAX)", "mysql": "TEXT", "postgresql": "TEXT"}[motor]
+        return {"sql_server": "nvarchar(max)", "mysql": "text", "postgresql": "text"}[motor]
     return {
-        "sql_server": f"NVARCHAR({largo_max})",
-        "mysql": f"VARCHAR({largo_max})",
-        "postgresql": f"VARCHAR({largo_max})",
+        "sql_server": f"nvarchar({largo_max})",
+        "mysql": f"varchar({largo_max})",
+        "postgresql": f"varchar({largo_max})",
     }[motor]
 
 
@@ -297,10 +297,10 @@ def _valor_sql_literal(valor, motor: str) -> str:
     import pandas as pd
 
     if valor is None or (isinstance(valor, float) and pd.isna(valor)) or pd.isna(valor):
-        return "NULL"
+        return "null"
     if isinstance(valor, bool):
         if motor == "postgresql":
-            return "TRUE" if valor else "FALSE"
+            return "true" if valor else "false"
         return "1" if valor else "0"
     if isinstance(valor, (int, float)):
         return repr(valor)
@@ -344,17 +344,17 @@ def generar_script_modelo_sql(modelo: dict, hojas_cargadas: dict, motor: str = "
         "",
     ]
 
-    # 1. CREATE TABLE (estructura) de cada tabla del modelo.
+    # 1. create table (estructura) de cada tabla del modelo.
     for tabla, definicion in modelo.items():
         df = hojas_cargadas[definicion["hoja"]]
         columnas_sql = [
             f"  {q(col)} {_tipo_sql_columna(df[col], motor)}" for col in df.columns
         ]
-        bloques.append(f"DROP TABLE IF EXISTS {q(tabla)};")
-        bloques.append(f"CREATE TABLE {q(tabla)} (\n" + ",\n".join(columnas_sql) + "\n);")
+        bloques.append(f"drop table if exists {q(tabla)};")
+        bloques.append(f"create table {q(tabla)} (\n" + ",\n".join(columnas_sql) + "\n);")
         bloques.append("")
 
-    # 2. INSERT con los datos (opcional).
+    # 2. insert con los datos (opcional).
     if incluir_datos:
         for tabla, definicion in modelo.items():
             df = hojas_cargadas[definicion["hoja"]]
@@ -369,27 +369,27 @@ def generar_script_modelo_sql(modelo: dict, hojas_cargadas: dict, motor: str = "
                     for fila in lote
                 )
                 bloques.append(
-                    f"INSERT INTO {q(tabla)} ({columnas_txt}) VALUES\n{valores};"
+                    f"insert into {q(tabla)} ({columnas_txt}) values\n{valores};"
                 )
             bloques.append("")
 
-    # 3. Llaves primarias (después de que TODAS las tablas ya existen).
+    # 3. llaves primarias (después de que TODAS las tablas ya existen).
     for tabla, definicion in modelo.items():
         pk = definicion.get("clave_primaria")
         if not pk:
             continue
         bloques.append(
-            f"ALTER TABLE {q(tabla)} ADD CONSTRAINT {q('PK_' + tabla)} PRIMARY KEY ({q(pk)});"
+            f"alter table {q(tabla)} add constraint {q('PK_' + tabla)} primary key ({q(pk)});"
         )
     bloques.append("")
 
-    # 4. Llaves foráneas (después de que TODAS las PK ya existen).
+    # 4. llaves foráneas (después de que TODAS las PK ya existen).
     for tabla, definicion in modelo.items():
         for fk in definicion.get("claves_foraneas", []):
             nombre_restriccion = f"FK_{tabla}_{fk['columna']}"
             bloques.append(
-                f"ALTER TABLE {q(tabla)} ADD CONSTRAINT {q(nombre_restriccion)} "
-                f"FOREIGN KEY ({q(fk['columna'])}) REFERENCES "
+                f"alter table {q(tabla)} add constraint {q(nombre_restriccion)} "
+                f"foreign key ({q(fk['columna'])}) references "
                 f"{q(fk['tabla_referencia'])} ({q(fk['columna_referencia'])});"
             )
 
