@@ -11,6 +11,7 @@ Uso:
 from __future__ import annotations
 
 import os
+import re
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -21,12 +22,13 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, exportar,
 )
-from data_cleaner.loaders import load_excel
+from data_cleaner.loaders import load_excel, load_excel_hojas
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES
+from data_cleaner.modelo_sql import aplicar_modelo_sql, es_tabla_hecho
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_mediana", "reemplazar_media", "reemplazar_moda",
@@ -67,6 +69,69 @@ NOMBRES_TIPO = {
 # siempre muestren exactamente el mismo listado de países.
 
 
+def _nombre_tabla_valido_modelo(nombre_hoja: str) -> str:
+    """Convierte el nombre de una hoja en un nombre de tabla SQL válido:
+    minúsculas, espacios/caracteres raros -> guion bajo. Compartido con la
+    misma lógica de app.py y excel_a_sql.py."""
+    limpio = re.sub(r"[^a-zA-Z0-9_]+", "_", nombre_hoja.strip().lower())
+    limpio = re.sub(r"_+", "_", limpio).strip("_")
+    return limpio or "hoja_sin_nombre"
+
+
+def _dibujar_diagrama_modelo(canvas: tk.Canvas, modelo: dict) -> None:
+    """Dibuja el modelo (dimensiones arriba, hechos abajo, flechas FK->PK)
+    en un Canvas de Tkinter. Ver data_cleaner/modelo_sql.py para el mismo
+    diagrama en formato Graphviz DOT (usado en app.py)."""
+    canvas.delete("all")
+    if not modelo:
+        canvas.create_text(150, 80, text="(sin tablas definidas todavía)", fill="#888")
+        return
+
+    dimensiones = [t for t, d in modelo.items() if not es_tabla_hecho(d)]
+    hechos = [t for t, d in modelo.items() if es_tabla_hecho(d)]
+
+    ancho_caja, alto_caja, espacio_x = 150, 46, 40
+    ancho_disponible = max(canvas.winfo_width(), 700)
+    posiciones: dict[str, tuple[float, float, float, float]] = {}
+
+    def _colocar_fila(tablas, y):
+        if not tablas:
+            return
+        ancho_total = len(tablas) * ancho_caja + (len(tablas) - 1) * espacio_x
+        x0 = max(20, (ancho_disponible - ancho_total) // 2)
+        for i, tabla in enumerate(tablas):
+            x = x0 + i * (ancho_caja + espacio_x)
+            posiciones[tabla] = (x, y, x + ancho_caja, y + alto_caja)
+
+    _colocar_fila(dimensiones, 25)
+    _colocar_fila(hechos, 25 + alto_caja + 85)
+
+    # Flechas FK -> PK primero, para que queden debajo de las cajas
+    for tabla, definicion in modelo.items():
+        for fk in definicion.get("claves_foraneas", []):
+            origen = posiciones.get(tabla)
+            destino = posiciones.get(fk["tabla_referencia"])
+            if not origen or not destino:
+                continue
+            x1, y1 = (origen[0] + origen[2]) / 2, origen[1]
+            x2, y2 = (destino[0] + destino[2]) / 2, destino[3]
+            canvas.create_line(x1, y1, x2, y2, arrow=tk.LAST, fill="#555")
+            canvas.create_text(
+                (x1 + x2) / 2, (y1 + y2) / 2 - 8,
+                text=f'{fk["columna"]} \u2192 {fk["columna_referencia"]}',
+                fill="#333", font=("Helvetica", 8),
+            )
+
+    # Cajas de las tablas
+    for tabla, definicion in modelo.items():
+        x1, y1, x2, y2 = posiciones[tabla]
+        color = "#F4A261" if es_tabla_hecho(definicion) else "#A8DADC"
+        canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="#333")
+        pk = definicion.get("clave_primaria")
+        texto = tabla + (f"\nPK: {pk}" if pk else "")
+        canvas.create_text((x1 + x2) / 2, (y1 + y2) / 2, text=texto, font=("Helvetica", 9, "bold"))
+
+
 class LimpiadorApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -105,6 +170,7 @@ class LimpiadorApp(tk.Tk):
 
         ttk.Button(barra, text="📂 Abrir archivo (CSV/Excel)", command=self.abrir_archivo).pack(side="left")
         ttk.Button(barra, text="🔌 Conectar a SQL...", command=self.conectar_sql).pack(side="left", padx=(6, 0))
+        ttk.Button(barra, text="🗂️ Modelo de datos...", command=self.abrir_modelo_datos).pack(side="left", padx=(6, 0))
         self.lbl_archivo = ttk.Label(barra, text="Ningún archivo cargado.")
         self.lbl_archivo.pack(side="left", padx=10)
 
@@ -372,6 +438,345 @@ class LimpiadorApp(tk.Tk):
             ventana.destroy()
 
         ttk.Button(ventana, text="Conectar y cargar", command=_conectar).pack(pady=(0, 10))
+
+    def _pedir_cadena_conexion_sql(self, ventana_padre: tk.Toplevel) -> str | None:
+        """
+        Diálogo modal reutilizable para armar una cadena de conexión
+        SQLAlchemy (mismo patrón de motores que conectar_sql/exportar_sql).
+        Devuelve la cadena de conexión, o None si el usuario cancela.
+        """
+        resultado: dict[str, str | None] = {"cadena": None}
+        ventana = tk.Toplevel(ventana_padre)
+        ventana.title("Conexión a la base de datos")
+        ventana.geometry("420x380")
+        ventana.transient(ventana_padre)
+        ventana.grab_set()
+
+        motores = ["PostgreSQL", "MySQL", "SQL Server", "SQLite", "Otra (cadena de conexión manual)"]
+        motor_var = tk.StringVar(value="SQL Server")
+        ttk.Label(ventana, text="Motor de base de datos:").pack(anchor="w", padx=15, pady=(15, 2))
+        ttk.Combobox(ventana, textvariable=motor_var, values=motores, state="readonly").pack(fill="x", padx=15)
+
+        marco_campos = ttk.Frame(ventana)
+        marco_campos.pack(fill="x", padx=15, pady=10)
+
+        campos_vars = {
+            "host": tk.StringVar(value="localhost"), "puerto": tk.StringVar(),
+            "usuario": tk.StringVar(), "clave": tk.StringVar(), "basedatos": tk.StringVar(),
+            "ruta_sqlite": tk.StringVar(), "cadena_manual": tk.StringVar(),
+        }
+        _puertos_defecto = {"PostgreSQL": "5432", "MySQL": "3306", "SQL Server": "1433"}
+
+        def _redibujar_campos(*_args):
+            for w in marco_campos.winfo_children():
+                w.destroy()
+            motor = motor_var.get()
+            if motor == "SQLite":
+                ttk.Label(marco_campos, text="Ruta del archivo .db:").pack(anchor="w")
+                ttk.Entry(marco_campos, textvariable=campos_vars["ruta_sqlite"]).pack(fill="x")
+            elif motor == "Otra (cadena de conexión manual)":
+                ttk.Label(marco_campos, text="Cadena de conexión SQLAlchemy completa:").pack(anchor="w")
+                ttk.Entry(marco_campos, textvariable=campos_vars["cadena_manual"], show="•").pack(fill="x")
+            else:
+                campos_vars["puerto"].set(_puertos_defecto.get(motor, ""))
+                for etiqueta, clave, oculto in [
+                    ("Host", "host", False), ("Puerto", "puerto", False),
+                    ("Usuario (vacío = autenticación de Windows en SQL Server)", "usuario", False),
+                    ("Contraseña", "clave", True), ("Base de datos", "basedatos", False),
+                ]:
+                    ttk.Label(marco_campos, text=f"{etiqueta}:").pack(anchor="w")
+                    ttk.Entry(marco_campos, textvariable=campos_vars[clave],
+                              show="•" if oculto else "").pack(fill="x", pady=(0, 4))
+
+        motor_var.trace_add("write", _redibujar_campos)
+        _redibujar_campos()
+
+        def _aceptar():
+            motor = motor_var.get()
+            if motor == "SQLite":
+                if not campos_vars["ruta_sqlite"].get():
+                    messagebox.showwarning("Falta la ruta", "Indique la ruta del archivo .db.")
+                    return
+                cadena = f"sqlite:///{campos_vars['ruta_sqlite'].get()}"
+            elif motor == "Otra (cadena de conexión manual)":
+                cadena = campos_vars["cadena_manual"].get()
+                if not cadena:
+                    messagebox.showwarning("Falta la cadena", "Ingrese la cadena de conexión.")
+                    return
+            else:
+                driver = {"PostgreSQL": "postgresql+psycopg2", "MySQL": "mysql+pymysql",
+                          "SQL Server": "mssql+pyodbc"}[motor]
+                if not (campos_vars["host"].get() and campos_vars["basedatos"].get()):
+                    messagebox.showwarning("Faltan datos", "Complete al menos host y base de datos.")
+                    return
+                if motor == "SQL Server":
+                    parametros_odbc = "driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+                    servidor = f"{campos_vars['host'].get()}:{campos_vars['puerto'].get()}" \
+                        if campos_vars["puerto"].get() else campos_vars["host"].get()
+                    if not campos_vars["usuario"].get() and not campos_vars["clave"].get():
+                        cadena = f"{driver}://@{servidor}/{campos_vars['basedatos'].get()}?{parametros_odbc}&trusted_connection=yes"
+                    else:
+                        cadena = (f"{driver}://{campos_vars['usuario'].get()}:{campos_vars['clave'].get()}"
+                                  f"@{servidor}/{campos_vars['basedatos'].get()}?{parametros_odbc}")
+                else:
+                    if not campos_vars["usuario"].get():
+                        messagebox.showwarning("Faltan datos", "Complete usuario para este motor.")
+                        return
+                    cadena = (f"{driver}://{campos_vars['usuario'].get()}:{campos_vars['clave'].get()}"
+                              f"@{campos_vars['host'].get()}:{campos_vars['puerto'].get()}/{campos_vars['basedatos'].get()}")
+
+            resultado["cadena"] = cadena
+            ventana.destroy()
+
+        ttk.Button(ventana, text="Aceptar", command=_aceptar).pack(pady=(10, 15))
+        ventana.protocol("WM_DELETE_WINDOW", ventana.destroy)
+        ventana_padre.wait_window(ventana)
+        return resultado["cadena"]
+
+    def abrir_modelo_datos(self) -> None:
+        """
+        Ventana para cargar varias hojas del mismo Excel y escribirlas en
+        SQL como un modelo de datos en ESTRELLA o COPO DE NIEVE: define,
+        por cada hoja, si es dimensión o hecho, su llave primaria (PK) y
+        sus llaves foráneas (FK) hacia otras hojas del modelo, muestra un
+        diagrama y aplica todo en la base de datos (ver
+        data_cleaner/modelo_sql.py).
+        """
+        ruta = filedialog.askopenfilename(
+            title="Seleccionar Excel para el modelo",
+            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")],
+        )
+        if not ruta:
+            return
+        try:
+            hojas_disponibles = pd.ExcelFile(ruta).sheet_names
+        except Exception as exc:
+            messagebox.showerror("Error al leer el archivo", str(exc))
+            return
+
+        ventana = tk.Toplevel(self)
+        ventana.title("Modelo de datos (estrella / copo de nieve)")
+        ventana.geometry("980x700")
+        ventana.transient(self)
+
+        ttk.Label(
+            ventana, text="Elija las hojas a incluir en el modelo (una tabla por hoja):",
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+
+        lista_hojas = tk.Listbox(
+            ventana, selectmode="extended", height=min(8, len(hojas_disponibles) + 1),
+            exportselection=False,
+        )
+        for h in hojas_disponibles:
+            lista_hojas.insert("end", h)
+        lista_hojas.selection_set(0, "end")
+        lista_hojas.pack(fill="x", padx=12)
+
+        contenedor_config = ttk.Frame(ventana)
+        estado_modelo: dict[str, dict] = {}  # nombre_hoja -> config de esa tabla
+
+        def _refrescar_scroll(_evt=None):
+            canvas_cfg.configure(scrollregion=canvas_cfg.bbox("all"))
+
+        def _cargar_hojas_elegidas():
+            for w in contenedor_config.winfo_children():
+                w.destroy()
+            estado_modelo.clear()
+
+            seleccion = [hojas_disponibles[i] for i in lista_hojas.curselection()]
+            if not seleccion:
+                messagebox.showwarning("Sin hojas", "Elija al menos una hoja.")
+                return
+            try:
+                hojas_cargadas = load_excel_hojas(ruta, hojas=seleccion)
+            except Exception as exc:
+                messagebox.showerror("Error al cargar", str(exc))
+                return
+
+            for hoja in seleccion:
+                df_hoja = hojas_cargadas[hoja]
+                marco = ttk.LabelFrame(
+                    contenedor_config,
+                    text=f"{hoja}  ({len(df_hoja)} filas, {len(df_hoja.columns)} columnas)",
+                )
+                marco.pack(fill="x", padx=4, pady=6)
+
+                fila1 = ttk.Frame(marco)
+                fila1.pack(fill="x", padx=8, pady=4)
+                ttk.Label(fila1, text="Tabla SQL:").pack(side="left")
+                var_tabla = tk.StringVar(value=_nombre_tabla_valido_modelo(hoja))
+                ttk.Entry(fila1, textvariable=var_tabla, width=22).pack(side="left", padx=(4, 16))
+
+                ttk.Label(fila1, text="Rol:").pack(side="left")
+                var_rol = tk.StringVar(value="Dimensión")
+                combo_rol = ttk.Combobox(
+                    fila1, textvariable=var_rol, values=["Dimensión", "Hecho (fact)"],
+                    state="readonly", width=13,
+                )
+                combo_rol.pack(side="left", padx=(4, 16))
+
+                ttk.Label(fila1, text="PK:").pack(side="left")
+                var_pk = tk.StringVar(value="(ninguna)")
+                ttk.Combobox(
+                    fila1, textvariable=var_pk, values=["(ninguna)"] + list(df_hoja.columns),
+                    state="readonly", width=16,
+                ).pack(side="left", padx=(4, 0))
+
+                marco_fks = ttk.Frame(marco)
+
+                info = {
+                    "hoja": hoja, "df": df_hoja, "var_tabla": var_tabla,
+                    "var_rol": var_rol, "var_pk": var_pk, "marco_fks": marco_fks, "fks": [],
+                }
+                estado_modelo[hoja] = info
+
+                def _agregar_fk(hoja=hoja, df_hoja=df_hoja, marco_fks=marco_fks, info=info):
+                    fila_fk = ttk.Frame(marco_fks)
+                    fila_fk.pack(fill="x", pady=2)
+                    otras = [h for h in estado_modelo if h != hoja]
+
+                    var_col_fk = tk.StringVar(value=df_hoja.columns[0] if len(df_hoja.columns) else "")
+                    var_hoja_ref = tk.StringVar(value=otras[0] if otras else "")
+                    var_col_ref = tk.StringVar()
+
+                    ttk.Label(fila_fk, text="FK columna:").pack(side="left")
+                    ttk.Combobox(
+                        fila_fk, textvariable=var_col_fk, values=list(df_hoja.columns),
+                        state="readonly", width=14,
+                    ).pack(side="left", padx=(2, 10))
+                    ttk.Label(fila_fk, text="→ dimensión:").pack(side="left")
+                    combo_hoja_ref = ttk.Combobox(
+                        fila_fk, textvariable=var_hoja_ref, values=otras, state="readonly", width=14,
+                    )
+                    combo_hoja_ref.pack(side="left", padx=(2, 10))
+                    ttk.Label(fila_fk, text="columna:").pack(side="left")
+                    combo_col_ref = ttk.Combobox(fila_fk, textvariable=var_col_ref, state="readonly", width=14)
+                    combo_col_ref.pack(side="left", padx=(2, 10))
+
+                    def _actualizar_columnas_ref(*_a):
+                        h_ref = var_hoja_ref.get()
+                        if h_ref in estado_modelo:
+                            cols = list(estado_modelo[h_ref]["df"].columns)
+                            combo_col_ref["values"] = cols
+                            if cols:
+                                var_col_ref.set(cols[0])
+                    combo_hoja_ref.bind("<<ComboboxSelected>>", _actualizar_columnas_ref)
+                    _actualizar_columnas_ref()
+
+                    registro_fk = {
+                        "var_col_fk": var_col_fk, "var_hoja_ref": var_hoja_ref,
+                        "var_col_ref": var_col_ref, "frame": fila_fk,
+                    }
+
+                    def _quitar():
+                        fila_fk.destroy()
+                        info["fks"].remove(registro_fk)
+                        _refrescar_scroll()
+
+                    ttk.Button(fila_fk, text="🗑", width=3, command=_quitar).pack(side="left")
+                    info["fks"].append(registro_fk)
+                    _refrescar_scroll()
+
+                fila_btn_fk = ttk.Frame(marco)
+                btn_fk = ttk.Button(fila_btn_fk, text="+ Agregar llave foránea", command=_agregar_fk)
+                btn_fk.pack(side="left")
+
+                def _actualizar_visibilidad_fk(*_a, var_rol=var_rol, fila_btn_fk=fila_btn_fk, marco_fks=marco_fks):
+                    if var_rol.get() == "Hecho (fact)":
+                        marco_fks.pack(fill="x", padx=8, pady=(0, 4))
+                        fila_btn_fk.pack(fill="x", padx=8, pady=(0, 6))
+                    else:
+                        fila_btn_fk.pack_forget()
+                        marco_fks.pack_forget()
+                    _refrescar_scroll()
+                combo_rol.bind("<<ComboboxSelected>>", _actualizar_visibilidad_fk)
+
+            _refrescar_scroll()
+
+        ttk.Button(
+            ventana, text="Cargar hojas elegidas", command=_cargar_hojas_elegidas,
+        ).pack(anchor="w", padx=12, pady=(4, 8))
+
+        ttk.Separator(ventana, orient="horizontal").pack(fill="x", padx=12)
+
+        marco_scroll = ttk.Frame(ventana)
+        marco_scroll.pack(fill="both", expand=True, padx=12, pady=6)
+        canvas_cfg = tk.Canvas(marco_scroll, height=260, highlightthickness=0)
+        scrollbar_cfg = ttk.Scrollbar(marco_scroll, orient="vertical", command=canvas_cfg.yview)
+        canvas_cfg.configure(yscrollcommand=scrollbar_cfg.set)
+        canvas_cfg.pack(side="left", fill="both", expand=True)
+        scrollbar_cfg.pack(side="right", fill="y")
+        canvas_cfg.create_window((0, 0), window=contenedor_config, anchor="nw")
+        contenedor_config.bind("<Configure>", _refrescar_scroll)
+
+        ttk.Separator(ventana, orient="horizontal").pack(fill="x", padx=12)
+
+        ttk.Label(ventana, text="Vista previa del modelo:").pack(anchor="w", padx=12, pady=(8, 2))
+        canvas_diagrama = tk.Canvas(
+            ventana, height=200, bg="white", highlightthickness=1, highlightbackground="#ccc",
+        )
+        canvas_diagrama.pack(fill="x", padx=12, pady=(0, 8))
+
+        def _construir_modelo() -> dict | None:
+            modelo = {}
+            for hoja, info in estado_modelo.items():
+                nombre_tabla = info["var_tabla"].get().strip()
+                if not nombre_tabla:
+                    messagebox.showwarning("Falta nombre", f"Indique el nombre de tabla para la hoja '{hoja}'.")
+                    return None
+                pk = info["var_pk"].get()
+                claves_foraneas = []
+                if info["var_rol"].get() == "Hecho (fact)":
+                    for fk in info["fks"]:
+                        h_ref = fk["var_hoja_ref"].get()
+                        if h_ref not in estado_modelo:
+                            continue
+                        claves_foraneas.append({
+                            "columna": fk["var_col_fk"].get(),
+                            "tabla_referencia": estado_modelo[h_ref]["var_tabla"].get().strip(),
+                            "columna_referencia": fk["var_col_ref"].get(),
+                        })
+                modelo[nombre_tabla] = {
+                    "hoja": hoja,
+                    "clave_primaria": None if pk == "(ninguna)" else pk,
+                    "claves_foraneas": claves_foraneas,
+                }
+            return modelo
+
+        def _actualizar_diagrama():
+            modelo = _construir_modelo()
+            if modelo is not None:
+                _dibujar_diagrama_modelo(canvas_diagrama, modelo)
+
+        ttk.Button(
+            ventana, text="🔄 Actualizar diagrama", command=_actualizar_diagrama,
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        ttk.Separator(ventana, orient="horizontal").pack(fill="x", padx=12)
+
+        def _crear_en_sql():
+            if not estado_modelo:
+                messagebox.showwarning("Sin tablas", "Cargue las hojas y defínalas primero.")
+                return
+            modelo = _construir_modelo()
+            if modelo is None:
+                return
+            cadena = self._pedir_cadena_conexion_sql(ventana)
+            if not cadena:
+                return
+            hojas_cargadas = {hoja: info["df"] for hoja, info in estado_modelo.items()}
+            try:
+                mensajes = aplicar_modelo_sql(modelo, hojas_cargadas, cadena, if_exists="replace")
+            except Exception as exc:
+                messagebox.showerror("Error al crear el modelo", str(exc))
+                return
+            messagebox.showinfo("Modelo creado", "\n".join(mensajes))
+
+        ttk.Button(
+            ventana, text="🚀 Crear modelo en SQL...", command=_crear_en_sql,
+        ).pack(anchor="w", padx=12, pady=(6, 12))
+
+        ventana.protocol("WM_DELETE_WINDOW", ventana.destroy)
 
     def configurar_telefono(self) -> None:
         """Ventana para elegir el rango de dígitos de teléfono a validar en
