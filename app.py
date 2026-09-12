@@ -60,6 +60,7 @@ OPCIONES_ACCION = {
     "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "estado_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "capitalizacion_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
 }
 # "duplicado" (fila completa) queda fuera de "editar_individualmente": un
 # hallazgo de fila duplicada no tiene una sola columna/valor que editar (ver
@@ -77,6 +78,7 @@ NOMBRES_TIPO = {
     "formula_incorrecta": "Total no coincide (Cantidad × Precio)",
     "texto_inconsistente": "Variantes / errores de tipeo en texto",
     "estado_invalido": "Estados/valores de estado no reconocidos",
+    "capitalizacion_incorrecta": "Nombres/lugares con capitalización inconsistente",
 }
 
 ICONOS_TIPO = {
@@ -91,6 +93,7 @@ ICONOS_TIPO = {
     "formula_incorrecta": "🧮",
     "texto_inconsistente": "✏️",
     "estado_invalido": "🚦",
+    "capitalizacion_incorrecta": "🔠",
 }
 
 NOMBRES_ACCION = {
@@ -982,6 +985,7 @@ if st.session_state.get("df_limpio") is not None:
             formula_incorrecta=config_aplicada.get("formula_incorrecta", "marcar_solo"),
             texto_inconsistente=config_aplicada.get("texto_inconsistente", "marcar_solo"),
             estado_invalido=config_aplicada.get("estado_invalido", "marcar_solo"),
+            capitalizacion_incorrecta=config_aplicada.get("capitalizacion_incorrecta", "marcar_solo"),
         )
         st.code(script_m_puro, language="text")
         st.download_button(
