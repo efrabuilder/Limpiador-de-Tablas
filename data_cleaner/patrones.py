@@ -266,6 +266,96 @@ PATRONES_ESTADO = (
 )
 
 # -----------------------------------------------------------------------------
+# Columnas de "nombre propio": personas, empresas, lugares. Son las mismas
+# que analyzer.py excluía de texto_inconsistente (nombre/cliente/direccion/
+# etc. son de alta cardinalidad, no categorías repetidas) -- ahora tienen su
+# propio chequeo dedicado: capitalizacion_incorrecta.
+# -----------------------------------------------------------------------------
+PATRONES_NOMBRE_PROPIO = (
+    "nombre", "apellido", "nombre_completo", "cliente", "vendedor",
+    "proveedor", "empleado", "encargado", "responsable", "representante",
+    "contacto", "gerente", "supervisor", "jefe", "doctor", "paciente",
+    "estudiante", "alumno", "profesor", "maestro", "autor", "titular",
+    "propietario", "empresa", "compania", "razon_social", "ciudad",
+    "provincia", "canton", "distrito", "pais", "direccion", "calle",
+    "avenida", "sucursal", "tienda", "local", "agencia", "oficina",
+    "bodega", "almacen", "punto_venta",
+)
+
+# Palabras que, dentro de un nombre propio, van en minuscula salvo que sean
+# la primera palabra del texto (conectores en espanol + algunos comunes en
+# otros idiomas para apellidos compuestos: "van", "von", "der", "da").
+CONECTORES_MINUSCULA_NOMBRES: Tuple[str, ...] = (
+    "de", "del", "la", "las", "los", "y", "e", "en", "a", "al", "con",
+    "para", "por", "van", "von", "der", "da", "do", "dos", "das",
+)
+
+_REGEX_PALABRA_NOMBRE = re.compile(r"[^\s\-]+")
+
+# Siglas/abreviaturas cortas que deben quedar en MAYÚSCULA dentro de un
+# nombre propio (razón social, sufijo generacional, numeral romano) en vez
+# de forzarse a 'Formato Nombre Propio' (donde quedarían como 'Sa', 'Llc').
+# Es una lista explícita (no "toda palabra corta en mayúscula es sigla")
+# porque esa heurística generaba falsos positivos con nombres reales
+# cortos y comunes en mayúscula (ej. bases de datos que guardan "JUAN",
+# "CRUZ", "ANA" todo en mayúsculas) -- esos SÍ deben pasar a "Juan"/"Cruz".
+SIGLAS_NOMBRES: Tuple[str, ...] = (
+    "sa", "srl", "ltda", "llc", "inc", "corp", "sac", "eirl", "cia",
+    "sl", "sau", "spa", "gmbh", "plc",
+    "ii", "iii", "iv", "vi", "vii", "viii", "ix",
+    "jr", "sr", "md", "phd",
+)
+
+
+def _es_sigla_conocida(palabra: str) -> bool:
+    limpio = re.sub(r"[^a-zA-Z]", "", palabra).lower()
+    return limpio in SIGLAS_NOMBRES
+
+
+def capitalizar_nombre_propio(texto) -> str:
+    """Convierte un texto a 'Formato Nombre Propio': primera letra de cada
+    palabra en mayuscula y el resto en minuscula, excepto los conectores
+    (ver CONECTORES_MINUSCULA_NOMBRES) que quedan en minuscula salvo que
+    sean la primera palabra, y las siglas conocidas (ver SIGLAS_NOMBRES),
+    que se pasan a mayúscula. Conserva guiones, apostrofes (ej. "o'brien"
+    -> "O'Brien") y los separadores originales del texto."""
+    if texto is None:
+        return texto
+    original = str(texto)
+    if not _REGEX_PALABRA_NOMBRE.search(original):
+        return original
+
+    def _cap_sub(sub: str) -> str:
+        return sub[:1].upper() + sub[1:].lower() if sub else sub
+
+    def _cap_palabra(palabra: str) -> str:
+        if _es_sigla_conocida(palabra):
+            return palabra.upper()
+        return "'".join(_cap_sub(p) for p in palabra.split("'"))
+
+    partes = []
+    pos = 0
+    for i, m in enumerate(_REGEX_PALABRA_NOMBRE.finditer(original)):
+        partes.append(original[pos:m.start()])
+        palabra = m.group()
+        norm = _normalizar_valor_texto(palabra)
+        if i > 0 and norm in CONECTORES_MINUSCULA_NOMBRES:
+            partes.append(palabra.lower())
+        else:
+            partes.append(_cap_palabra(palabra))
+        pos = m.end()
+    partes.append(original[pos:])
+    return "".join(partes)
+
+
+def es_capitalizacion_correcta(texto) -> bool:
+    """True si `texto` ya esta en 'Formato Nombre Propio' (ver
+    capitalizar_nombre_propio); False si hace falta corregirlo."""
+    if texto is None:
+        return True
+    return str(texto) == capitalizar_nombre_propio(texto)
+
+# -----------------------------------------------------------------------------
 # Valores validos conocidos para una columna de estado/status. Comparados ya
 # normalizados (sin acentos, minusculas, espacios extra) via
 # `es_valor_estado_valido`, asi que "Activo", "ACTIVO ", "áctivo" cuentan
