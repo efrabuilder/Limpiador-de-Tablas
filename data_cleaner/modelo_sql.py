@@ -236,3 +236,161 @@ def generar_script_crear_base_datos(nombre_base_datos: str, motor: str = "sql_se
     raise ValueError(
         f"Motor no soportado: '{motor}'. Use uno de: {', '.join(MOTORES_CREAR_BASE_DATOS)}."
     )
+
+
+# -----------------------------------------------------------------------------
+# Generación del script SQL completo SIN conectarse a ninguna base de datos.
+#
+# aplicar_modelo_sql() de arriba necesita una cadena de conexión real y
+# ejecuta los pasos contra un servidor en vivo. generar_script_modelo_sql()
+# hace lo mismo en texto: arma un .sql con CREATE TABLE + PK + FK + (si se
+# pide) los INSERT con los datos, para que el usuario lo copie/descargue y
+# lo corra donde quiera (SSMS, mysql, psql, un cliente en la nube, etc.).
+# Útil cuando la app corre en un navegador/servidor que no tiene ruta de
+# red hacia la base de datos de destino.
+# -----------------------------------------------------------------------------
+
+def _quote_ident(nombre: str, motor: str) -> str:
+    """Delimita un identificador (tabla o columna) según el motor, para que
+    nombres con espacios, acentos o mayúsculas/minúsculas mixtas no rompan
+    el script."""
+    if motor == "mysql":
+        return f"`{nombre}`"
+    if motor == "postgresql":
+        return '"' + nombre.replace('"', '""') + '"'
+    return f"[{nombre}]"  # sql_server
+
+
+def _tipo_sql_columna(serie, motor: str) -> str:
+    """Infiere un tipo de columna SQL razonable a partir del dtype de
+    pandas. No pretende ser perfecto (eso lo decide quien revise el
+    script), solo dejar una definición de tabla que funcione de entrada."""
+    import pandas as pd
+
+    if pd.api.types.is_bool_dtype(serie):
+        return {"sql_server": "BIT", "mysql": "TINYINT(1)", "postgresql": "BOOLEAN"}[motor]
+    if pd.api.types.is_integer_dtype(serie):
+        return {"sql_server": "BIGINT", "mysql": "BIGINT", "postgresql": "BIGINT"}[motor]
+    if pd.api.types.is_float_dtype(serie):
+        return {"sql_server": "FLOAT", "mysql": "DOUBLE", "postgresql": "DOUBLE PRECISION"}[motor]
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        return {"sql_server": "DATETIME2", "mysql": "DATETIME", "postgresql": "TIMESTAMP"}[motor]
+
+    # Texto: se mide el largo real de los valores para no quedarse corto,
+    # con un mínimo de 50 y, si hay textos muy largos, se pasa a un tipo
+    # de texto libre en vez de un VARCHAR gigante.
+    largo_max = serie.dropna().astype(str).map(len).max()
+    largo_max = 50 if pd.isna(largo_max) else max(50, int(largo_max) + 20)
+    if largo_max > 4000:
+        return {"sql_server": "NVARCHAR(MAX)", "mysql": "TEXT", "postgresql": "TEXT"}[motor]
+    return {
+        "sql_server": f"NVARCHAR({largo_max})",
+        "mysql": f"VARCHAR({largo_max})",
+        "postgresql": f"VARCHAR({largo_max})",
+    }[motor]
+
+
+def _valor_sql_literal(valor, motor: str) -> str:
+    """Convierte un valor de una celda a su representación literal en SQL
+    (NULL, número tal cual, o texto entre comillas con escape de comillas
+    simples). Fechas/horas se formatean como 'YYYY-MM-DD HH:MM:SS'."""
+    import pandas as pd
+
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)) or pd.isna(valor):
+        return "NULL"
+    if isinstance(valor, bool):
+        if motor == "postgresql":
+            return "TRUE" if valor else "FALSE"
+        return "1" if valor else "0"
+    if isinstance(valor, (int, float)):
+        return repr(valor)
+    if isinstance(valor, pd.Timestamp) or hasattr(valor, "strftime"):
+        return "'" + valor.strftime("%Y-%m-%d %H:%M:%S") + "'"
+    texto = str(valor).replace("'", "''")
+    return f"'{texto}'"
+
+
+def generar_script_modelo_sql(modelo: dict, hojas_cargadas: dict, motor: str = "sql_server",
+                               incluir_datos: bool = True, filas_por_insert: int = 500) -> str:
+    """
+    Genera el script SQL completo del modelo (CREATE TABLE con tipos
+    inferidos, PRIMARY KEY, FOREIGN KEY y, si se pide, INSERT con los
+    datos) como texto plano, SIN conectarse a ninguna base de datos.
+
+    Respeta el mismo orden que aplicar_modelo_sql (datos/estructura
+    primero, luego todas las PK, luego todas las FK) para que las llaves
+    foráneas nunca fallen por apuntar a una tabla que todavía no existe.
+
+    motor: "sql_server" | "mysql" | "postgresql".
+    incluir_datos: si es False, el script solo crea la estructura (CREATE
+    TABLE + PK + FK), sin ningún INSERT.
+    filas_por_insert: cuántas filas se agrupan en cada sentencia INSERT
+    (para no generar una sentencia gigante por fila).
+    """
+    if motor not in MOTORES_CREAR_BASE_DATOS:
+        raise ValueError(
+            f"Motor no soportado: '{motor}'. Use uno de: {', '.join(MOTORES_CREAR_BASE_DATOS)}."
+        )
+
+    errores = validar_modelo(modelo, hojas_cargadas)
+    if errores:
+        raise ValueError("El modelo tiene errores:\n- " + "\n- ".join(errores))
+
+    q = lambda nombre: _quote_ident(nombre, motor)
+    bloques = [
+        "-- Script generado por Limpiador de Tablas.",
+        "-- No requiere conexión para generarse: revíselo y córralo donde",
+        "-- necesite (SSMS, mysql, psql, un cliente en la nube, etc.).",
+        "",
+    ]
+
+    # 1. CREATE TABLE (estructura) de cada tabla del modelo.
+    for tabla, definicion in modelo.items():
+        df = hojas_cargadas[definicion["hoja"]]
+        columnas_sql = [
+            f"  {q(col)} {_tipo_sql_columna(df[col], motor)}" for col in df.columns
+        ]
+        bloques.append(f"DROP TABLE IF EXISTS {q(tabla)};")
+        bloques.append(f"CREATE TABLE {q(tabla)} (\n" + ",\n".join(columnas_sql) + "\n);")
+        bloques.append("")
+
+    # 2. INSERT con los datos (opcional).
+    if incluir_datos:
+        for tabla, definicion in modelo.items():
+            df = hojas_cargadas[definicion["hoja"]]
+            if df.empty:
+                continue
+            columnas_txt = ", ".join(q(col) for col in df.columns)
+            filas = df.to_dict(orient="records")
+            for inicio in range(0, len(filas), filas_por_insert):
+                lote = filas[inicio:inicio + filas_por_insert]
+                valores = ",\n".join(
+                    "  (" + ", ".join(_valor_sql_literal(fila[col], motor) for col in df.columns) + ")"
+                    for fila in lote
+                )
+                bloques.append(
+                    f"INSERT INTO {q(tabla)} ({columnas_txt}) VALUES\n{valores};"
+                )
+            bloques.append("")
+
+    # 3. Llaves primarias (después de que TODAS las tablas ya existen).
+    for tabla, definicion in modelo.items():
+        pk = definicion.get("clave_primaria")
+        if not pk:
+            continue
+        bloques.append(
+            f"ALTER TABLE {q(tabla)} ADD CONSTRAINT {q('PK_' + tabla)} PRIMARY KEY ({q(pk)});"
+        )
+    bloques.append("")
+
+    # 4. Llaves foráneas (después de que TODAS las PK ya existen).
+    for tabla, definicion in modelo.items():
+        for fk in definicion.get("claves_foraneas", []):
+            nombre_restriccion = f"FK_{tabla}_{fk['columna']}"
+            bloques.append(
+                f"ALTER TABLE {q(tabla)} ADD CONSTRAINT {q(nombre_restriccion)} "
+                f"FOREIGN KEY ({q(fk['columna'])}) REFERENCES "
+                f"{q(fk['tabla_referencia'])} ({q(fk['columna_referencia'])});"
+            )
+
+    return "\n".join(bloques).rstrip() + "\n"
