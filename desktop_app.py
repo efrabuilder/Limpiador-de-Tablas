@@ -46,6 +46,7 @@ OPCIONES_ACCION = {
     "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "estado_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "capitalizacion_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
 }
 # "duplicado" (fila completa) queda fuera de "editar_individualmente": un
 # hallazgo de fila duplicada no tiene una sola columna/valor que editar (ver
@@ -64,6 +65,7 @@ NOMBRES_TIPO = {
     "formula_incorrecta": "Total ≠ Cantidad × Precio",
     "texto_inconsistente": "Variantes de texto",
     "estado_invalido": "Estados no reconocidos",
+    "capitalizacion_incorrecta": "Capitalización inconsistente",
 }
 
 # Nota: PAISES_TELEFONO_DISPONIBLES ahora vive en data_cleaner/patrones.py
@@ -1412,6 +1414,7 @@ class LimpiadorApp(tk.Tk):
                     formula_incorrecta=self.config_aplicada.get("formula_incorrecta", "marcar_solo"),
                     texto_inconsistente=self.config_aplicada.get("texto_inconsistente", "marcar_solo"),
                     estado_invalido=self.config_aplicada.get("estado_invalido", "marcar_solo"),
+                    capitalizacion_incorrecta=self.config_aplicada.get("capitalizacion_incorrecta", "marcar_solo"),
                 ),
                 "codigo_m_puro_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
             )
