@@ -426,6 +426,7 @@ def exportar_script_endpoint(
     formula_incorrecta: str = Form(DEFAULT_CONFIG["formula_incorrecta"]),
     texto_inconsistente: str = Form(DEFAULT_CONFIG["texto_inconsistente"]),
     estado_invalido: str = Form(DEFAULT_CONFIG["estado_invalido"]),
+    capitalizacion_incorrecta: str = Form(DEFAULT_CONFIG["capitalizacion_incorrecta"]),
     factor_iqr: float = Form(1.5),
     valores_fijos: str = Form("{}", description='JSON con valores fijos por columna'),
     correcciones_individuales: str = Form(
@@ -434,7 +435,7 @@ def exportar_script_endpoint(
     nombre_paso_anterior: str = Form("TuPasoAnterior", description="Solo aplica a formato=m"),
 ):
     """Genera un script Python autocontenido (Power BI o universal) o el código M,
-    con la misma configuración de limpieza indicada (las 11 categorías), para
+    con la misma configuración de limpieza indicada (las 12 categorías), para
     usar en otras herramientas."""
     if formato not in ("powerbi", "universal", "m"):
         raise HTTPException(status_code=400, detail="formato debe ser 'powerbi', 'universal' o 'm'.")
@@ -453,7 +454,7 @@ def exportar_script_endpoint(
         "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
         "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
         "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
-        "estado_invalido": estado_invalido,
+        "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta,
     }
 
     if formato == "powerbi":
@@ -505,6 +506,7 @@ def exportar_script_m_puro_endpoint(
     formula_incorrecta: str = Form("marcar_solo"),
     texto_inconsistente: str = Form("marcar_solo"),
     estado_invalido: str = Form("marcar_solo"),
+    capitalizacion_incorrecta: str = Form("marcar_solo"),
     factor_iqr: float = Form(1.5),
     valores_fijos: str = Form("{}", description='JSON con valores fijos por columna'),
     correcciones_individuales: str = Form(
@@ -557,6 +559,7 @@ def exportar_script_m_puro_endpoint(
         formula_incorrecta=formula_incorrecta,
         texto_inconsistente=texto_inconsistente,
         estado_invalido=estado_invalido,
+        capitalizacion_incorrecta=capitalizacion_incorrecta,
         correcciones_individuales=correcciones_individuales_dict,
     )
 
