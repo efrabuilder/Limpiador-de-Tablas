@@ -32,7 +32,9 @@ from data_cleaner.exportador import (
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES
-from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo
+from data_cleaner.modelo_sql import (
+    aplicar_modelo_sql, generar_dot_modelo, generar_script_crear_base_datos,
+)
 
 # --------------------------------------------------------------------------
 # Configuración de página y constantes
@@ -235,18 +237,48 @@ def _pagina_modelo_datos() -> None:
 
     st.divider()
     st.subheader("3. Escribir en SQL")
-    cadena_modelo = st.text_input(
-        "Cadena de conexión SQLAlchemy", type="password", key="cadena_modelo",
-        help="Ej. SQL Server con autenticación de Windows: "
-             "mssql+pyodbc://@servidor/basedatos?driver=ODBC+Driver+18+for+SQL+Server"
-             "&Encrypt=yes&TrustServerCertificate=yes&trusted_connection=yes",
-    )
-    si_existe_modelo = st.selectbox(
-        "Si una tabla ya existe", ["replace", "append", "fail"], key="si_existe_modelo",
-        help="Con PK/FK conviene 'replace': con 'append' las restricciones pueden "
-             "fallar si ya hay valores repetidos o nulos en esa columna.",
-    )
-    if st.button("🚀 Crear modelo en la base de datos", key="btn_crear_modelo"):
+
+    with st.expander("🛠️ ¿La base de datos todavía no existe? Genere el script para crearla"):
+        st.caption(
+            "No se puede conectar a una base de datos que no existe: primero hay que "
+            "crearla desde una consulta en SSMS/mysql/psql, y recién después conectar "
+            "aquí abajo apuntando a esa base ya creada."
+        )
+        col_bd1, col_bd2 = st.columns(2)
+        with col_bd1:
+            nombre_bd_nueva = st.text_input("Nombre de la base de datos", key="nombre_bd_nueva")
+        with col_bd2:
+            motor_bd_nueva = st.selectbox(
+                "Motor", ["sql_server", "mysql", "postgresql"], key="motor_bd_nueva",
+                format_func=lambda m: {"sql_server": "SQL Server", "mysql": "MySQL/MariaDB",
+                                        "postgresql": "PostgreSQL"}[m],
+            )
+        if st.button("Generar script", key="btn_generar_script_bd"):
+            try:
+                script_bd = generar_script_crear_base_datos(nombre_bd_nueva, motor_bd_nueva)
+                st.code(script_bd, language="sql")
+                st.download_button(
+                    "⬇️ Descargar script .sql", script_bd,
+                    file_name=f"crear_{nombre_bd_nueva or 'base_datos'}.sql", mime="text/plain",
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+
+    with st.form("form_crear_modelo"):
+        cadena_modelo = st.text_input(
+            "Cadena de conexión SQLAlchemy", type="password", key="cadena_modelo",
+            help="Ej. SQL Server con autenticación de Windows: "
+                 "mssql+pyodbc://@servidor/basedatos?driver=ODBC+Driver+18+for+SQL+Server"
+                 "&Encrypt=yes&TrustServerCertificate=yes&trusted_connection=yes",
+        )
+        si_existe_modelo = st.selectbox(
+            "Si una tabla ya existe", ["replace", "append", "fail"], key="si_existe_modelo",
+            help="Con PK/FK conviene 'replace': con 'append' las restricciones pueden "
+                 "fallar si ya hay valores repetidos o nulos en esa columna.",
+        )
+        enviado = st.form_submit_button("🚀 Crear modelo en la base de datos")
+
+    if enviado:
         if not cadena_modelo:
             st.error("Indique la cadena de conexión.")
         else:
