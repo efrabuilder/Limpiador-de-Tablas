@@ -864,6 +864,31 @@ if st.session_state.get("df_limpio") is not None:
     valores_fijos_aplicados = st.session_state.get("valores_fijos_aplicados", {})
     correcciones_individuales_aplicadas = st.session_state.get("correcciones_individuales_aplicadas", {})
 
+    # Columnas que tuvieron hallazgos REALES en el análisis de arriba (por
+    # tipo), para el modo "solo configuración" del interruptor de abajo.
+    columnas_reales_por_tipo: dict = {}
+    resultado_actual = st.session_state.get("resultado")
+    if resultado_actual:
+        for issue in resultado_actual.issues:
+            if issue.columna:
+                columnas_reales_por_tipo.setdefault(issue.tipo, set()).add(issue.columna)
+        columnas_reales_por_tipo = {t: sorted(c) for t, c in columnas_reales_por_tipo.items()}
+
+    incluir_generico = st.toggle(
+        "Incluir detección genérica de columnas (por nombre/patrón)",
+        value=True,
+        help="Desactivado: el código generado (los 4 formatos de abajo) solo procesa "
+             "las columnas que ya tuvieron un hallazgo real en el análisis de arriba, "
+             "en vez de volver a revisar cualquier columna que coincida con un patrón "
+             "de nombre (fecha/email/teléfono/id/texto/estado/nombre propio/fórmula). "
+             "Útil para que, si la fuente cambia más adelante, el script no empiece a "
+             "tocar columnas nuevas que nunca se revisaron ni configuraron aquí.",
+    )
+    kwargs_generico = {
+        "incluir_generico": incluir_generico,
+        "columnas_reales_por_tipo": columnas_reales_por_tipo,
+    }
+
     tab_pbi, tab_m, tab_m_puro, tab_universal = st.tabs(
         ["Script Power BI (.py)", "Código M (Editor avanzado)",
          "Código M puro (sin Python)", "Script universal (.py)"]
@@ -873,6 +898,7 @@ if st.session_state.get("df_limpio") is not None:
         script_pbi = generar_script_powerbi(
             config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados,
             correcciones_individuales=correcciones_individuales_aplicadas,
+            **kwargs_generico,
         )
         st.code(script_pbi, language="python")
         st.download_button(
@@ -889,6 +915,7 @@ if st.session_state.get("df_limpio") is not None:
             config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados,
             nombre_paso_anterior=nombre_paso,
             correcciones_individuales=correcciones_individuales_aplicadas,
+            **kwargs_generico,
         )
         st.code(script_m, language="text")
         st.download_button(
@@ -986,6 +1013,7 @@ if st.session_state.get("df_limpio") is not None:
             texto_inconsistente=config_aplicada.get("texto_inconsistente", "marcar_solo"),
             estado_invalido=config_aplicada.get("estado_invalido", "marcar_solo"),
             capitalizacion_incorrecta=config_aplicada.get("capitalizacion_incorrecta", "marcar_solo"),
+            **kwargs_generico,
         )
         st.code(script_m_puro, language="text")
         st.download_button(
