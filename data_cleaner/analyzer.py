@@ -18,6 +18,8 @@ reglas de negocio comunes en datasets tabulares:
                            categórico (ej. "San Jose" vs "San José")
     estado_invalido        Valor de una columna de estado/status que no es
                            activo, inactivo ni pendiente
+    capitalizacion_incorrecta  Nombre propio (persona/empresa/lugar) que no
+                           está en "Formato Nombre Propio" (ej. "ana perez")
 
 Todos estos chequeos son opcionales y auto-detectan columnas candidatas por
 el nombre (auto_detectar_columnas=True) si no se indican explícitamente,
@@ -39,7 +41,7 @@ class Issue:
     tipo: str            # 'faltante' | 'duplicado' | 'atipico' | 'tipo_invalido' |
                           # 'fecha_invalida' | 'email_invalido' | 'telefono_invalido' |
                           # 'id_duplicado' | 'formula_incorrecta' | 'texto_inconsistente' |
-                          # 'estado_invalido'
+                          # 'estado_invalido' | 'capitalizacion_incorrecta'
     columna: Optional[str]
     fila: int             # índice original del DataFrame (0-based)
     valor_original: Any
@@ -201,6 +203,9 @@ from data_cleaner.patrones import (
     PATRONES_ESTADO as _PATRONES_ESTADO,
     VALORES_ESTADO_VALIDOS as _VALORES_ESTADO_VALIDOS,
     es_valor_estado_valido as _es_valor_estado_valido,
+    PATRONES_NOMBRE_PROPIO as _PATRONES_NOMBRE_PROPIO,
+    capitalizar_nombre_propio as _capitalizar_nombre_propio,
+    es_capitalizacion_correcta as _es_capitalizacion_correcta,
     columna_admite_fecha_pendiente as _columna_admite_fecha_pendiente,
     es_valor_fecha_pendiente as _es_valor_fecha_pendiente,
     columnas_por_patron as _columnas_por_patron,
@@ -599,6 +604,52 @@ def detectar_estados_invalidos(df: pd.DataFrame, columnas: Optional[List[str]] =
 
 
 # ---------------------------------------------------------------------------
+# Capitalización de nombres propios (personas, empresas, lugares)
+# ---------------------------------------------------------------------------
+
+def detectar_capitalizacion_incorrecta(df: pd.DataFrame, columnas: Optional[List[str]] = None,
+                                        auto: bool = True) -> List[Issue]:
+    """
+    Marca celdas de columnas de nombre propio (persona, empresa, ciudad,
+    dirección, etc. -- ver PATRONES_NOMBRE_PROPIO) cuyo texto no está en
+    'Formato Nombre Propio' (ej. "ana pérez" o "JUAN PEREZ" en vez de "Ana
+    Pérez"), sugiriendo la forma corregida en valor_sugerido. Respeta
+    conectores (de, la, van, etc.) y siglas conocidas (SA, Jr, III...);
+    ver capitalizar_nombre_propio en data_cleaner/patrones.py.
+
+    En modo automático, solo se consideran columnas de texto cuyo nombre
+    coincide con un patrón de nombre propio -- no se aplica a cualquier
+    columna de texto para no tocar códigos, descripciones libres u otros
+    campos donde la mayúscula/minúscula no sigue esa convención.
+    """
+    if columnas is not None:
+        cols = columnas
+    elif auto:
+        cols = [
+            c for c in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO)
+            if (pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c]))
+        ]
+    else:
+        cols = []
+
+    issues = []
+    for col in cols:
+        if col not in df.columns:
+            continue
+        for idx, val in df[col].items():
+            if pd.isna(val) or str(val).strip() == "":
+                continue
+            if not _es_capitalizacion_correcta(val):
+                sugerido = _capitalizar_nombre_propio(val)
+                issues.append(Issue(
+                    "capitalizacion_incorrecta", col, int(idx), val,
+                    f"Capitalización inconsistente (sugerido: '{sugerido}')",
+                    valor_sugerido=sugerido,
+                ))
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # Texto inconsistente: variantes / errores de tipeo de un mismo valor categórico
 # ---------------------------------------------------------------------------
 
@@ -733,7 +784,9 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
              detectar_texto: bool = True, columnas_texto: Optional[List[str]] = None,
              umbral_similitud_texto: float = 0.85,
              detectar_estados: bool = True, columnas_estado: Optional[List[str]] = None,
-             valores_estado_validos: Optional[List[str]] = None) -> AnalysisResult:
+             valores_estado_validos: Optional[List[str]] = None,
+             detectar_capitalizacion: bool = True,
+             columnas_capitalizacion: Optional[List[str]] = None) -> AnalysisResult:
     """
     Ejecuta todas las detecciones y consolida los resultados.
 
@@ -774,6 +827,9 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
     if detectar_estados:
         issues += detectar_estados_invalidos(df, columnas=columnas_estado, valores_validos=valores_estado_validos,
                                               auto=auto_detectar_columnas)
+    if detectar_capitalizacion:
+        issues += detectar_capitalizacion_incorrecta(df, columnas=columnas_capitalizacion,
+                                                      auto=auto_detectar_columnas)
 
     if metodo_atipicos == "iqr":
         issues += detectar_atipicos_iqr(df, factor=factor_iqr, columnas=columnas_numericas)
