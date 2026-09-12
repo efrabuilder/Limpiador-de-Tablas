@@ -537,10 +537,9 @@ class LimpiadorApp(tk.Tk):
         """
         Ventana para cargar varias hojas del mismo Excel y escribirlas en
         SQL como un modelo de datos en ESTRELLA o COPO DE NIEVE: define,
-        por cada hoja, si es dimensión o hecho, su llave primaria (PK) y
-        sus llaves foráneas (FK) hacia otras hojas del modelo, muestra un
-        diagrama y aplica todo en la base de datos (ver
-        data_cleaner/modelo_sql.py).
+        por cada hoja, su llave primaria (PK) y sus llaves foráneas (FK)
+        hacia otras hojas del modelo, muestra un diagrama y aplica todo en
+        la base de datos (ver data_cleaner/modelo_sql.py).
         """
         ruta = filedialog.askopenfilename(
             title="Seleccionar Excel para el modelo",
@@ -607,14 +606,6 @@ class LimpiadorApp(tk.Tk):
                 var_tabla = tk.StringVar(value=_nombre_tabla_valido_modelo(hoja))
                 ttk.Entry(fila1, textvariable=var_tabla, width=22).pack(side="left", padx=(4, 16))
 
-                ttk.Label(fila1, text="Rol:").pack(side="left")
-                var_rol = tk.StringVar(value="Dimensión")
-                combo_rol = ttk.Combobox(
-                    fila1, textvariable=var_rol, values=["Dimensión", "Hecho (fact)"],
-                    state="readonly", width=13,
-                )
-                combo_rol.pack(side="left", padx=(4, 16))
-
                 ttk.Label(fila1, text="PK:").pack(side="left")
                 var_pk = tk.StringVar(value="(ninguna)")
                 ttk.Combobox(
@@ -622,11 +613,19 @@ class LimpiadorApp(tk.Tk):
                     state="readonly", width=16,
                 ).pack(side="left", padx=(4, 0))
 
+                ttk.Label(
+                    marco,
+                    text="Llaves foráneas hacia otra tabla del modelo (opcional; cualquier tabla puede "
+                         "tener — una dimensión con FK hacia otra dimensión arma copo de nieve):",
+                    wraplength=880, justify="left",
+                ).pack(anchor="w", padx=8, pady=(2, 0))
+
                 marco_fks = ttk.Frame(marco)
+                marco_fks.pack(fill="x", padx=8, pady=(0, 4))
 
                 info = {
                     "hoja": hoja, "df": df_hoja, "var_tabla": var_tabla,
-                    "var_rol": var_rol, "var_pk": var_pk, "marco_fks": marco_fks, "fks": [],
+                    "var_pk": var_pk, "marco_fks": marco_fks, "fks": [],
                 }
                 estado_modelo[hoja] = info
 
@@ -644,7 +643,7 @@ class LimpiadorApp(tk.Tk):
                         fila_fk, textvariable=var_col_fk, values=list(df_hoja.columns),
                         state="readonly", width=14,
                     ).pack(side="left", padx=(2, 10))
-                    ttk.Label(fila_fk, text="→ dimensión:").pack(side="left")
+                    ttk.Label(fila_fk, text="→ tabla:").pack(side="left")
                     combo_hoja_ref = ttk.Combobox(
                         fila_fk, textvariable=var_hoja_ref, values=otras, state="readonly", width=14,
                     )
@@ -678,18 +677,8 @@ class LimpiadorApp(tk.Tk):
                     _refrescar_scroll()
 
                 fila_btn_fk = ttk.Frame(marco)
-                btn_fk = ttk.Button(fila_btn_fk, text="+ Agregar llave foránea", command=_agregar_fk)
-                btn_fk.pack(side="left")
-
-                def _actualizar_visibilidad_fk(*_a, var_rol=var_rol, fila_btn_fk=fila_btn_fk, marco_fks=marco_fks):
-                    if var_rol.get() == "Hecho (fact)":
-                        marco_fks.pack(fill="x", padx=8, pady=(0, 4))
-                        fila_btn_fk.pack(fill="x", padx=8, pady=(0, 6))
-                    else:
-                        fila_btn_fk.pack_forget()
-                        marco_fks.pack_forget()
-                    _refrescar_scroll()
-                combo_rol.bind("<<ComboboxSelected>>", _actualizar_visibilidad_fk)
+                fila_btn_fk.pack(fill="x", padx=8, pady=(0, 6))
+                ttk.Button(fila_btn_fk, text="+ Agregar llave foránea", command=_agregar_fk).pack(side="left")
 
             _refrescar_scroll()
 
@@ -726,16 +715,15 @@ class LimpiadorApp(tk.Tk):
                     return None
                 pk = info["var_pk"].get()
                 claves_foraneas = []
-                if info["var_rol"].get() == "Hecho (fact)":
-                    for fk in info["fks"]:
-                        h_ref = fk["var_hoja_ref"].get()
-                        if h_ref not in estado_modelo:
-                            continue
-                        claves_foraneas.append({
-                            "columna": fk["var_col_fk"].get(),
-                            "tabla_referencia": estado_modelo[h_ref]["var_tabla"].get().strip(),
-                            "columna_referencia": fk["var_col_ref"].get(),
-                        })
+                for fk in info["fks"]:
+                    h_ref = fk["var_hoja_ref"].get()
+                    if h_ref not in estado_modelo:
+                        continue
+                    claves_foraneas.append({
+                        "columna": fk["var_col_fk"].get(),
+                        "tabla_referencia": estado_modelo[h_ref]["var_tabla"].get().strip(),
+                        "columna_referencia": fk["var_col_ref"].get(),
+                    })
                 modelo[nombre_tabla] = {
                     "hoja": hoja,
                     "clave_primaria": None if pk == "(ninguna)" else pk,
