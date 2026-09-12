@@ -345,7 +345,9 @@ def _detectar_columnas_fecha(df, detector_contenido):
 
 def _detectar_fechas_invalidas(df):
     hallazgos = []
-    for col in _detectar_columnas_fecha(df, _parece_fecha_col):
+    cols_fecha = COLUMNAS_FORZADAS_FECHA if COLUMNAS_FORZADAS_FECHA is not None \\
+        else _detectar_columnas_fecha(df, _parece_fecha_col)
+    for col in cols_fecha:
         serie = df[col]
         parseado = pd.to_datetime(serie, errors="coerce")
         for idx, val in serie.items():
@@ -362,7 +364,9 @@ def _detectar_fechas_invalidas(df):
 
 def _detectar_emails_invalidos(df):
     hallazgos = []
-    for col in _detectar_columnas_combinado(df, _PATRONES_EMAIL, _parece_email_col):
+    cols_email = COLUMNAS_FORZADAS_EMAIL if COLUMNAS_FORZADAS_EMAIL is not None \\
+        else _detectar_columnas_combinado(df, _PATRONES_EMAIL, _parece_email_col)
+    for col in cols_email:
         for idx, val in df[col].items():
             if pd.isna(val):
                 continue
@@ -380,8 +384,9 @@ def _detectar_telefonos_invalidos(df, min_digitos=7, max_digitos=15, permitir_co
     (codigo de pais sin "+"), para no marcar como invalido un numero
     valido solo por incluir codigo de pais (ej. "34916540145")."""
     hallazgos = []
-    cols_telefono = _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col,
-                                                  excluir_por_nombre=_PATRONES_NO_TELEFONO)
+    cols_telefono = COLUMNAS_FORZADAS_TELEFONO if COLUMNAS_FORZADAS_TELEFONO is not None \\
+        else _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col,
+                                           excluir_por_nombre=_PATRONES_NO_TELEFONO)
     for col in cols_telefono:
         for idx, val in df[col].items():
             if pd.isna(val):
@@ -402,7 +407,9 @@ def _detectar_telefonos_invalidos(df, min_digitos=7, max_digitos=15, permitir_co
 
 def _detectar_estados_invalidos(df, valores_validos=None):
     hallazgos = []
-    for col in _columnas_por_patron(df, _PATRONES_ESTADO):
+    cols_estado = COLUMNAS_FORZADAS_ESTADO if COLUMNAS_FORZADAS_ESTADO is not None \\
+        else _columnas_por_patron(df, _PATRONES_ESTADO)
+    for col in cols_estado:
         for idx, val in df[col].items():
             if pd.isna(val):
                 continue
@@ -415,7 +422,9 @@ def _detectar_estados_invalidos(df, valores_validos=None):
 
 def _detectar_capitalizacion_incorrecta(df):
     hallazgos = []
-    for col in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO):
+    cols_capitalizacion = COLUMNAS_FORZADAS_CAPITALIZACION if COLUMNAS_FORZADAS_CAPITALIZACION is not None \\
+        else _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO)
+    for col in cols_capitalizacion:
         if not (pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col])):
             continue
         for idx, val in df[col].items():
@@ -432,9 +441,9 @@ def _detectar_capitalizacion_incorrecta(df):
 
 def _detectar_ids_duplicados(df, umbral_unicidad=0.9):
     hallazgos = []
-    for col in df.columns:
-        if not _es_columna_id(col):
-            continue
+    cols_id = COLUMNAS_FORZADAS_ID if COLUMNAS_FORZADAS_ID is not None \\
+        else [c for c in df.columns if _es_columna_id(c)]
+    for col in cols_id:
         serie_no_nula = df[col].dropna()
         if len(serie_no_nula) == 0:
             continue
@@ -451,6 +460,8 @@ def _detectar_ids_duplicados(df, umbral_unicidad=0.9):
 
 def _detectar_formula_incorrecta(df, tolerancia=0.01):
     hallazgos = []
+    if COLUMNAS_FORZADAS_FORMULA is False:
+        return hallazgos
     cand_total = _columnas_por_patron(df, _PATRONES_TOTAL)
     cand_cant = _columnas_por_patron(df, _PATRONES_CANTIDAD)
     cand_precio = _columnas_por_patron(df, _PATRONES_PRECIO)
@@ -479,22 +490,25 @@ def _detectar_formula_incorrecta(df, tolerancia=0.01):
 
 def _detectar_texto_inconsistente(df, umbral_similitud=0.85, max_cardinalidad_ratio=0.5,
                                    min_apariciones_canonica=1):
-    cols = []
-    for col in df.columns:
-        serie = df[col]
-        es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
-        if not es_texto or _es_columna_id(col):
-            continue
-        if any(p in str(col).lower() for p in _PATRONES_EXCLUIR_TEXTO):
-            continue
-        no_nulos = serie.dropna()
-        if _columna_numerica_potencial(no_nulos) or _es_numero_con_sufijo(no_nulos):
-            continue
-        if len(no_nulos) == 0:
-            continue
-        ratio = no_nulos.map(_normalizar_texto).nunique() / len(no_nulos)
-        if ratio <= max_cardinalidad_ratio:
-            cols.append(col)
+    if COLUMNAS_FORZADAS_TEXTO is not None:
+        cols = [c for c in COLUMNAS_FORZADAS_TEXTO if c in df.columns]
+    else:
+        cols = []
+        for col in df.columns:
+            serie = df[col]
+            es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
+            if not es_texto or _es_columna_id(col):
+                continue
+            if any(p in str(col).lower() for p in _PATRONES_EXCLUIR_TEXTO):
+                continue
+            no_nulos = serie.dropna()
+            if _columna_numerica_potencial(no_nulos) or _es_numero_con_sufijo(no_nulos):
+                continue
+            if len(no_nulos) == 0:
+                continue
+            ratio = no_nulos.map(_normalizar_texto).nunique() / len(no_nulos)
+            if ratio <= max_cardinalidad_ratio:
+                cols.append(col)
 
     hallazgos = []
     for col in cols:
@@ -782,9 +796,70 @@ def _bloque_config(config: Dict[str, str], factor_iqr: float, valores_fijos: Opt
     )
 
 
+_CLAVES_COLUMNAS_FORZADAS = (
+    ("fecha_invalida", "COLUMNAS_FORZADAS_FECHA"),
+    ("email_invalido", "COLUMNAS_FORZADAS_EMAIL"),
+    ("telefono_invalido", "COLUMNAS_FORZADAS_TELEFONO"),
+    ("id_duplicado", "COLUMNAS_FORZADAS_ID"),
+    ("texto_inconsistente", "COLUMNAS_FORZADAS_TEXTO"),
+    ("estado_invalido", "COLUMNAS_FORZADAS_ESTADO"),
+    ("capitalizacion_incorrecta", "COLUMNAS_FORZADAS_CAPITALIZACION"),
+)
+
+
+def _bloque_columnas_forzadas(incluir_generico: bool = True,
+                               columnas_reales_por_tipo: Optional[dict] = None) -> str:
+    """Genera las constantes COLUMNAS_FORZADAS_* que limitan cada regla de
+    fecha/email/telefono/id/texto/estado/capitalizacion/formula a columnas
+    especificas, en vez de repetir en CADA EJECUCION del script generado la
+    deteccion GENERICA por nombre/contenido sobre todas las columnas de la
+    tabla (lo que puede tocar columnas que ni siquiera tenian un error real
+    cuando se genero el script).
+
+    incluir_generico=True (por defecto): todas quedan en None y cada regla
+    sigue auto-detectando columnas en cada ejecucion, exactamente igual que
+    antes de esta opcion (compatibilidad total con scripts ya generados).
+
+    incluir_generico=False: cada regla queda restringida a las columnas de
+    `columnas_reales_por_tipo` (las que tuvieron hallazgos REALES, ya
+    detectados y mostrados al usuario en el analisis de la interfaz). Si un
+    tipo no tuvo ninguna columna con hallazgos, su lista queda vacia: la
+    regla simplemente no se aplica a nada, en vez de barrer toda la tabla
+    "por si acaso" encuentra algo la proxima vez que corra.
+    """
+    columnas_reales_por_tipo = columnas_reales_por_tipo or {}
+    lineas = []
+    if not incluir_generico:
+        lineas.append(
+            "# Modo \"solo configuracion\": las reglas de fecha/email/telefono/id/\n"
+            "# texto/estado/capitalizacion/formula NO vuelven a escanear todas las\n"
+            "# columnas por nombre/contenido en cada ejecucion; quedan fijas a las\n"
+            "# columnas que tuvieron hallazgos reales en el analisis mostrado en la\n"
+            "# interfaz al generar este script."
+        )
+    for tipo, nombre_const in _CLAVES_COLUMNAS_FORZADAS:
+        if incluir_generico:
+            lineas.append(f"{nombre_const} = None")
+        else:
+            cols = list(columnas_reales_por_tipo.get(tipo, []))
+            lineas.append(f"{nombre_const} = {cols!r}")
+    if incluir_generico:
+        lineas.append("COLUMNAS_FORZADAS_FORMULA = None")
+    else:
+        # Caso especial: no es una lista de columnas sino un interruptor
+        # (True = aplicar la regla con los mismos 3 patrones de siempre,
+        # False = no aplicarla porque el analisis no encontro un hallazgo
+        # real de "formula_incorrecta").
+        activar_formula = bool(columnas_reales_por_tipo.get("formula_incorrecta"))
+        lineas.append(f"COLUMNAS_FORZADAS_FORMULA = {activar_formula!r}")
+    return "\n".join(lineas) + "\n"
+
+
 def generar_script_powerbi(config: Dict[str, str], factor_iqr: float = 1.5,
                             valores_fijos: Optional[dict] = None,
-                            correcciones_individuales: Optional[dict] = None) -> str:
+                            correcciones_individuales: Optional[dict] = None,
+                            incluir_generico: bool = True,
+                            columnas_reales_por_tipo: Optional[dict] = None) -> str:
     """Script Python autocontenido para pegar en Power Query (Transformar -> Ejecutar script de Python)."""
     cabecera = '''# -*- coding: utf-8 -*-
 # =============================================================================
@@ -823,12 +898,15 @@ dataset_limpio, reporte_limpieza = limpiar_tabla(
 )
 '''
     return cabecera + _bloque_config(config, factor_iqr, valores_fijos, correcciones_individuales) \
+        + _bloque_columnas_forzadas(incluir_generico, columnas_reales_por_tipo) \
         + "\n\n" + _NUCLEO_LOGICA + pie
 
 
 def generar_script_universal(config: Dict[str, str], factor_iqr: float = 1.5,
                               valores_fijos: Optional[dict] = None,
-                              correcciones_individuales: Optional[dict] = None) -> str:
+                              correcciones_individuales: Optional[dict] = None,
+                              incluir_generico: bool = True,
+                              columnas_reales_por_tipo: Optional[dict] = None) -> str:
     """Script autocontenido para usar como libreria (Tableau Prep/TabPy, Alteryx, Qlik,
     notebooks) o como script de linea de comandos, con la misma configuracion elegida
     en la interfaz ya puesta como valor por defecto."""
@@ -896,6 +974,7 @@ if __name__ == "__main__":
     _main_cli()
 '''
     return cabecera + _bloque_config(config, factor_iqr, valores_fijos, correcciones_individuales) \
+        + _bloque_columnas_forzadas(incluir_generico, columnas_reales_por_tipo) \
         + "\n\n" + _NUCLEO_LOGICA + pie
 
 
@@ -922,9 +1001,13 @@ def _referencia_m(nombre: str) -> str:
 def generar_editor_m(config: Dict[str, str], factor_iqr: float = 1.5,
                       valores_fijos: Optional[dict] = None,
                       nombre_paso_anterior: str = "TuPasoAnterior",
-                      correcciones_individuales: Optional[dict] = None) -> str:
+                      correcciones_individuales: Optional[dict] = None,
+                      incluir_generico: bool = True,
+                      columnas_reales_por_tipo: Optional[dict] = None) -> str:
     """Codigo M listo para pegar en el Editor avanzado de Power Query."""
-    script_python = generar_script_powerbi(config, factor_iqr, valores_fijos, correcciones_individuales)
+    script_python = generar_script_powerbi(config, factor_iqr, valores_fijos, correcciones_individuales,
+                                            incluir_generico=incluir_generico,
+                                            columnas_reales_por_tipo=columnas_reales_por_tipo)
     script_m = _escapar_m(script_python)
     referencia_paso_anterior = _referencia_m(nombre_paso_anterior)
     return f'''// =============================================================================
