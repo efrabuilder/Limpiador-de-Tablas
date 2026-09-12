@@ -111,7 +111,7 @@ NOMBRES_ACCION = {
 # --------------------------------------------------------------------------
 # Modo "Modelo de datos" (estrella / copo de nieve) — página separada del
 # flujo normal de limpieza de una sola tabla. Carga varias hojas del mismo
-# Excel, deja definir por cada una su rol (dimensión/hecho), su llave
+# Excel, deja definir por cada una su llave primaria y sus llaves
 # primaria y sus llaves foráneas, y escribe todo en SQL con esas
 # restricciones aplicadas (ver data_cleaner/modelo_sql.py).
 # --------------------------------------------------------------------------
@@ -131,9 +131,10 @@ def _pagina_modelo_datos() -> None:
     st.title("🗂️ Modelo de datos (estrella / copo de nieve)")
     st.caption(
         "Cargue un Excel con varias hojas (una por tabla), asigne a cada una "
-        "un rol (dimensión u hecho), su llave primaria (PK) y sus llaves "
-        "foráneas (FK), vea el diagrama resultante y escríbalo en SQL ya "
-        "con esas restricciones aplicadas."
+        "su llave primaria (PK) y sus llaves foráneas (FK) hacia otra tabla "
+        "del modelo — dimensión u hecho se detecta solo según tenga FK o no —, "
+        "vea el diagrama resultante y escríbalo en SQL ya con esas restricciones "
+        "aplicadas."
     )
 
     archivo_modelo = st.file_uploader(
@@ -176,51 +177,48 @@ def _pagina_modelo_datos() -> None:
                     value=nombres_tabla_por_hoja[hoja], key=f"tabla_{hoja}",
                 )
                 nombres_tabla_por_hoja[hoja] = nombre_tabla
-                rol = st.selectbox(
-                    "Rol", ["Dimensión", "Hecho (fact)"], key=f"rol_{hoja}",
-                )
             with col_b:
                 clave_primaria = st.selectbox(
                     "Llave primaria (PK)", ["(ninguna)"] + list(df_hoja.columns),
                     key=f"pk_{hoja}",
                 )
 
+            st.caption(
+                "Llaves foráneas hacia otra tabla del modelo (opcional). Cualquier "
+                "tabla puede tener — no solo un hecho: una dimensión con FK hacia "
+                "otra dimensión arma un modelo en copo de nieve; un hecho con FK "
+                "hacia varias dimensiones arma un modelo en estrella."
+            )
             claves_foraneas = []
-            if rol == "Hecho (fact)":
-                st.caption(
-                    "Llaves foráneas (una por cada dimensión relacionada). "
-                    "También puede agregarlas en una dimensión para armar un "
-                    "modelo en copo de nieve (dimensión que referencia otra dimensión)."
-                )
-                otras_hojas = [h for h in hojas_elegidas if h != hoja]
-                n_fk = st.number_input(
-                    "Cantidad de llaves foráneas", min_value=0, max_value=10, value=0,
-                    key=f"n_fk_{hoja}",
-                )
-                for i in range(int(n_fk)):
-                    fk_col1, fk_col2, fk_col3 = st.columns(3)
-                    with fk_col1:
-                        columna_fk = st.selectbox(
-                            f"Columna FK #{i + 1}", list(df_hoja.columns),
-                            key=f"fk_col_{hoja}_{i}",
-                        )
-                    with fk_col2:
-                        hoja_ref = st.selectbox(
-                            f"Dimensión referenciada #{i + 1}",
-                            ["(elegir)"] + otras_hojas, key=f"fk_hoja_{hoja}_{i}",
-                        )
-                    with fk_col3:
-                        columnas_ref = list(hojas_cargadas[hoja_ref].columns) if hoja_ref != "(elegir)" else []
-                        columna_ref = st.selectbox(
-                            f"Columna referenciada #{i + 1}", columnas_ref,
-                            key=f"fk_colref_{hoja}_{i}",
-                        )
-                    if hoja_ref != "(elegir)" and columna_ref:
-                        claves_foraneas.append({
-                            "columna": columna_fk,
-                            "tabla_referencia": nombres_tabla_por_hoja[hoja_ref],
-                            "columna_referencia": columna_ref,
-                        })
+            otras_hojas = [h for h in hojas_elegidas if h != hoja]
+            n_fk = st.number_input(
+                "Cantidad de llaves foráneas", min_value=0, max_value=10, value=0,
+                key=f"n_fk_{hoja}",
+            )
+            for i in range(int(n_fk)):
+                fk_col1, fk_col2, fk_col3 = st.columns(3)
+                with fk_col1:
+                    columna_fk = st.selectbox(
+                        f"Columna FK #{i + 1}", list(df_hoja.columns),
+                        key=f"fk_col_{hoja}_{i}",
+                    )
+                with fk_col2:
+                    hoja_ref = st.selectbox(
+                        f"Tabla referenciada #{i + 1}",
+                        ["(elegir)"] + otras_hojas, key=f"fk_hoja_{hoja}_{i}",
+                    )
+                with fk_col3:
+                    columnas_ref = list(hojas_cargadas[hoja_ref].columns) if hoja_ref != "(elegir)" else []
+                    columna_ref = st.selectbox(
+                        f"Columna referenciada #{i + 1}", columnas_ref,
+                        key=f"fk_colref_{hoja}_{i}",
+                    )
+                if hoja_ref != "(elegir)" and columna_ref:
+                    claves_foraneas.append({
+                        "columna": columna_fk,
+                        "tabla_referencia": nombres_tabla_por_hoja[hoja_ref],
+                        "columna_referencia": columna_ref,
+                    })
 
             modelo[nombre_tabla] = {
                 "hoja": hoja,
