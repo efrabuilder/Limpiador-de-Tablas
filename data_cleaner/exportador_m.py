@@ -64,6 +64,7 @@ from data_cleaner.patrones import (
     PATRONES_NO_TELEFONO as _PATRONES_NO_TELEFONO,
     PATRONES_ESTADO as _PATRONES_ESTADO,
     VALORES_ESTADO_VALIDOS as _VALORES_ESTADO_VALIDOS,
+    PATRONES_NOMBRE_PROPIO as _PATRONES_NOMBRE_PROPIO,
     columnas_por_patron as _columnas_por_patron,
     es_columna_id as _es_columna_id,
     detectar_columnas as _detectar_columnas,
@@ -88,6 +89,7 @@ ACCIONES_SOPORTADAS_M = {
     "formula_incorrecta": {"usar_sugerido", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "texto_inconsistente": {"usar_sugerido", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "estado_invalido": {"valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
+    "capitalizacion_incorrecta": {"usar_sugerido", "marcar_solo", "eliminar_fila", "editar_individualmente"},
 }
 
 # _columnas_por_patron y _es_columna_id ahora vienen de data_cleaner.patrones
@@ -324,6 +326,45 @@ _M_FUNCION_RECORTAR_TEXTO = '''  // Recorta espacios solo si el valor YA es text
     else valor,
 '''
 
+_M_FUNCION_CAPITALIZAR = '''  // Convierte un texto a "Formato Nombre Propio" -- ver
+  // capitalizar_nombre_propio() en data_cleaner/patrones.py (misma regla:
+  // conectores en minuscula salvo la primera palabra, siglas conocidas en
+  // mayuscula). Simplificacion frente a la version Python: aqui las
+  // palabras se separan solo por espacio (no por guion), asi que un
+  // apellido compuesto con guion ("rodriguez-solano") se capitaliza como
+  // una sola palabra ("Rodriguez-solano") en vez de por cada mitad.
+  ConectoresNombrePropio = {"de","del","la","las","los","y","e","en","a","al","con","para","por","van","von","der","da","do","dos","das"},
+  SiglasNombrePropio = {"sa","srl","ltda","llc","inc","corp","sac","eirl","cia","sl","sau","spa","gmbh","plc","ii","iii","iv","vi","vii","viii","ix","jr","sr","md","phd"},
+  CapitalizarPalabraNombre = (p as text) as text =>
+    if p = "" then p
+    else
+        let
+            limpia = Text.Lower(Text.Select(p, {"A".."Z", "a".."z"})),
+            esSigla = List.Contains(SiglasNombrePropio, limpia)
+        in
+            if esSigla then Text.Upper(p)
+            else if Text.Contains(p, "'") then
+                Text.Combine(
+                    List.Transform(Text.Split(p, "'"),
+                        each if _ = "" then _ else Text.Upper(Text.Start(_, 1)) & Text.Lower(Text.Range(_, 1))),
+                    "'"
+                )
+            else Text.Upper(Text.Start(p, 1)) & Text.Lower(Text.Range(p, 1)),
+  CapitalizarNombrePropio = (t as nullable text) as nullable text =>
+    if t = null then null
+    else
+        let
+            palabras = Text.Split(Text.Trim(t), " "),
+            procesadas = List.Transform(
+                List.Positions(palabras),
+                (i) => let p = palabras{i} in
+                    if i > 0 and List.Contains(ConectoresNombrePropio, Text.Lower(p)) then Text.Lower(p)
+                    else CapitalizarPalabraNombre(p)
+            )
+        in
+            Text.Combine(procesadas, " "),
+'''
+
 def _m_valor_id(valor) -> str:
     """Renderiza un valor de ID como literal M: numero si es numero, texto citado si no.
     OJO: los valores numericos de un DataFrame de pandas son numpy.int64/float64, no
@@ -545,6 +586,7 @@ def generar_editor_m_puro(
     formula_incorrecta: str = "marcar_solo",
     texto_inconsistente: str = "marcar_solo",
     estado_invalido: str = "marcar_solo",
+    capitalizacion_incorrecta: str = "marcar_solo",
     columnas_fecha: Optional[List[str]] = None,
     fecha_min: Optional[str] = None,
     fecha_max: Optional[str] = None,
@@ -564,6 +606,7 @@ def generar_editor_m_puro(
     max_cardinalidad_ratio_texto: float = 0.5,
     columnas_estado: Optional[List[str]] = None,
     valores_estado_validos: Optional[List[str]] = None,
+    columnas_capitalizacion: Optional[List[str]] = None,
     # --- correcciones puntuales (accion 'editar_individualmente') ---
     correcciones_individuales: Optional[Dict[tuple, object]] = None,
 ) -> str:
@@ -615,6 +658,7 @@ def generar_editor_m_puro(
     a_formula = _accion_o_fallback("formula_incorrecta", formula_incorrecta, comentarios)
     a_texto = _accion_o_fallback("texto_inconsistente", texto_inconsistente, comentarios)
     a_estado = _accion_o_fallback("estado_invalido", estado_invalido, comentarios)
+    a_capitalizacion = _accion_o_fallback("capitalizacion_incorrecta", capitalizacion_incorrecta, comentarios)
 
     # Deteccion en 2 niveles: por nombre de columna primero (rapido); si
     # eso no encuentra nada, se revisan los VALORES reales como respaldo
@@ -633,6 +677,9 @@ def generar_editor_m_puro(
     cols_texto = columnas_texto if columnas_texto is not None else _columnas_candidatas_texto(df, max_cardinalidad_ratio_texto)
     cols_estado = columnas_estado if columnas_estado is not None else _columnas_por_patron(df, _PATRONES_ESTADO)
     valores_estado = valores_estado_validos if valores_estado_validos is not None else _VALORES_ESTADO_VALIDOS
+    cols_capitalizacion = columnas_capitalizacion if columnas_capitalizacion is not None else \
+        [c for c in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO)
+         if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c])]
     col_total = columna_total or (_columnas_por_patron(df, _PATRONES_TOTAL) or [None])[0]
     col_cant = columna_cantidad or (_columnas_por_patron(df, _PATRONES_CANTIDAD) or [None])[0]
     col_precio = columna_precio or (_columnas_por_patron(df, _PATRONES_PRECIO) or [None])[0]
@@ -682,7 +729,7 @@ def generar_editor_m_puro(
         "faltante": a_faltante, "atipico": a_atipico, "tipo_invalido": a_tipo_invalido,
         "fecha_invalida": a_fecha, "email_invalido": a_email, "id_duplicado": a_id,
         "formula_incorrecta": a_formula, "texto_inconsistente": a_texto,
-        "estado_invalido": a_estado,
+        "estado_invalido": a_estado, "capitalizacion_incorrecta": a_capitalizacion,
     }
     columnas_edicion_individual: List[Tuple[str, str]] = []
     if correcciones_individuales:
@@ -1144,9 +1191,42 @@ def generar_editor_m_puro(
                 f'Valores validos configurados: {", ".join(valores_estado)}.'
             )
 
+    # -- 10b) Capitalizacion de nombres propios ----------------------------------
+    # A diferencia de "texto_inconsistente" (que necesita una tabla horneada
+    # porque depende de similitud/frecuencia entre valores), la correccion de
+    # capitalizacion es una funcion pura del texto de cada celda: se genera
+    # como una funcion M nativa (CapitalizarNombrePropio, ver arriba) que se
+    # recalcula solita en cada refresh, sin quedar "congelada" con los
+    # valores vistos al generar el codigo.
+    if cols_capitalizacion:
+        necesita_capitalizar_fn = True
+        for col in cols_capitalizacion:
+            if col not in df.columns:
+                continue
+            nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
+            if a_capitalizacion == "usar_sugerido":
+                cb.agregar(f"Capitalizado_{nombre_col_id}",
+                           "Table.TransformColumns({prev}, {{" + _m_str(col) +
+                           ", each CapitalizarNombrePropio(_), type text}})")
+            elif a_capitalizacion == "eliminar_fila":
+                cb.agregar(f"SinCapitalizacionInvalida_{nombre_col_id}",
+                           "Table.SelectRows({prev}, each [" + col + "] = null or [" + col +
+                           "] = CapitalizarNombrePropio([" + col + "]))")
+            else:
+                comentarios.append(
+                    f'  // AVISO: "capitalizacion_incorrecta" quedo en "{a_capitalizacion}" '
+                    f'para la columna "{col}", pero el codigo M puro no agrega columnas '
+                    f'nuevas (ni Revisar_Capitalizacion_{col}); no se genero ningun paso '
+                    f'para esta columna.'
+                )
+    else:
+        necesita_capitalizar_fn = False
+
     funciones_extra = ""
     if necesita_recortar_fn:
         funciones_extra += _M_FUNCION_RECORTAR_TEXTO + "\n"
+    if necesita_capitalizar_fn:
+        funciones_extra += _M_FUNCION_CAPITALIZAR + "\n"
     if necesita_fecha_fn:
         funciones_extra += _M_FUNCION_FECHA + "\n"
     if necesita_percentil_fn:
