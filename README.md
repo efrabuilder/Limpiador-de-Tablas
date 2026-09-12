@@ -287,7 +287,8 @@ dimensión (ej. `dim_productos` -> `dim_categorias`). Formas de aplicarlo:
 - **Web (Streamlit) y escritorio (Tkinter):** en `app.py`, modo
   "🗂️ Modelo de datos" en la barra lateral; en `desktop_app.py`, botón
   "🗂️ Modelo de datos..." en la barra superior. Ambos permiten elegir
-  las hojas, definir rol/PK/FK con menús y ver el diagrama antes de
+  las hojas, definir PK/FK con menús (cualquier tabla puede tener FK hacia
+  otra, no solo un hecho) y ver el diagrama antes de
   escribir a SQL.
 
 Nota: SQLite no soporta agregar PK/FK con `ALTER TABLE` (los datos igual
