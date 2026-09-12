@@ -25,13 +25,14 @@ from data_cleaner import (
     exportar_reporte_excel,
     exportar,
 )
-from data_cleaner.loaders import load_excel
+from data_cleaner.loaders import load_excel, load_excel_hojas
 from data_cleaner.cleaner import ACCIONES_VALIDAS  # noqa: F401 (referencia)
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES
+from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo
 
 # --------------------------------------------------------------------------
 # Configuración de página y constantes
@@ -105,6 +106,177 @@ NOMBRES_ACCION = {
 # Nota: PAISES_TELEFONO_DISPONIBLES ahora vive en data_cleaner/patrones.py
 # (importado arriba) para que app.py y desktop_app.py siempre muestren
 # exactamente el mismo listado de países.
+
+
+# --------------------------------------------------------------------------
+# Modo "Modelo de datos" (estrella / copo de nieve) — página separada del
+# flujo normal de limpieza de una sola tabla. Carga varias hojas del mismo
+# Excel, deja definir por cada una su rol (dimensión/hecho), su llave
+# primaria y sus llaves foráneas, y escribe todo en SQL con esas
+# restricciones aplicadas (ver data_cleaner/modelo_sql.py).
+# --------------------------------------------------------------------------
+
+import re as _re_modelo
+
+
+def _nombre_tabla_valido_modelo(nombre_hoja: str) -> str:
+    """Convierte el nombre de una hoja en un nombre de tabla SQL válido:
+    minúsculas, espacios/caracteres raros -> guion bajo."""
+    limpio = _re_modelo.sub(r"[^a-zA-Z0-9_]+", "_", nombre_hoja.strip().lower())
+    limpio = _re_modelo.sub(r"_+", "_", limpio).strip("_")
+    return limpio or "hoja_sin_nombre"
+
+
+def _pagina_modelo_datos() -> None:
+    st.title("🗂️ Modelo de datos (estrella / copo de nieve)")
+    st.caption(
+        "Cargue un Excel con varias hojas (una por tabla), asigne a cada una "
+        "un rol (dimensión u hecho), su llave primaria (PK) y sus llaves "
+        "foráneas (FK), vea el diagrama resultante y escríbalo en SQL ya "
+        "con esas restricciones aplicadas."
+    )
+
+    archivo_modelo = st.file_uploader(
+        "Excel con las hojas a modelar", type=["xlsx", "xls"], key="archivo_modelo",
+    )
+    if archivo_modelo is None:
+        st.info("Suba un archivo Excel para empezar.")
+        return
+
+    hojas_disponibles = pd.ExcelFile(archivo_modelo).sheet_names
+    hojas_elegidas = st.multiselect(
+        "Hojas a incluir en el modelo (una tabla por hoja)",
+        hojas_disponibles, default=hojas_disponibles, key="hojas_modelo",
+    )
+    if not hojas_elegidas:
+        st.info("Elija al menos una hoja.")
+        return
+
+    archivo_modelo.seek(0)
+    hojas_cargadas = load_excel_hojas(archivo_modelo, hojas=hojas_elegidas)
+
+    st.divider()
+    st.subheader("1. Definir cada tabla")
+
+    modelo: dict = {}
+    nombres_tabla_por_hoja: dict = {
+        hoja: _nombre_tabla_valido_modelo(hoja) for hoja in hojas_elegidas
+    }
+
+    for hoja in hojas_elegidas:
+        df_hoja = hojas_cargadas[hoja]
+        with st.expander(
+            f"📄 {hoja}  ({len(df_hoja)} filas, {len(df_hoja.columns)} columnas)",
+            expanded=True,
+        ):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                nombre_tabla = st.text_input(
+                    "Nombre de la tabla en SQL",
+                    value=nombres_tabla_por_hoja[hoja], key=f"tabla_{hoja}",
+                )
+                nombres_tabla_por_hoja[hoja] = nombre_tabla
+                rol = st.selectbox(
+                    "Rol", ["Dimensión", "Hecho (fact)"], key=f"rol_{hoja}",
+                )
+            with col_b:
+                clave_primaria = st.selectbox(
+                    "Llave primaria (PK)", ["(ninguna)"] + list(df_hoja.columns),
+                    key=f"pk_{hoja}",
+                )
+
+            claves_foraneas = []
+            if rol == "Hecho (fact)":
+                st.caption(
+                    "Llaves foráneas (una por cada dimensión relacionada). "
+                    "También puede agregarlas en una dimensión para armar un "
+                    "modelo en copo de nieve (dimensión que referencia otra dimensión)."
+                )
+                otras_hojas = [h for h in hojas_elegidas if h != hoja]
+                n_fk = st.number_input(
+                    "Cantidad de llaves foráneas", min_value=0, max_value=10, value=0,
+                    key=f"n_fk_{hoja}",
+                )
+                for i in range(int(n_fk)):
+                    fk_col1, fk_col2, fk_col3 = st.columns(3)
+                    with fk_col1:
+                        columna_fk = st.selectbox(
+                            f"Columna FK #{i + 1}", list(df_hoja.columns),
+                            key=f"fk_col_{hoja}_{i}",
+                        )
+                    with fk_col2:
+                        hoja_ref = st.selectbox(
+                            f"Dimensión referenciada #{i + 1}",
+                            ["(elegir)"] + otras_hojas, key=f"fk_hoja_{hoja}_{i}",
+                        )
+                    with fk_col3:
+                        columnas_ref = list(hojas_cargadas[hoja_ref].columns) if hoja_ref != "(elegir)" else []
+                        columna_ref = st.selectbox(
+                            f"Columna referenciada #{i + 1}", columnas_ref,
+                            key=f"fk_colref_{hoja}_{i}",
+                        )
+                    if hoja_ref != "(elegir)" and columna_ref:
+                        claves_foraneas.append({
+                            "columna": columna_fk,
+                            "tabla_referencia": nombres_tabla_por_hoja[hoja_ref],
+                            "columna_referencia": columna_ref,
+                        })
+
+            modelo[nombre_tabla] = {
+                "hoja": hoja,
+                "clave_primaria": None if clave_primaria == "(ninguna)" else clave_primaria,
+                "claves_foraneas": claves_foraneas,
+            }
+
+    st.divider()
+    st.subheader("2. Vista previa del modelo")
+    dot = generar_dot_modelo(modelo)
+    st.graphviz_chart(dot)
+    with st.expander("Ver código DOT"):
+        st.code(dot, language="text")
+
+    st.divider()
+    st.subheader("3. Escribir en SQL")
+    cadena_modelo = st.text_input(
+        "Cadena de conexión SQLAlchemy", type="password", key="cadena_modelo",
+        help="Ej. SQL Server con autenticación de Windows: "
+             "mssql+pyodbc://@servidor/basedatos?driver=ODBC+Driver+18+for+SQL+Server"
+             "&Encrypt=yes&TrustServerCertificate=yes&trusted_connection=yes",
+    )
+    si_existe_modelo = st.selectbox(
+        "Si una tabla ya existe", ["replace", "append", "fail"], key="si_existe_modelo",
+        help="Con PK/FK conviene 'replace': con 'append' las restricciones pueden "
+             "fallar si ya hay valores repetidos o nulos en esa columna.",
+    )
+    if st.button("🚀 Crear modelo en la base de datos", key="btn_crear_modelo"):
+        if not cadena_modelo:
+            st.error("Indique la cadena de conexión.")
+        else:
+            try:
+                mensajes = aplicar_modelo_sql(
+                    modelo, hojas_cargadas, cadena_modelo, if_exists=si_existe_modelo,
+                )
+                for m in mensajes:
+                    if "⚠" in m:
+                        st.warning(m)
+                    else:
+                        st.success(m)
+            except Exception as exc:
+                st.error(f"No se pudo crear el modelo: {exc}")
+
+
+with st.sidebar:
+    st.header("Modo")
+    MODO_APP = st.radio(
+        "¿Qué quiere hacer?",
+        ["🧹 Limpieza de una tabla", "🗂️ Modelo de datos (estrella / copo de nieve)"],
+        index=0, key="modo_app",
+    )
+    st.divider()
+
+if MODO_APP == "🗂️ Modelo de datos (estrella / copo de nieve)":
+    _pagina_modelo_datos()
+    st.stop()
 
 
 # --------------------------------------------------------------------------
