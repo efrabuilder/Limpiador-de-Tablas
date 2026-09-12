@@ -33,7 +33,7 @@ from data_cleaner.exportador import (
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES
 from data_cleaner.modelo_sql import (
-    aplicar_modelo_sql, generar_dot_modelo, generar_script_crear_base_datos,
+    generar_dot_modelo, generar_script_crear_base_datos, generar_script_modelo_sql,
 )
 
 # --------------------------------------------------------------------------
@@ -236,13 +236,19 @@ def _pagina_modelo_datos() -> None:
         st.code(dot, language="text")
 
     st.divider()
-    st.subheader("3. Escribir en SQL")
+    st.subheader("3. Generar el script SQL")
+    st.caption(
+        "La app no se conecta a ninguna base de datos: arma aquí mismo el "
+        "script completo (crear tablas, llave primaria, llaves foráneas y, "
+        "si lo pide, los datos) para que usted lo revise, copie o descargue "
+        "y lo corra donde quiera (SSMS, mysql, psql, un cliente en la nube, etc.)."
+    )
 
     with st.expander("🛠️ ¿La base de datos todavía no existe? Genere el script para crearla"):
         st.caption(
-            "No se puede conectar a una base de datos que no existe: primero hay que "
-            "crearla desde una consulta en SSMS/mysql/psql, y recién después conectar "
-            "aquí abajo apuntando a esa base ya creada."
+            "Primero hay que crear la base desde una consulta en SSMS/mysql/psql "
+            "conectado al servidor; recién después corra ahí mismo el script del "
+            "modelo (más abajo) apuntando a esa base ya creada."
         )
         col_bd1, col_bd2 = st.columns(2)
         with col_bd1:
@@ -264,35 +270,39 @@ def _pagina_modelo_datos() -> None:
             except ValueError as exc:
                 st.error(str(exc))
 
-    with st.form("form_crear_modelo"):
-        cadena_modelo = st.text_input(
-            "Cadena de conexión SQLAlchemy", type="password", key="cadena_modelo",
-            help="Ej. SQL Server con autenticación de Windows: "
-                 "mssql+pyodbc://@servidor/basedatos?driver=ODBC+Driver+18+for+SQL+Server"
-                 "&Encrypt=yes&TrustServerCertificate=yes&trusted_connection=yes",
+    with st.form("form_generar_script_modelo"):
+        motor_modelo = st.selectbox(
+            "Motor de la base de datos destino", ["sql_server", "mysql", "postgresql"],
+            key="motor_modelo",
+            format_func=lambda m: {"sql_server": "SQL Server", "mysql": "MySQL/MariaDB",
+                                    "postgresql": "PostgreSQL"}[m],
+            help="Cambia los tipos de dato y el delimitador de identificadores usados en el script.",
         )
-        si_existe_modelo = st.selectbox(
-            "Si una tabla ya existe", ["replace", "append", "fail"], key="si_existe_modelo",
-            help="Con PK/FK conviene 'replace': con 'append' las restricciones pueden "
-                 "fallar si ya hay valores repetidos o nulos en esa columna.",
+        incluir_datos_modelo = st.checkbox(
+            "Incluir los datos (INSERT), además de la estructura de las tablas",
+            value=True, key="incluir_datos_modelo",
         )
-        enviado = st.form_submit_button("🚀 Crear modelo en la base de datos")
+        enviado = st.form_submit_button("📝 Generar script del modelo")
 
     if enviado:
-        if not cadena_modelo:
-            st.error("Indique la cadena de conexión.")
-        else:
-            try:
-                mensajes = aplicar_modelo_sql(
-                    modelo, hojas_cargadas, cadena_modelo, if_exists=si_existe_modelo,
-                )
-                for m in mensajes:
-                    if "⚠" in m:
-                        st.warning(m)
-                    else:
-                        st.success(m)
-            except Exception as exc:
-                st.error(f"No se pudo crear el modelo: {exc}")
+        try:
+            st.session_state["script_modelo_generado"] = generar_script_modelo_sql(
+                modelo, hojas_cargadas, motor=motor_modelo, incluir_datos=incluir_datos_modelo,
+            )
+        except ValueError as exc:
+            st.session_state.pop("script_modelo_generado", None)
+            st.error(f"No se pudo generar el script: {exc}")
+
+    script_modelo_generado = st.session_state.get("script_modelo_generado")
+    if script_modelo_generado:
+        st.text_area(
+            "Script SQL generado (edítelo o cópielo desde aquí)",
+            script_modelo_generado, height=400, key="txt_script_modelo",
+        )
+        st.download_button(
+            "⬇️ Descargar script .sql", script_modelo_generado,
+            file_name="modelo.sql", mime="text/plain",
+        )
 
 
 with st.sidebar:
