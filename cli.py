@@ -434,6 +434,40 @@ def modelo_sql_cmd(
     console.print("\n[bold green]✅ Modelo aplicado.[/bold green]")
 
 
+@app.command("crear-base-datos")
+def crear_base_datos_cmd(
+    nombre: str = typer.Option(..., "--nombre", "-n", help="Nombre de la base de datos a crear."),
+    motor: str = typer.Option(
+        "sql_server", "--motor", "-m",
+        help="sql_server | mysql | postgresql (motor destino).",
+    ),
+    salida: Optional[str] = typer.Option(
+        None, "--salida", help="Si se indica, guarda el script en esa ruta en vez de solo imprimirlo.",
+    ),
+):
+    """
+    Genera el script SQL (CREATE DATABASE / USE) que hay que pegar en
+    SSMS/mysql/psql cuando la base de datos destino TODAVÍA NO EXISTE.
+    No requiere ninguna cadena de conexión: una vez creada la base con
+    este script, recién ahí use 'modelo-sql --conexion ...' apuntando a
+    esa base ya creada.
+    """
+    from data_cleaner.modelo_sql import generar_script_crear_base_datos
+
+    try:
+        script = generar_script_crear_base_datos(nombre, motor)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+
+    if salida:
+        with open(salida, "w", encoding="utf-8") as f:
+            f.write(script)
+        console.print(f"Script guardado en: {salida}")
+    else:
+        console.print(script)
+
+
 if __name__ == "__main__":
     try:
         app()
