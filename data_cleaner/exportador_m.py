@@ -609,6 +609,9 @@ def generar_editor_m_puro(
     columnas_capitalizacion: Optional[List[str]] = None,
     # --- correcciones puntuales (accion 'editar_individualmente') ---
     correcciones_individuales: Optional[Dict[tuple, object]] = None,
+    # --- alcance de la deteccion de columnas ---
+    incluir_generico: bool = True,
+    columnas_reales_por_tipo: Optional[Dict[str, List[str]]] = None,
 ) -> str:
     """Genera codigo M 100% nativo (sin Python.Execute) equivalente a
     integraciones_bi/limpiador_powerbi.py, usando `df` (los datos YA cargados
@@ -641,6 +644,20 @@ def generar_editor_m_puro(
     ("editar_individualmente") siguen funcionando porque reemplazan la
     columna existente (via RemoveColumns + RenameColumns), no agregan una
     nueva.
+
+    incluir_generico:
+      - True (por defecto): para fecha/email/telefono/id/texto/estado/
+        capitalizacion/formula, cuando no se pasa una lista explicita
+        (columnas_fecha, columnas_email, etc.), se auto-detectan TODAS
+        las columnas de `df` que coincidan con el patron de nombre o
+        contenido de esa regla (comportamiento identico al de siempre).
+      - False: en vez de esa deteccion generica, cada regla queda
+        restringida a las columnas presentes en `columnas_reales_por_tipo`
+        (las que tuvieron hallazgos REALES en el analisis ya mostrado al
+        usuario en la interfaz). Si un tipo no aparece ahi, no se genera
+        ningun paso para esa regla, en vez de barrer toda la tabla "por si
+        acaso". Una lista explicita (columnas_fecha=[...], etc.) siempre
+        manda sobre esta opcion, se use o no incluir_generico.
     """
     cfg_basico = {"faltante": "reemplazar_mediana", "duplicado": "eliminar_fila",
                   "atipico": "limitar", "tipo_invalido": "marcar_solo", **(config or {})}
@@ -666,23 +683,56 @@ def generar_editor_m_puro(
     # El orden fecha -> email -> telefono importa: cada deteccion excluye
     # las columnas que ya reclamo una regla anterior, para que una columna
     # de fecha con muchos digitos no se confunda con telefono, etc.
-    cols_fecha = columnas_fecha if columnas_fecha is not None else \
-        _detectar_columnas_fecha(df, _parece_fecha)
-    cols_email = columnas_email if columnas_email is not None else \
-        _detectar_columnas(df, _PATRONES_EMAIL, _parece_email, excluir=cols_fecha)
-    cols_tel = columnas_telefono if columnas_telefono is not None else \
-        _detectar_columnas(df, _PATRONES_TELEFONO, _parece_telefono, excluir=cols_fecha + cols_email,
-                            excluir_por_nombre=_PATRONES_NO_TELEFONO)
-    cols_id = columnas_id if columnas_id is not None else [c for c in df.columns if _es_columna_id(c)]
-    cols_texto = columnas_texto if columnas_texto is not None else _columnas_candidatas_texto(df, max_cardinalidad_ratio_texto)
-    cols_estado = columnas_estado if columnas_estado is not None else _columnas_por_patron(df, _PATRONES_ESTADO)
+    _reales_por_tipo = columnas_reales_por_tipo or {}
+    if not incluir_generico:
+        comentarios.append(
+            '  // Modo "solo configuracion": fecha/email/telefono/id/texto/estado/'
+            'capitalizacion/formula NO auto-detectan columnas por nombre/contenido; '
+            'quedan limitadas a las columnas que tuvieron hallazgos reales en el '
+            'analisis ya mostrado en la interfaz.'
+        )
+
+    def _restringir(explicito, tipo, auto_detectar):
+        if explicito is not None:
+            return explicito
+        if not incluir_generico:
+            return [c for c in _reales_por_tipo.get(tipo, []) if c in df.columns]
+        return auto_detectar()
+
+    cols_fecha = _restringir(columnas_fecha, "fecha_invalida",
+                              lambda: _detectar_columnas_fecha(df, _parece_fecha))
+    cols_email = _restringir(columnas_email, "email_invalido",
+                              lambda: _detectar_columnas(df, _PATRONES_EMAIL, _parece_email, excluir=cols_fecha))
+    cols_tel = _restringir(columnas_telefono, "telefono_invalido",
+                            lambda: _detectar_columnas(df, _PATRONES_TELEFONO, _parece_telefono,
+                                                        excluir=cols_fecha + cols_email,
+                                                        excluir_por_nombre=_PATRONES_NO_TELEFONO))
+    cols_id = _restringir(columnas_id, "id_duplicado",
+                           lambda: [c for c in df.columns if _es_columna_id(c)])
+    cols_texto = _restringir(columnas_texto, "texto_inconsistente",
+                              lambda: _columnas_candidatas_texto(df, max_cardinalidad_ratio_texto))
+    cols_estado = _restringir(columnas_estado, "estado_invalido",
+                               lambda: _columnas_por_patron(df, _PATRONES_ESTADO))
     valores_estado = valores_estado_validos if valores_estado_validos is not None else _VALORES_ESTADO_VALIDOS
-    cols_capitalizacion = columnas_capitalizacion if columnas_capitalizacion is not None else \
-        [c for c in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO)
-         if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c])]
-    col_total = columna_total or (_columnas_por_patron(df, _PATRONES_TOTAL) or [None])[0]
-    col_cant = columna_cantidad or (_columnas_por_patron(df, _PATRONES_CANTIDAD) or [None])[0]
-    col_precio = columna_precio or (_columnas_por_patron(df, _PATRONES_PRECIO) or [None])[0]
+    cols_capitalizacion = _restringir(
+        columnas_capitalizacion, "capitalizacion_incorrecta",
+        lambda: [c for c in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO)
+                 if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c])])
+
+    if columna_total or columna_cantidad or columna_precio or incluir_generico:
+        col_total = columna_total or (_columnas_por_patron(df, _PATRONES_TOTAL) or [None])[0]
+        col_cant = columna_cantidad or (_columnas_por_patron(df, _PATRONES_CANTIDAD) or [None])[0]
+        col_precio = columna_precio or (_columnas_por_patron(df, _PATRONES_PRECIO) or [None])[0]
+    elif _reales_por_tipo.get("formula_incorrecta"):
+        # Sin columnas explicitas y sin deteccion generica: solo activar la
+        # regla si el analisis que vio el usuario realmente encontro un
+        # hallazgo de "formula_incorrecta" (las 3 columnas se re-emparejan
+        # con los mismos patrones de siempre; lo que cambia es si se activa).
+        col_total = (_columnas_por_patron(df, _PATRONES_TOTAL) or [None])[0]
+        col_cant = (_columnas_por_patron(df, _PATRONES_CANTIDAD) or [None])[0]
+        col_precio = (_columnas_por_patron(df, _PATRONES_PRECIO) or [None])[0]
+    else:
+        col_total = col_cant = col_precio = None
     hay_formula = bool(col_total and col_cant and col_precio and
                         all(c in df.columns for c in (col_total, col_cant, col_precio)))
 
