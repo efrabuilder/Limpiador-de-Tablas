@@ -36,7 +36,7 @@ from data_cleaner.exportador import (
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.loaders import load_excel, load_table, load_excel_hojas
 from data_cleaner.exporters import exportar_sql
-from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo
+from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo, generar_script_crear_base_datos
 
 app = FastAPI(
     title="Limpiador de Tablas API",
@@ -78,6 +78,11 @@ class AplicarModeloSqlOut(BaseModel):
 
 class DiagramaModeloIn(BaseModel):
     modelo: dict
+
+
+class CrearBaseDatosIn(BaseModel):
+    nombre: str
+    motor: str = "sql_server"  # sql_server | mysql | postgresql
 
 
 class LimpiezaOut(BaseModel):
@@ -667,3 +672,18 @@ def modelo_sql_diagrama_endpoint(body: DiagramaModeloIn):
     https://dreampuf.github.io/GraphvizOnline para verlo).
     """
     return {"dot": generar_dot_modelo(body.modelo)}
+
+
+@app.post("/modelo-sql/crear-base-datos")
+def modelo_sql_crear_base_datos_endpoint(body: CrearBaseDatosIn):
+    """
+    Genera el script SQL (CREATE DATABASE / USE) para cuando la base de
+    datos destino TODAVÍA NO EXISTE — no requiere ninguna cadena de
+    conexión. Péguelo en SSMS/mysql/psql; una vez creada la base, recién
+    ahí use /modelo-sql con connection_string apuntando a esa base.
+    """
+    try:
+        script = generar_script_crear_base_datos(body.nombre, body.motor)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"script": script}
