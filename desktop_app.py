@@ -28,7 +28,9 @@ from data_cleaner.exportador import (
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES
-from data_cleaner.modelo_sql import aplicar_modelo_sql, es_tabla_hecho
+from data_cleaner.modelo_sql import (
+    aplicar_modelo_sql, es_tabla_hecho, generar_script_crear_base_datos,
+)
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_mediana", "reemplazar_media", "reemplazar_moda",
@@ -533,6 +535,87 @@ class LimpiadorApp(tk.Tk):
         ventana_padre.wait_window(ventana)
         return resultado["cadena"]
 
+    def _abrir_generador_script_bd(self, ventana_padre: tk.Toplevel) -> None:
+        """
+        Ventanita para generar el script CREATE DATABASE / USE que hay que
+        pegar en SSMS/mysql/psql cuando la base de datos destino todavía
+        no existe (una cadena de conexión normal no puede apuntar a una
+        base que no existe). Ver
+        data_cleaner/modelo_sql.py:generar_script_crear_base_datos.
+        """
+        ventana = tk.Toplevel(ventana_padre)
+        ventana.title("Generar script para crear la base de datos")
+        ventana.geometry("560x420")
+        ventana.transient(ventana_padre)
+
+        ttk.Label(
+            ventana,
+            text="No se puede conectar a una base de datos que no existe: primero "
+                 "hay que crearla desde una consulta en SSMS/mysql/psql, y recién "
+                 "después conectar apuntando a esa base ya creada.",
+            wraplength=520, justify="left",
+        ).pack(anchor="w", padx=15, pady=(15, 10))
+
+        fila = ttk.Frame(ventana)
+        fila.pack(fill="x", padx=15)
+        ttk.Label(fila, text="Nombre de la base de datos:").pack(side="left")
+        var_nombre_bd = tk.StringVar()
+        ttk.Entry(fila, textvariable=var_nombre_bd, width=24).pack(side="left", padx=(4, 16))
+        ttk.Label(fila, text="Motor:").pack(side="left")
+        var_motor_bd = tk.StringVar(value="sql_server")
+        ttk.Combobox(
+            fila, textvariable=var_motor_bd, state="readonly", width=14,
+            values=["sql_server", "mysql", "postgresql"],
+        ).pack(side="left", padx=(4, 0))
+
+        texto_script = tk.Text(ventana, height=12, wrap="word")
+        texto_script.pack(fill="both", expand=True, padx=15, pady=10)
+
+        def _generar():
+            try:
+                script = generar_script_crear_base_datos(var_nombre_bd.get(), var_motor_bd.get())
+            except ValueError as exc:
+                messagebox.showwarning("Falta información", str(exc))
+                return
+            texto_script.delete("1.0", "end")
+            texto_script.insert("1.0", script)
+
+        def _copiar():
+            contenido = texto_script.get("1.0", "end").strip()
+            if not contenido:
+                messagebox.showwarning("Nada que copiar", "Genere primero el script.")
+                return
+            ventana.clipboard_clear()
+            ventana.clipboard_append(contenido)
+            ventana.update()  # necesario en algunos sistemas para que quede disponible
+            messagebox.showinfo(
+                "Copiado", "Script copiado al portapapeles. Péguelo en su consulta de SSMS/mysql/psql.",
+            )
+
+        def _guardar():
+            contenido = texto_script.get("1.0", "end").strip()
+            if not contenido:
+                messagebox.showwarning("Nada que guardar", "Genere primero el script.")
+                return
+            ruta = filedialog.asksaveasfilename(
+                title="Guardar script SQL", defaultextension=".sql",
+                filetypes=[("Script SQL", "*.sql"), ("Todos", "*.*")],
+                initialfile=f"crear_{var_nombre_bd.get() or 'base_datos'}.sql",
+            )
+            if not ruta:
+                return
+            with open(ruta, "w", encoding="utf-8") as f:
+                f.write(contenido + "\n")
+            messagebox.showinfo("Guardado", f"Script guardado en:\n{ruta}")
+
+        marco_botones = ttk.Frame(ventana)
+        marco_botones.pack(fill="x", padx=15, pady=(0, 15))
+        ttk.Button(marco_botones, text="Generar script", command=_generar).pack(side="left")
+        ttk.Button(marco_botones, text="📋 Copiar", command=_copiar).pack(side="left", padx=(8, 0))
+        ttk.Button(marco_botones, text="💾 Guardar como .sql...", command=_guardar).pack(side="left", padx=(8, 0))
+
+        ventana.protocol("WM_DELETE_WINDOW", ventana.destroy)
+
     def abrir_modelo_datos(self) -> None:
         """
         Ventana para cargar varias hojas del mismo Excel y escribirlas en
@@ -741,6 +824,11 @@ class LimpiadorApp(tk.Tk):
         ).pack(anchor="w", padx=12, pady=(0, 8))
 
         ttk.Separator(ventana, orient="horizontal").pack(fill="x", padx=12)
+
+        ttk.Button(
+            ventana, text="🛠️ Generar script para crear la base de datos...",
+            command=lambda: self._abrir_generador_script_bd(ventana),
+        ).pack(anchor="w", padx=12, pady=(8, 4))
 
         def _crear_en_sql():
             if not estado_modelo:
