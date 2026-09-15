@@ -622,3 +622,38 @@ def columnas_excluir_de_atipicos(df: pd.DataFrame) -> List[str]:
     cols_tel = detectar_columnas(df, PATRONES_TELEFONO, parece_telefono, excluir=cols_id,
                                   excluir_por_nombre=PATRONES_NO_TELEFONO)
     return list(dict.fromkeys(cols_id + cols_tel))
+
+
+# -----------------------------------------------------------------------------
+# Formatos de fecha "preferidos" para normalizar columnas de fecha
+# -----------------------------------------------------------------------------
+# Catalogo de formatos que el usuario puede elegir para normalizar una
+# columna de fecha (ver ACCIONES_VALIDAS "normalizar_formato_fecha" en
+# cleaner.py). Cada entrada trae su equivalente en strftime de Python (para
+# el motor en vivo y el script Python autocontenido) y en Date.ToText de
+# Power Query M (para el codigo M), asi ambos exportadores generan
+# exactamente el mismo formato de salida que el usuario eligio.
+FORMATOS_FECHA_DISPONIBLES: dict = {
+    "aaaa-mm-dd": {"python": "%Y-%m-%d", "m": "yyyy-MM-dd", "etiqueta": "AAAA-MM-DD (2024-01-15)"},
+    "dd/mm/aaaa": {"python": "%d/%m/%Y", "m": "dd/MM/yyyy", "etiqueta": "DD/MM/AAAA (15/01/2024)"},
+    "mm/dd/aaaa": {"python": "%m/%d/%Y", "m": "MM/dd/yyyy", "etiqueta": "MM/DD/AAAA (01/15/2024)"},
+    "dd-mm-aaaa": {"python": "%d-%m-%Y", "m": "dd-MM-yyyy", "etiqueta": "DD-MM-AAAA (15-01-2024)"},
+}
+
+FORMATO_FECHA_POR_DEFECTO = "aaaa-mm-dd"
+
+
+def formato_fecha_python(clave: str) -> str:
+    """Devuelve el string de strftime de Python para la clave elegida (ver
+    FORMATOS_FECHA_DISPONIBLES). Si la clave no existe, cae al formato por
+    defecto en vez de fallar -- un valor de configuracion viejo/invalido no
+    debe romper la limpieza ni la exportacion."""
+    entrada = FORMATOS_FECHA_DISPONIBLES.get(clave, FORMATOS_FECHA_DISPONIBLES[FORMATO_FECHA_POR_DEFECTO])
+    return entrada["python"]
+
+
+def formato_fecha_m(clave: str) -> str:
+    """Igual que formato_fecha_python pero devuelve el formato equivalente
+    para Date.ToText en Power Query M."""
+    entrada = FORMATOS_FECHA_DISPONIBLES.get(clave, FORMATOS_FECHA_DISPONIBLES[FORMATO_FECHA_POR_DEFECTO])
+    return entrada["m"]
