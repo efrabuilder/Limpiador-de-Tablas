@@ -27,7 +27,7 @@ from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
-from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES
+from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES, FORMATOS_FECHA_DISPONIBLES, FORMATO_FECHA_POR_DEFECTO, formato_fecha_python, formato_fecha_m
 from data_cleaner.modelo_sql import (
     aplicar_modelo_sql, es_tabla_hecho, generar_script_crear_base_datos,
 )
@@ -39,7 +39,7 @@ OPCIONES_ACCION = {
     "atipico": ["limitar", "reemplazar_mediana", "reemplazar_media",
                 "editar_individualmente", "eliminar_fila", "marcar_solo"],
     "tipo_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
-    "fecha_invalida": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "fecha_invalida": ["eliminar_fila", "valor_fijo", "normalizar_formato_fecha", "editar_individualmente", "marcar_solo"],
     "email_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "telefono_invalido": ["editar_individualmente", "eliminar_fila", "valor_fijo", "marcar_solo"],
     "id_duplicado": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
@@ -47,6 +47,7 @@ OPCIONES_ACCION = {
     "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "estado_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "capitalizacion_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "espacio_extra": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
 }
 # "duplicado" (fila completa) queda fuera de "editar_individualmente": un
 # hallazgo de fila duplicada no tiene una sola columna/valor que editar (ver
@@ -66,6 +67,7 @@ NOMBRES_TIPO = {
     "texto_inconsistente": "Variantes de texto",
     "estado_invalido": "Estados no reconocidos",
     "capitalizacion_incorrecta": "Capitalización inconsistente",
+    "espacio_extra": "Texto con espacios de más al inicio/final",
 }
 
 # Nota: PAISES_TELEFONO_DISPONIBLES ahora vive en data_cleaner/patrones.py
@@ -151,9 +153,11 @@ class LimpiadorApp(tk.Tk):
         self.tablas_reporte = None
         self.config_aplicada: dict[str, str] = {}
         self.valores_fijos_aplicados: dict[str, object] = {}
+        self.formatos_fecha_aplicados: dict[str, str] = {}
 
         self.accion_vars: dict[str, tk.StringVar] = {}
         self.valor_fijo_vars: dict[str, tk.StringVar] = {}
+        self.formato_fecha_vars: dict[str, tk.StringVar] = {}
         # (tipo, columna, fila) -> valor corregido, para la accion
         # "editar_individualmente" (ver _abrir_editor_individual).
         self.correcciones_individuales: dict[tuple, object] = {}
@@ -961,6 +965,7 @@ class LimpiadorApp(tk.Tk):
             widget.destroy()
         self.accion_vars.clear()
         self.valor_fijo_vars.clear()
+        self.formato_fecha_vars.clear()
 
         if not self.resultado or not self.resultado.issues:
             ttk.Label(self.marco_tipos, text="No hay hallazgos que configurar.").pack(anchor="w")
@@ -1006,6 +1011,15 @@ class LimpiadorApp(tk.Tk):
                         marco, text="✏️ Editar valores...",
                         command=lambda tipo=tipo: self._abrir_editor_individual(tipo),
                     ).pack(side="left")
+                elif var.get() == "normalizar_formato_fecha":
+                    claves_formato = list(FORMATOS_FECHA_DISPONIBLES.keys())
+                    for col in cols:
+                        clave = f"{tipo}::{col}"
+                        v = tk.StringVar(value=FORMATO_FECHA_POR_DEFECTO)
+                        self.formato_fecha_vars[clave] = v
+                        ttk.Label(marco, text=f"{col} =").pack(side="left")
+                        ttk.Combobox(marco, textvariable=v, values=claves_formato,
+                                     width=11, state="readonly").pack(side="left", padx=(0, 6))
 
             var.trace_add("write", _actualizar_visibilidad)
             _actualizar_visibilidad()
@@ -1070,8 +1084,18 @@ class LimpiadorApp(tk.Tk):
 
         config = {tipo: var.get() for tipo, var in self.accion_vars.items()}
         valores_fijos: dict[str, str] = {}
+        formatos_fecha: dict[str, str] = {}
         faltan = []
         for tipo, accion in config.items():
+            if accion == "normalizar_formato_fecha":
+                columnas_afectadas = sorted({
+                    issue.columna for issue in self.resultado.issues
+                    if issue.tipo == tipo and issue.columna
+                })
+                for col in columnas_afectadas:
+                    v = self.formato_fecha_vars.get(f"{tipo}::{col}")
+                    formatos_fecha[col] = v.get() if v else FORMATO_FECHA_POR_DEFECTO
+                continue
             if accion != "valor_fijo":
                 continue
             columnas_afectadas = sorted({
@@ -1096,9 +1120,11 @@ class LimpiadorApp(tk.Tk):
         self.df_limpio, self.registro = limpiar(
             self.df, self.resultado.issues, config=config, valores_fijos=valores_fijos,
             correcciones_individuales=self.correcciones_individuales,
+            formatos_fecha=formatos_fecha,
         )
         self.config_aplicada = config
         self.valores_fijos_aplicados = valores_fijos
+        self.formatos_fecha_aplicados = formatos_fecha
         self.tablas_reporte = construir_reporte(
             self.resultado, self.registro,
             nombre_fuente=os.path.basename(self.ruta_actual or ""),
@@ -1308,12 +1334,24 @@ class LimpiadorApp(tk.Tk):
                 columnas_reales_por_tipo=columnas_reales_por_tipo,
             )
 
+        # generar_script_powerbi/universal/m y generar_editor_m_puro no
+        # conocen el catálogo de claves (patrones.FORMATOS_FECHA_DISPONIBLES);
+        # reciben directamente el formato ya resuelto (strftime de Python o
+        # Date.ToText de M, según el exportador).
+        formatos_fecha_python = {
+            col: formato_fecha_python(clave) for col, clave in self.formatos_fecha_aplicados.items()
+        }
+        formatos_fecha_m = {
+            col: formato_fecha_m(clave) for col, clave in self.formatos_fecha_aplicados.items()
+        }
+
         ttk.Button(
             ventana, text="Script para Power BI (.py)",
             command=lambda: self._guardar_script(
                 generar_script_powerbi(
                     self.config_aplicada, 1.5, self.valores_fijos_aplicados,
                     correcciones_individuales=self.correcciones_individuales,
+                    formatos_fecha=formatos_fecha_python,
                     **_kwargs_generico(),
                 ),
                 "limpiador_powerbi_generado.py", [("Python", "*.py")], ventana,
@@ -1326,6 +1364,7 @@ class LimpiadorApp(tk.Tk):
                 generar_editor_m(
                     self.config_aplicada, 1.5, self.valores_fijos_aplicados,
                     correcciones_individuales=self.correcciones_individuales,
+                    formatos_fecha=formatos_fecha_python,
                     **_kwargs_generico(),
                 ),
                 "editor_avanzado_powerbi_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
@@ -1338,6 +1377,7 @@ class LimpiadorApp(tk.Tk):
                 generar_script_universal(
                     self.config_aplicada, 1.5, self.valores_fijos_aplicados,
                     correcciones_individuales=self.correcciones_individuales,
+                    formatos_fecha=formatos_fecha_python,
                     **_kwargs_generico(),
                 ),
                 "limpiador_universal_generado.py", [("Python", "*.py")], ventana,
@@ -1448,6 +1488,7 @@ class LimpiadorApp(tk.Tk):
                     texto_inconsistente=self.config_aplicada.get("texto_inconsistente", "marcar_solo"),
                     estado_invalido=self.config_aplicada.get("estado_invalido", "marcar_solo"),
                     capitalizacion_incorrecta=self.config_aplicada.get("capitalizacion_incorrecta", "marcar_solo"),
+                    formatos_fecha=formatos_fecha_m,
                     **_kwargs_generico(),
                 ),
                 "codigo_m_puro_generado.m", [("M", "*.m"), ("Texto", "*.txt")], ventana,
