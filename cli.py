@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Limpiador de Tablas — CLI no interactiva (flags)
@@ -32,6 +31,7 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, exportar,
 )
+from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES
 
 app = typer.Typer(
     add_completion=False,
@@ -45,7 +45,7 @@ ACCIONES_DUPLICADO = ["eliminar_fila", "marcar_solo"]
 ACCIONES_ATIPICO = ["limitar", "reemplazar_mediana", "reemplazar_media",
                      "eliminar_fila", "marcar_solo"]
 ACCIONES_TIPO_INVALIDO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
-ACCIONES_FECHA = ["eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_FECHA = ["eliminar_fila", "valor_fijo", "normalizar_formato_fecha", "marcar_solo"]
 ACCIONES_EMAIL = ["eliminar_fila", "valor_fijo", "marcar_solo"]
 ACCIONES_TELEFONO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
 ACCIONES_ID_DUPLICADO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
@@ -53,6 +53,7 @@ ACCIONES_FORMULA = ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo
 ACCIONES_TEXTO = ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"]
 ACCIONES_ESTADO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
 ACCIONES_CAPITALIZACION = ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_ESPACIO_EXTRA = ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"]
 
 
 def _parsear_valores_fijos(pares: Optional[List[str]]) -> dict:
@@ -64,6 +65,26 @@ def _parsear_valores_fijos(pares: Optional[List[str]]) -> dict:
             raise typer.Exit(code=2)
         col, val = par.split("=", 1)
         resultado[col.strip()] = val.strip()
+    return resultado
+
+
+def _parsear_formatos_fecha(pares: Optional[List[str]]) -> dict:
+    """Convierte ['columna=clave', ...] en {'columna': 'clave', ...}, donde
+    'clave' debe ser una de patrones.FORMATOS_FECHA_DISPONIBLES (ver
+    --formato-fecha)."""
+    resultado = {}
+    claves_validas = ", ".join(FORMATOS_FECHA_DISPONIBLES.keys())
+    for par in pares or []:
+        if "=" not in par:
+            console.print(f"[red]--formato-fecha inválido: '{par}' (use columna=clave)[/red]")
+            raise typer.Exit(code=2)
+        col, clave = par.split("=", 1)
+        col, clave = col.strip(), clave.strip()
+        if clave not in FORMATOS_FECHA_DISPONIBLES:
+            console.print(f"[red]--formato-fecha inválido para '{col}': '{clave}'. "
+                           f"Válidas: {claves_validas}[/red]")
+            raise typer.Exit(code=2)
+        resultado[col] = clave
     return resultado
 
 
@@ -203,8 +224,16 @@ def limpiar_cmd(
                                          help=f"Acción para estados no reconocidos: {', '.join(ACCIONES_ESTADO)}."),
     capitalizacion_incorrecta: str = typer.Option(DEFAULT_CONFIG["capitalizacion_incorrecta"], "--capitalizacion-incorrecta",
                                                    help=f"Acción para capitalización inconsistente: {', '.join(ACCIONES_CAPITALIZACION)}."),
+    espacio_extra: str = typer.Option(DEFAULT_CONFIG["espacio_extra"], "--espacio-extra",
+                                       help=f"Acción para texto con espacios de más: {', '.join(ACCIONES_ESPACIO_EXTRA)}."),
     valor_fijo: List[str] = typer.Option(
         [], "--valor-fijo", help="Valor fijo por columna, formato columna=valor. Repetible."
+    ),
+    formato_fecha: List[str] = typer.Option(
+        [], "--formato-fecha",
+        help="Formato de fecha preferido por columna (solo si --fecha-invalida "
+             f"normalizar_formato_fecha), formato columna=clave. Claves válidas: "
+             f"{', '.join(FORMATOS_FECHA_DISPONIBLES.keys())}. Repetible.",
     ),
     formato_salida: str = typer.Option("excel", "--formato-salida", help="Formato del archivo limpio: csv | excel | sql."),
     salida_sql_conexion: Optional[str] = typer.Option(
@@ -263,13 +292,15 @@ def limpiar_cmd(
         "formula_incorrecta": ACCIONES_FORMULA, "texto_inconsistente": ACCIONES_TEXTO,
         "estado_invalido": ACCIONES_ESTADO,
         "capitalizacion_incorrecta": ACCIONES_CAPITALIZACION,
+        "espacio_extra": ACCIONES_ESPACIO_EXTRA,
     }
     config = {"faltante": faltante, "duplicado": duplicado,
               "atipico": atipico, "tipo_invalido": tipo_invalido,
               "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
               "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
               "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
-              "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta}
+              "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta,
+              "espacio_extra": espacio_extra}
     for tipo, accion in config.items():
         if accion not in acciones_validas[tipo]:
             console.print(f"[red]Acción inválida para {tipo}: '{accion}'. "
@@ -286,6 +317,7 @@ def limpiar_cmd(
         raise typer.Exit(code=2)
 
     valores_fijos = _parsear_valores_fijos(valor_fijo)
+    formatos_fecha = _parsear_formatos_fecha(formato_fecha)
 
     os.makedirs(outdir, exist_ok=True)
     if input:
@@ -328,7 +360,8 @@ def limpiar_cmd(
         console.print(f"[red]Falta --valor-fijo columna=valor para el/los tipo(s): {', '.join(faltan)}[/red]")
         raise typer.Exit(code=2)
 
-    df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos)
+    df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos,
+                                   formatos_fecha=formatos_fecha)
     tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=nombre_fuente)
 
     ruta_reporte = os.path.join(outdir, "reporte_calidad_datos.xlsx")
