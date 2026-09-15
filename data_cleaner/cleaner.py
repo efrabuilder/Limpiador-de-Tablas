@@ -28,12 +28,13 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 from typing import Dict, List
-from .analyzer import Issue, detectar_atipicos_iqr
+from .analyzer import Issue, detectar_atipicos_iqr, _es_valor_vacio
+from .patrones import formato_fecha_python, FORMATO_FECHA_POR_DEFECTO
 
 ACCIONES_VALIDAS = {
     "eliminar_fila", "reemplazar_media", "reemplazar_mediana",
     "reemplazar_moda", "limitar", "marcar_solo", "valor_fijo", "usar_sugerido",
-    "editar_individualmente",
+    "editar_individualmente", "normalizar_formato_fecha",
 }
 
 DEFAULT_CONFIG = {
@@ -49,6 +50,7 @@ DEFAULT_CONFIG = {
     "texto_inconsistente": "marcar_solo",
     "estado_invalido": "marcar_solo",
     "capitalizacion_incorrecta": "marcar_solo",
+    "espacio_extra": "usar_sugerido",
 }
 
 # Tipos nuevos para los que 'valor_fijo' reemplaza directamente el valor
@@ -56,10 +58,10 @@ DEFAULT_CONFIG = {
 _TIPOS_VALOR_FIJO_DIRECTO = {
     "fecha_invalida", "email_invalido", "telefono_invalido",
     "id_duplicado", "formula_incorrecta", "texto_inconsistente",
-    "estado_invalido", "capitalizacion_incorrecta",
+    "estado_invalido", "capitalizacion_incorrecta", "espacio_extra",
 }
 # Tipos para los que existe un valor_sugerido calculado por el analizador.
-_TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente", "capitalizacion_incorrecta"}
+_TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente", "capitalizacion_incorrecta", "espacio_extra"}
 # Tipos para los que 'editar_individualmente' tiene sentido: cada hallazgo
 # tiene una sola columna + un solo valor de celda que corregir uno por uno.
 # 'duplicado' queda afuera porque su Issue no trae columna/valor puntual
@@ -106,6 +108,27 @@ def _valor_reemplazo(df: pd.DataFrame, columna: str, accion: str, valor_fijo=Non
     return None
 
 
+def _normalizar_fechas_columna(serie: pd.Series, formato_python: str) -> pd.Series:
+    """Reescribe como texto, en `formato_python` (strftime), cada valor de
+    `serie` que se pueda interpretar como fecha -- así una columna que
+    mezcla '2024-01-15' con '20/02/2024' queda con un único formato
+    consistente. Las celdas vacías (ver _es_valor_vacio) y las que de
+    verdad no se puedan interpretar como fecha se dejan tal cual, para no
+    inventar una fecha donde no la hay."""
+    parseado = pd.to_datetime(serie, errors="coerce")
+    resultado = serie.astype(object).copy()
+    for idx, val in serie.items():
+        if _es_valor_vacio(val):
+            continue
+        fecha = parseado.loc[idx]
+        if pd.isna(fecha):
+            fecha = pd.to_datetime(val, errors="coerce", dayfirst=True)
+        if pd.isna(fecha):
+            continue
+        resultado.loc[idx] = fecha.strftime(formato_python)
+    return resultado
+
+
 def _buscar_valor_fijo(valores_fijos: Dict, tipo: str, columna: str):
     """Busca el valor fijo especifico para (tipo, columna). Si no esta ahi,
     cae al valor fijo generico por columna (compatibilidad con dicts viejos
@@ -117,7 +140,8 @@ def _buscar_valor_fijo(valores_fijos: Dict, tipo: str, columna: str):
 
 def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None,
             valores_fijos: Dict[str, object] = None,
-            correcciones_individuales: Dict[tuple, object] = None) -> tuple[pd.DataFrame, List[dict]]:
+            correcciones_individuales: Dict[tuple, object] = None,
+            formatos_fecha: Dict[str, str] = None) -> tuple[pd.DataFrame, List[dict]]:
     """
     Aplica las acciones configuradas por tipo de problema.
 
@@ -127,12 +151,23 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
     corregido. Los hallazgos de ese tipo que no tengan una entrada aquí
     quedan con su valor original (igual que 'marcar_solo').
 
+    `formatos_fecha` es para la acción 'normalizar_formato_fecha' del tipo
+    'fecha_invalida': dict columna -> clave de
+    patrones.FORMATOS_FECHA_DISPONIBLES (ej. {"fecha_venta": "dd/mm/aaaa"}).
+    Cuando esa acción está activa para una columna, TODA la columna se
+    reescribe con el formato elegido (no solo las celdas marcadas como
+    hallazgo), para que quede consistente de punta a punta -- una columna
+    que mezcla '2024-01-15' con '20/02/2024' termina con un único formato.
+    Las columnas sin entrada en `formatos_fecha` usan el formato por
+    defecto (patrones.FORMATO_FECHA_POR_DEFECTO).
+
     Devuelve (df_limpio, registro_acciones) donde registro_acciones es una
     lista de dicts lista para construir el reporte detallado.
     """
     config = {**DEFAULT_CONFIG, **(config or {})}
     valores_fijos = valores_fijos or {}
     correcciones_individuales = correcciones_individuales or {}
+    formatos_fecha = formatos_fecha or {}
     df_limpio = df.copy()
     registro = []
     filas_a_eliminar = set()
@@ -207,6 +242,26 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             "valor_nuevo": valor_nuevo,
             "detalle": issue.detalle,
         })
+
+    # 'normalizar_formato_fecha' no reemplaza celda por celda dentro del
+    # bucle de arriba (no es un valor fijo puntual): reescribe la columna
+    # de fecha COMPLETA en el formato elegido, incluyendo las celdas que
+    # no tenían hallazgo (para que el resultado quede consistente en toda
+    # la columna, no solo en las filas marcadas). Se hace aparte, al final,
+    # y luego se corrige el registro para que el reporte muestre el valor
+    # ya normalizado en vez del valor original sin tocar.
+    if config.get("fecha_invalida") == "normalizar_formato_fecha":
+        columnas_fecha_config = {
+            issue.columna for issue in issues
+            if issue.tipo == "fecha_invalida" and issue.columna and issue.columna in df_limpio.columns
+        }
+        for col in columnas_fecha_config:
+            clave_formato = formatos_fecha.get(col, FORMATO_FECHA_POR_DEFECTO)
+            df_limpio[col] = _normalizar_fechas_columna(df_limpio[col], formato_fecha_python(clave_formato))
+        for entry in registro:
+            if entry["tipo"] == "fecha_invalida" and entry["columna"] in columnas_fecha_config \
+                    and entry["fila"] in df_limpio.index:
+                entry["valor_nuevo"] = df_limpio.at[entry["fila"], entry["columna"]]
 
     # Las celdas con accion 'marcar_solo' no se modifican, así que sin una
     # marca explícita quedan indistinguibles del resto de la tabla. Se agrega
