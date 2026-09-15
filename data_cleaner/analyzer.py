@@ -402,10 +402,22 @@ def _separador_fecha(val) -> Optional[str]:
 def _formato_fecha_dominante(serie: pd.Series, parseado: pd.Series) -> tuple[Optional[str], set]:
     """Cuenta cuántas celdas (ya identificadas como fecha válida) usan cada
     separador ('-' o '/') y devuelve el más frecuente junto con el conjunto
-    de separadores realmente presentes en la columna."""
+    de separadores realmente presentes en la columna. Usa el mismo
+    reintento con dayfirst=True que el bucle principal de
+    detectar_fechas_invalidas(): si no, una fecha en formato dd/mm/aaaa que
+    solo parsea con dayfirst (ej. "20/02/2024", invalida como mm/dd/aaaa
+    porque el mes 20 no existe) quedaba excluida del conteo, y su
+    separador nunca se registraba como "presente" en la columna -- lo que
+    hacia que columna_con_formato_mixto diera falso incluso mezclando
+    '-' y '/' de verdad."""
     conteo = {"-": 0, "/": 0}
     for idx, val in serie.items():
-        if _es_valor_vacio(val) or pd.isna(parseado.loc[idx]):
+        if _es_valor_vacio(val):
+            continue
+        fecha = parseado.loc[idx]
+        if pd.isna(fecha):
+            fecha = pd.to_datetime(val, errors="coerce", dayfirst=True)
+        if pd.isna(fecha):
             continue
         sep = _separador_fecha(val)
         if sep is not None:
