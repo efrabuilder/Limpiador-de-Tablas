@@ -37,6 +37,7 @@ from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.loaders import load_excel, load_table, load_excel_hojas
 from data_cleaner.exporters import exportar_sql
 from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo, generar_script_crear_base_datos
+from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES, formato_fecha_python, formato_fecha_m
 
 app = FastAPI(
     title="Limpiador de Tablas API",
@@ -144,6 +145,30 @@ def _parsear_correcciones_individuales_json(texto: str) -> dict:
             )
         resultado[(item["tipo"], item["columna"], int(item["fila"]))] = item["valor"]
     return resultado
+
+
+def _parsear_formatos_fecha_json(texto: str) -> dict:
+    """Convierte el JSON {"columna": "clave", ...} recibido por HTTP al dict
+    que espera 'formatos_fecha' (solo aplica cuando fecha_invalida =
+    "normalizar_formato_fecha"). 'clave' debe ser una de
+    patrones.FORMATOS_FECHA_DISPONIBLES. Formato esperado:
+    {"fecha_venta": "dd/mm/aaaa"}."""
+    if not texto:
+        return {}
+    try:
+        obj = json.loads(texto)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="formatos_fecha debe ser un JSON válido.")
+    if not isinstance(obj, dict):
+        raise HTTPException(status_code=400, detail="formatos_fecha debe ser un JSON de objeto (columna: clave).")
+    claves_validas = ", ".join(FORMATOS_FECHA_DISPONIBLES.keys())
+    for col, clave in obj.items():
+        if clave not in FORMATOS_FECHA_DISPONIBLES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"formatos_fecha inválido para '{col}': '{clave}'. Válidas: {claves_validas}",
+            )
+    return obj
 
 
 @app.post("/analizar", response_model=AnalisisOut)
@@ -262,6 +287,7 @@ def limpiar_endpoint(
     id_duplicado: str = Form(DEFAULT_CONFIG["id_duplicado"]),
     formula_incorrecta: str = Form(DEFAULT_CONFIG["formula_incorrecta"]),
     texto_inconsistente: str = Form(DEFAULT_CONFIG["texto_inconsistente"]),
+    espacio_extra: str = Form(DEFAULT_CONFIG["espacio_extra"]),
     paises_telefono: str = Form(
         "", description='País(es) para el rango de dígitos de celular, coma-separados '
                          '(ej. "cr,mexico"). Vacío = rango internacional amplio (7-15 dígitos).'
@@ -272,6 +298,11 @@ def limpiar_endpoint(
     valores_fijos: str = Form(
         "{}", description='JSON con valores fijos por columna, ej: {"edad": "0"}'
     ),
+    formatos_fecha: str = Form(
+        "{}", description='Solo si fecha_invalida="normalizar_formato_fecha". JSON '
+                           'columna->clave de formato, ej: {"fecha_venta": "dd/mm/aaaa"}. '
+                           f'Claves válidas: {", ".join(FORMATOS_FECHA_DISPONIBLES.keys())}.'
+    ),
 ):
     df = _leer_upload(archivo)
     try:
@@ -280,6 +311,7 @@ def limpiar_endpoint(
             raise ValueError
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(status_code=400, detail="valores_fijos debe ser un JSON de objeto (columna: valor).")
+    formatos_fecha_dict = _parsear_formatos_fecha_json(formatos_fecha)
 
     config = {
         "faltante": faltante, "duplicado": duplicado,
@@ -287,6 +319,7 @@ def limpiar_endpoint(
         "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
         "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
         "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+        "espacio_extra": espacio_extra,
     }
 
     digitos_telefono = (
@@ -312,7 +345,8 @@ def limpiar_endpoint(
             detail=f"Falta valor fijo en 'valores_fijos' para el/los tipo(s): {', '.join(faltan)}",
         )
 
-    df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos_dict)
+    df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos_dict,
+                                   formatos_fecha=formatos_fecha_dict)
     tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=archivo.filename or "")
 
     resultado_id = str(uuid.uuid4())
@@ -343,11 +377,17 @@ def limpiar_sql_endpoint(
     id_duplicado: str = Form(DEFAULT_CONFIG["id_duplicado"]),
     formula_incorrecta: str = Form(DEFAULT_CONFIG["formula_incorrecta"]),
     texto_inconsistente: str = Form(DEFAULT_CONFIG["texto_inconsistente"]),
+    espacio_extra: str = Form(DEFAULT_CONFIG["espacio_extra"]),
     paises_telefono: str = Form(""),
     digitos_telefono_min: Optional[int] = Form(None),
     digitos_telefono_max: Optional[int] = Form(None),
     permitir_codigo_pais_telefono: bool = Form(True),
     valores_fijos: str = Form("{}"),
+    formatos_fecha: str = Form(
+        "{}", description='Solo si fecha_invalida="normalizar_formato_fecha". JSON '
+                           'columna->clave de formato, ej: {"fecha_venta": "dd/mm/aaaa"}. '
+                           f'Claves válidas: {", ".join(FORMATOS_FECHA_DISPONIBLES.keys())}.'
+    ),
 ):
     """Igual que /limpiar, pero leyendo la tabla de origen desde SQL en vez
     de un archivo subido. El resultado queda guardado bajo un id, igual que
@@ -366,6 +406,7 @@ def limpiar_sql_endpoint(
             raise ValueError
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(status_code=400, detail="valores_fijos debe ser un JSON de objeto (columna: valor).")
+    formatos_fecha_dict = _parsear_formatos_fecha_json(formatos_fecha)
 
     config = {
         "faltante": faltante, "duplicado": duplicado,
@@ -373,6 +414,7 @@ def limpiar_sql_endpoint(
         "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
         "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
         "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+        "espacio_extra": espacio_extra,
     }
     digitos_telefono = (
         (digitos_telefono_min, digitos_telefono_max)
@@ -397,7 +439,8 @@ def limpiar_sql_endpoint(
             detail=f"Falta valor fijo en 'valores_fijos' para el/los tipo(s): {', '.join(faltan)}",
         )
 
-    df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos_dict)
+    df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos_dict,
+                                   formatos_fecha=formatos_fecha_dict)
     tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=table_name or "consulta_sql")
 
     resultado_id = str(uuid.uuid4())
@@ -427,15 +470,21 @@ def exportar_script_endpoint(
     texto_inconsistente: str = Form(DEFAULT_CONFIG["texto_inconsistente"]),
     estado_invalido: str = Form(DEFAULT_CONFIG["estado_invalido"]),
     capitalizacion_incorrecta: str = Form(DEFAULT_CONFIG["capitalizacion_incorrecta"]),
+    espacio_extra: str = Form(DEFAULT_CONFIG["espacio_extra"]),
     factor_iqr: float = Form(1.5),
     valores_fijos: str = Form("{}", description='JSON con valores fijos por columna'),
     correcciones_individuales: str = Form(
         "[]", description='JSON: lista de objetos [{"tipo":..,"columna":..,"fila":..,"valor":..}] (opcional).'
     ),
+    formatos_fecha: str = Form(
+        "{}", description='Solo si fecha_invalida="normalizar_formato_fecha". JSON '
+                           'columna->clave de formato, ej: {"fecha_venta": "dd/mm/aaaa"}. '
+                           f'Claves válidas: {", ".join(FORMATOS_FECHA_DISPONIBLES.keys())}.'
+    ),
     nombre_paso_anterior: str = Form("TuPasoAnterior", description="Solo aplica a formato=m"),
 ):
     """Genera un script Python autocontenido (Power BI o universal) o el código M,
-    con la misma configuración de limpieza indicada (las 12 categorías), para
+    con la misma configuración de limpieza indicada (las 13 categorías), para
     usar en otras herramientas."""
     if formato not in ("powerbi", "universal", "m"):
         raise HTTPException(status_code=400, detail="formato debe ser 'powerbi', 'universal' o 'm'.")
@@ -447,6 +496,11 @@ def exportar_script_endpoint(
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(status_code=400, detail="valores_fijos debe ser un JSON de objeto (columna: valor).")
     correcciones_individuales_dict = _parsear_correcciones_individuales_json(correcciones_individuales)
+    formatos_fecha_dict = _parsear_formatos_fecha_json(formatos_fecha)
+    # generar_script_powerbi/universal/m no conocen el catálogo de claves
+    # (patrones.FORMATOS_FECHA_DISPONIBLES); reciben directamente el
+    # formato ya resuelto (strftime de Python).
+    formatos_fecha_python_dict = {c: formato_fecha_python(clave) for c, clave in formatos_fecha_dict.items()}
 
     config = {
         "faltante": faltante, "duplicado": duplicado,
@@ -455,22 +509,26 @@ def exportar_script_endpoint(
         "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
         "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
         "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta,
+        "espacio_extra": espacio_extra,
     }
 
     if formato == "powerbi":
         contenido = generar_script_powerbi(
             config, factor_iqr, valores_fijos_dict, correcciones_individuales=correcciones_individuales_dict,
+            formatos_fecha=formatos_fecha_python_dict,
         )
         nombre_archivo, media_type = "limpiador_powerbi_generado.py", "text/x-python"
     elif formato == "universal":
         contenido = generar_script_universal(
             config, factor_iqr, valores_fijos_dict, correcciones_individuales=correcciones_individuales_dict,
+            formatos_fecha=formatos_fecha_python_dict,
         )
         nombre_archivo, media_type = "limpiador_universal_generado.py", "text/x-python"
     else:
         contenido = generar_editor_m(
             config, factor_iqr, valores_fijos_dict, nombre_paso_anterior,
             correcciones_individuales=correcciones_individuales_dict,
+            formatos_fecha=formatos_fecha_python_dict,
         )
         nombre_archivo, media_type = "editor_avanzado_powerbi_generado.m", "text/plain"
 
@@ -511,6 +569,11 @@ def exportar_script_m_puro_endpoint(
     valores_fijos: str = Form("{}", description='JSON con valores fijos por columna'),
     correcciones_individuales: str = Form(
         "[]", description='JSON: lista de objetos [{"tipo":..,"columna":..,"fila":..,"valor":..}] (opcional).'
+    ),
+    formatos_fecha: str = Form(
+        "{}", description='Solo si fecha_invalida="normalizar_formato_fecha". JSON '
+                           'columna->clave de formato, ej: {"fecha_venta": "dd/mm/aaaa"}. '
+                           f'Claves válidas: {", ".join(FORMATOS_FECHA_DISPONIBLES.keys())}.'
     ),
     nombre_paso_anterior: str = Form("TuPasoAnterior"),
 ):
@@ -561,6 +624,7 @@ def exportar_script_m_puro_endpoint(
         estado_invalido=estado_invalido,
         capitalizacion_incorrecta=capitalizacion_incorrecta,
         correcciones_individuales=correcciones_individuales_dict,
+        formatos_fecha={c: formato_fecha_m(clave) for c, clave in _parsear_formatos_fecha_json(formatos_fecha).items()},
     )
 
     return StreamingResponse(
