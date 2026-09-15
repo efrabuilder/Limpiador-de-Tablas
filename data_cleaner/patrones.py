@@ -583,9 +583,32 @@ def detectar_columnas_fecha(df: pd.DataFrame, detector_contenido=None,
     """Igual que detectar_columnas(df, PATRONES_FECHA, ...) pero usando
     columnas_fecha_por_nombre() para el Nivel 1 (evita el falso positivo
     de "folio_pago"/"codigo_cobro" descrito ahi). El Nivel 2 (por
-    contenido) es identico al de detectar_columnas()."""
+    contenido) es identico al de detectar_columnas().
+
+    OJO con las palabras "debiles" (ver PATRONES_FECHA_DEBIL): un nombre
+    como "metodo_pago" contiene "pago" pero no es una columna de fecha
+    (sus valores son "Efectivo"/"Tarjeta"/...). Para evitar marcar TODA la
+    columna como "fecha_invalida" solo por el nombre, una coincidencia
+    "debil" unicamente se acepta si ademas el contenido real de esa
+    columna parece fecha (detector_contenido); las palabras "fuertes"
+    (fecha, date, dob...) siguen aceptandose solo por el nombre, sin
+    necesitar esa confirmacion.
+    """
     excluir = set(excluir or [])
-    por_nombre = [c for c in columnas_fecha_por_nombre(df) if c not in excluir]
+    fuertes = [c for c in df.columns if c not in excluir and coincide_patron(c, PATRONES_FECHA_FUERTE)]
+    debiles = [c for c in df.columns
+               if c not in excluir and c not in fuertes
+               and coincide_patron(c, PATRONES_FECHA_DEBIL) and not es_columna_id(c)]
+    if debiles and detector_contenido is not None:
+        debiles_confirmados = []
+        for c in debiles:
+            try:
+                if detector_contenido(df[c]):
+                    debiles_confirmados.append(c)
+            except Exception:
+                continue
+        debiles = debiles_confirmados
+    por_nombre = fuertes + debiles
     if por_nombre or detector_contenido is None:
         return por_nombre
     candidatas = []
