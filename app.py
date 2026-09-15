@@ -1067,6 +1067,7 @@ if st.session_state.get("df_limpio") is not None:
             config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados,
             correcciones_individuales=correcciones_individuales_aplicadas,
             formatos_fecha=formatos_fecha_python,
+            **kwargs_generico,
         )
         st.code(script_universal, language="python")
         st.download_button(
