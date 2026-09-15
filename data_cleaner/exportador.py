@@ -329,7 +329,17 @@ def _columnas_fecha_por_nombre(df):
 
 
 def _detectar_columnas_fecha(df, detector_contenido):
-    por_nombre = _columnas_fecha_por_nombre(df)
+    """Ver detectar_columnas_fecha() en data_cleaner/patrones.py. Las
+    coincidencias por nombre "debil" (ej. "pago" en "metodo_pago") se
+    confirman contra el contenido real antes de aceptarlas, para no marcar
+    una columna de texto (ej. "Efectivo"/"Tarjeta") entera como fecha
+    invalida solo porque su nombre contiene una palabra ambigua."""
+    fuertes = [c for c in df.columns if _coincide_patron_columna(c, _PATRONES_FECHA_FUERTE)]
+    debiles = [c for c in df.columns if c not in fuertes
+               and _coincide_patron_columna(c, _PATRONES_FECHA_DEBIL) and not _es_columna_id(c)]
+    if debiles:
+        debiles = [c for c in debiles if _intentar(lambda: detector_contenido(df[c]), False)]
+    por_nombre = fuertes + debiles
     if por_nombre:
         return por_nombre
     candidatas = []
@@ -342,6 +352,13 @@ def _detectar_columnas_fecha(df, detector_contenido):
         except Exception:
             continue
     return candidatas
+
+
+def _intentar(fn, valor_por_defecto):
+    try:
+        return fn()
+    except Exception:
+        return valor_por_defecto
 
 
 def _separador_fecha(val):
