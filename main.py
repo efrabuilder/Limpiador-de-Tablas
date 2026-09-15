@@ -20,6 +20,7 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, imprimir_resumen_consola, exportar,
 )
+from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES, FORMATO_FECHA_POR_DEFECTO
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_media", "reemplazar_mediana", "reemplazar_moda",
@@ -34,13 +35,15 @@ OPCIONES_ACCION = {
     # silencio y quedaban siempre en "marcar_solo" (el valor por defecto de
     # DEFAULT_CONFIG) sin que la persona pudiera elegir otra accion, a
     # diferencia de cli.py/app.py/desktop_app.py que si las exponen.
-    "fecha_invalida": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "fecha_invalida": ["eliminar_fila", "valor_fijo", "normalizar_formato_fecha", "marcar_solo"],
     "email_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
     "telefono_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
     "id_duplicado": ["eliminar_fila", "valor_fijo", "marcar_solo"],
     "formula_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
     "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
     "estado_invalido": ["eliminar_fila", "valor_fijo", "marcar_solo"],
+    "capitalizacion_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
+    "espacio_extra": ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"],
 }
 
 NOMBRES_TIPO = {
@@ -55,6 +58,8 @@ NOMBRES_TIPO = {
     "formula_incorrecta": "Total ≠ Cantidad × Precio",
     "texto_inconsistente": "Variantes/errores de tipeo de texto",
     "estado_invalido": "Estados/valores de estado no reconocidos",
+    "capitalizacion_incorrecta": "Nombres/lugares con capitalización inconsistente",
+    "espacio_extra": "Texto con espacios de más al inicio/final",
 }
 
 
@@ -98,9 +103,10 @@ def cargar_interactivo() -> tuple[pd.DataFrame, str]:
         return df, f"{conn} [{modo}]"
 
 
-def elegir_config_interactiva(resultado) -> tuple[dict, dict]:
+def elegir_config_interactiva(resultado) -> tuple[dict, dict, dict]:
     config = {}
     valores_fijos = {}
+    formatos_fecha = {}
     resumen = resultado.por_tipo()
     print("\n--- Configuración de acciones por tipo de problema ---")
     for tipo, cantidad in resumen.items():
@@ -125,7 +131,21 @@ def elegir_config_interactiva(resultado) -> tuple[dict, dict]:
                 valor = preguntar(f"  Valor fijo de reemplazo para la columna '{col}':")
                 valores_fijos[col] = valor
 
-    return config, valores_fijos
+        elif accion == "normalizar_formato_fecha":
+            columnas_afectadas = sorted({
+                issue.columna for issue in resultado.issues
+                if issue.tipo == tipo and issue.columna
+            })
+            claves_formato = list(FORMATOS_FECHA_DISPONIBLES.keys())
+            for col in columnas_afectadas:
+                clave = preguntar(
+                    f"  Formato de fecha preferido para la columna '{col}':",
+                    claves_formato,
+                    defecto=FORMATO_FECHA_POR_DEFECTO,
+                )
+                formatos_fecha[col] = clave
+
+    return config, valores_fijos, formatos_fecha
 
 
 def main():
@@ -167,10 +187,12 @@ def main():
         return
 
     valores_fijos = {}
+    formatos_fecha = {}
     if not args.demo:
-        config, valores_fijos = elegir_config_interactiva(resultado)
+        config, valores_fijos, formatos_fecha = elegir_config_interactiva(resultado)
 
-    df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos)
+    df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos,
+                                   formatos_fecha=formatos_fecha)
 
     tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=nombre_fuente)
 
