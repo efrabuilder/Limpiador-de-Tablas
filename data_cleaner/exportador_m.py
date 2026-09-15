@@ -82,7 +82,7 @@ ACCIONES_SOPORTADAS_M = {
     "duplicado": {"eliminar_fila", "marcar_solo"},
     "atipico": {"limitar", "reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "tipo_invalido": {"marcar_solo", "valor_fijo", "eliminar_fila", "editar_individualmente"},
-    "fecha_invalida": {"valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
+    "fecha_invalida": {"valor_fijo", "marcar_solo", "normalizar_formato_fecha", "eliminar_fila", "editar_individualmente"},
     "email_invalido": {"valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "telefono_invalido": {"valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "id_duplicado": {"marcar_solo", "eliminar_fila", "editar_individualmente"},
@@ -590,6 +590,7 @@ def generar_editor_m_puro(
     columnas_fecha: Optional[List[str]] = None,
     fecha_min: Optional[str] = None,
     fecha_max: Optional[str] = None,
+    formatos_fecha: Optional[Dict[str, str]] = None,
     columnas_email: Optional[List[str]] = None,
     columnas_telefono: Optional[List[str]] = None,
     digitos_telefono: Optional[Tuple[int, int]] = None,
@@ -662,6 +663,7 @@ def generar_editor_m_puro(
     cfg_basico = {"faltante": "reemplazar_mediana", "duplicado": "eliminar_fila",
                   "atipico": "limitar", "tipo_invalido": "marcar_solo", **(config or {})}
     valores_fijos = valores_fijos or {}
+    formatos_fecha = formatos_fecha or {}
     comentarios: List[str] = []
 
     a_faltante = _accion_o_fallback("faltante", cfg_basico["faltante"], comentarios)
@@ -867,7 +869,7 @@ def generar_editor_m_puro(
             f'in if _v = null then null'
             + (f' else if (false{rango_check}) then null else _v' if rango_check else ' else _v')
         )
-        if a_fecha in ("valor_fijo", "marcar_solo"):
+        if a_fecha in ("valor_fijo", "marcar_solo", "normalizar_formato_fecha"):
             cb.agregar(f"FechaCorregida_{re.sub(r'[^A-Za-z0-9]', '', col)}",
                        "Table.TransformColumns({prev}, {{" + _m_str(col) + f", {cuerpo_parse}, type nullable date}}}})")
             if a_fecha == "marcar_solo":
@@ -882,10 +884,11 @@ def generar_editor_m_puro(
         # bloque generico de texto (6b) porque el relleno debe pasar por un
         # #date(...) en vez de un simple string. OJO: esto solo es seguro si
         # la columna ya quedo convertida a tipo fecha en el paso 4a de arriba
-        # (a_fecha en valor_fijo/marcar_solo); si "fecha_invalida" usa otra
-        # accion, la columna sigue en su tipo original y forzar un #date(...)
-        # ahi genera un choque de tipos en Power Query.
-        columna_ya_es_fecha = a_fecha in ("valor_fijo", "marcar_solo")
+        # (a_fecha en valor_fijo/marcar_solo/normalizar_formato_fecha); si
+        # "fecha_invalida" usa otra accion, la columna sigue en su tipo
+        # original y forzar un #date(...) ahi genera un choque de tipos en
+        # Power Query.
+        columna_ya_es_fecha = a_fecha in ("valor_fijo", "marcar_solo", "normalizar_formato_fecha")
         nombre_col_id_fecha = re.sub(r'[^A-Za-z0-9]', '', col)
         if not columna_ya_es_fecha and a_faltante in ("valor_fijo", "reemplazar_moda"):
             comentarios.append(
@@ -927,6 +930,19 @@ def generar_editor_m_puro(
                 f'pero el codigo M puro no agrega columnas nuevas (ni Revisar_Faltante_{col}); '
                 f'no se genero ningun paso para esta columna.'
             )
+
+        # 4c) Normalizar formato de fecha: una vez que la columna ya quedo
+        # convertida a "type nullable date" (paso 4a) y con sus faltantes
+        # resueltos (4b), se reescribe como texto en el formato que el
+        # usuario eligio (ver patrones.FORMATOS_FECHA_DISPONIBLES) -- asi
+        # una columna que mezclaba "2024-01-15" con "20/02/2024" termina
+        # con un unico formato consistente en toda la columna.
+        if a_fecha == "normalizar_formato_fecha":
+            formato_m_col = formatos_fecha.get(col, "yyyy-MM-dd")
+            cb.agregar(f"FormatoFecha_{nombre_col_id_fecha}",
+                       "Table.TransformColumns({prev}, {{" + _m_str(col) +
+                       ", each if _ = null then null else Date.ToText(_, " +
+                       _m_str(formato_m_col) + "), type text}})")
 
     # -- 5) ID duplicado --------------------------------------------------------
     for col in cols_id:
