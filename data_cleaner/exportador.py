@@ -383,12 +383,18 @@ def _detectar_fechas_invalidas(df):
         parseado = pd.to_datetime(serie, errors="coerce")
 
         # Separador dominante ('-' o '/'), calculado solo sobre celdas que
-        # ya son fecha valida. Si la columna mezcla ambos separadores, cada
-        # celda que no use el dominante se marca como hallazgo (formato
-        # inconsistente), aunque sea una fecha valida por si sola.
+        # ya son fecha valida (con el mismo reintento dayfirst que el bucle
+        # de abajo -- si no, una fecha "20/02/2024" que solo parsea con
+        # dayfirst quedaba fuera del conteo y su separador nunca se
+        # registraba como "presente").
         conteo_sep = {"-": 0, "/": 0}
         for idx, val in serie.items():
-            if pd.isna(val) or (isinstance(val, str) and val.strip() == "") or pd.isna(parseado.loc[idx]):
+            if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
+                continue
+            fecha_conteo = parseado.loc[idx]
+            if pd.isna(fecha_conteo):
+                fecha_conteo = pd.to_datetime(val, errors="coerce", dayfirst=True)
+            if pd.isna(fecha_conteo):
                 continue
             sep = _separador_fecha(val)
             if sep is not None:
