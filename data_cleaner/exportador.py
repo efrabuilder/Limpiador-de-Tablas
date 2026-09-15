@@ -33,6 +33,7 @@ DEFAULT_CONFIG_EXPORT = {
     "texto_inconsistente": "marcar_solo",
     "estado_invalido": "marcar_solo",
     "capitalizacion_incorrecta": "marcar_solo",
+    "espacio_extra": "usar_sugerido",
 }
 
 # -----------------------------------------------------------------------------
@@ -343,6 +344,19 @@ def _detectar_columnas_fecha(df, detector_contenido):
     return candidatas
 
 
+def _separador_fecha(val):
+    if val is None:
+        return None
+    texto = str(val)
+    tiene_guion = "-" in texto
+    tiene_diagonal = "/" in texto
+    if tiene_guion and not tiene_diagonal:
+        return "-"
+    if tiene_diagonal and not tiene_guion:
+        return "/"
+    return None
+
+
 def _detectar_fechas_invalidas(df):
     hallazgos = []
     cols_fecha = COLUMNAS_FORZADAS_FECHA if COLUMNAS_FORZADAS_FECHA is not None \\
@@ -350,8 +364,24 @@ def _detectar_fechas_invalidas(df):
     for col in cols_fecha:
         serie = df[col]
         parseado = pd.to_datetime(serie, errors="coerce")
+
+        # Separador dominante ('-' o '/'), calculado solo sobre celdas que
+        # ya son fecha valida. Si la columna mezcla ambos separadores, cada
+        # celda que no use el dominante se marca como hallazgo (formato
+        # inconsistente), aunque sea una fecha valida por si sola.
+        conteo_sep = {"-": 0, "/": 0}
         for idx, val in serie.items():
-            if pd.isna(val):
+            if pd.isna(val) or (isinstance(val, str) and val.strip() == "") or pd.isna(parseado.loc[idx]):
+                continue
+            sep = _separador_fecha(val)
+            if sep is not None:
+                conteo_sep[sep] += 1
+        presentes = {s for s, n in conteo_sep.items() if n > 0}
+        dominante = max(presentes, key=lambda s: conteo_sep[s]) if presentes else None
+        formato_mixto = len(presentes) > 1
+
+        for idx, val in serie.items():
+            if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
                 continue
             fecha = parseado.loc[idx]
             if pd.isna(fecha):
@@ -359,6 +389,16 @@ def _detectar_fechas_invalidas(df):
             if pd.isna(fecha):
                 hallazgos.append({"tipo": "fecha_invalida", "columna": col, "fila": int(idx),
                                    "valor_original": val, "detalle": "Formato de fecha no reconocido"})
+                continue
+            if formato_mixto:
+                sep_val = _separador_fecha(val)
+                if sep_val is not None and sep_val != dominante:
+                    hallazgos.append({
+                        "tipo": "fecha_invalida", "columna": col, "fila": int(idx),
+                        "valor_original": val,
+                        "detalle": f"Formato de fecha inconsistente: usa separador '{sep_val}', "
+                                   f"pero el resto de la columna usa '{dominante}'"
+                    })
     return hallazgos
 
 
@@ -368,7 +408,7 @@ def _detectar_emails_invalidos(df):
         else _detectar_columnas_combinado(df, _PATRONES_EMAIL, _parece_email_col)
     for col in cols_email:
         for idx, val in df[col].items():
-            if pd.isna(val):
+            if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
                 continue
             if not _REGEX_EMAIL.match(str(val).strip()):
                 hallazgos.append({"tipo": "email_invalido", "columna": col, "fila": int(idx),
@@ -389,7 +429,7 @@ def _detectar_telefonos_invalidos(df, min_digitos=7, max_digitos=15, permitir_co
                                            excluir_por_nombre=_PATRONES_NO_TELEFONO)
     for col in cols_telefono:
         for idx, val in df[col].items():
-            if pd.isna(val):
+            if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
                 continue
             texto = str(val).strip()
             solo_digitos = re.sub(r"\\D", "", texto)
@@ -411,12 +451,30 @@ def _detectar_estados_invalidos(df, valores_validos=None):
         else _columnas_por_patron(df, _PATRONES_ESTADO)
     for col in cols_estado:
         for idx, val in df[col].items():
-            if pd.isna(val):
+            if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
                 continue
             if not _es_valor_estado_valido(val, valores_validos):
                 hallazgos.append({"tipo": "estado_invalido", "columna": col, "fila": int(idx),
                                    "valor_original": val,
                                    "detalle": f"Valor de estado no reconocido (validos: {', '.join(valores_validos or _VALORES_ESTADO_VALIDOS)})"})
+    return hallazgos
+
+
+def _detectar_espacios_extra(df):
+    hallazgos = []
+    cols = [c for c in df.columns
+            if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c])]
+    for col in cols:
+        for idx, val in df[col].items():
+            if not isinstance(val, str):
+                continue
+            recortado = val.strip()
+            if recortado == "" or recortado == val:
+                continue
+            hallazgos.append({"tipo": "espacio_extra", "columna": col, "fila": int(idx),
+                               "valor_original": val,
+                               "detalle": "Texto con espacios en blanco de mas al inicio o al final",
+                               "valor_sugerido": recortado})
     return hallazgos
 
 
@@ -431,7 +489,8 @@ def _detectar_capitalizacion_incorrecta(df):
             if pd.isna(val) or str(val).strip() == "":
                 continue
             if not _es_capitalizacion_correcta(val):
-                sugerido = _capitalizar_nombre_propio(val)
+                texto_para_sugerir = val.strip() if isinstance(val, str) else val
+                sugerido = _capitalizar_nombre_propio(texto_para_sugerir)
                 hallazgos.append({"tipo": "capitalizacion_incorrecta", "columna": col, "fila": int(idx),
                                    "valor_original": val,
                                    "detalle": f"Capitalizacion inconsistente (sugerido: '{sugerido}')",
@@ -562,9 +621,14 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
     hallazgos = []
 
     for col in df.columns:
-        for idx in df[df[col].isna()].index:
-            hallazgos.append({"tipo": "faltante", "columna": col, "fila": int(idx),
-                               "valor_original": None, "detalle": "Valor vacio/nulo"})
+        for idx, val in df[col].items():
+            if pd.isna(val):
+                hallazgos.append({"tipo": "faltante", "columna": col, "fila": int(idx),
+                                   "valor_original": None, "detalle": "Valor vacio/nulo"})
+            elif isinstance(val, str) and val.strip() == "":
+                hallazgos.append({"tipo": "faltante", "columna": col, "fila": int(idx),
+                                   "valor_original": val,
+                                   "detalle": "Valor vacio (celda en blanco o solo con espacios)"})
 
     mask_dup = df.duplicated(keep="first")
     for idx in df[mask_dup].index:
@@ -580,11 +644,13 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
         es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
         if es_texto and _columna_numerica_potencial(serie):
             convertidos = pd.to_numeric(serie, errors="coerce")
-            malos = serie[(convertidos.isna()) & (serie.notna())]
+            no_es_blanco = ~serie.map(lambda v: isinstance(v, str) and v.strip() == "")
+            malos = serie[(convertidos.isna()) & (serie.notna()) & no_es_blanco]
             for idx, val in malos.items():
                 hallazgos.append({"tipo": "tipo_invalido", "columna": col, "fila": int(idx),
                                    "valor_original": val, "detalle": "Se esperaba un valor numerico"})
 
+    hallazgos += _detectar_espacios_extra(df)
     hallazgos += _detectar_fechas_invalidas(df)
     hallazgos += _detectar_emails_invalidos(df)
     hallazgos += _detectar_telefonos_invalidos(df)
@@ -608,6 +674,27 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
                                "detalle": f"Fuera de rango [{lim_inf:.2f}, {lim_sup:.2f}] (IQR)"})
 
     return hallazgos
+
+
+def _normalizar_fechas_columna(serie, formato_python):
+    """Reescribe como texto, en 'formato_python' (strftime), cada valor de
+    'serie' que se pueda interpretar como fecha -- asi una columna que
+    mezcla '2024-01-15' con '20/02/2024' queda con un unico formato
+    consistente. Las celdas vacias y las que de verdad no se puedan
+    interpretar como fecha se dejan tal cual, para no inventar una fecha
+    donde no la hay."""
+    parseado = pd.to_datetime(serie, errors="coerce")
+    resultado = serie.astype(object).copy()
+    for idx, val in serie.items():
+        if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
+            continue
+        fecha = parseado.loc[idx]
+        if pd.isna(fecha):
+            fecha = pd.to_datetime(val, errors="coerce", dayfirst=True)
+        if pd.isna(fecha):
+            continue
+        resultado.loc[idx] = fecha.strftime(formato_python)
+    return resultado
 
 
 def _asignar(df, fila, columna, valor):
@@ -653,9 +740,9 @@ def _buscar_valor_fijo(valores_fijos, tipo, columna):
 _TIPOS_VALOR_FIJO_DIRECTO = {
     "fecha_invalida", "email_invalido", "telefono_invalido",
     "id_duplicado", "formula_incorrecta", "texto_inconsistente",
-    "estado_invalido", "capitalizacion_incorrecta",
+    "estado_invalido", "capitalizacion_incorrecta", "espacio_extra",
 }
-_TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente", "capitalizacion_incorrecta"}
+_TIPOS_CON_SUGERENCIA = {"formula_incorrecta", "texto_inconsistente", "capitalizacion_incorrecta", "espacio_extra"}
 # Tipos para los que "editar_individualmente" tiene sentido (mismo criterio
 # que data_cleaner/cleaner.py): "duplicado" queda afuera porque su hallazgo
 # no tiene una sola columna/valor que editar (columna=None, fila completa).
@@ -667,14 +754,17 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
                    telefono_invalido="marcar_solo", id_duplicado="marcar_solo",
                    formula_incorrecta="marcar_solo", texto_inconsistente="marcar_solo",
                    estado_invalido="marcar_solo", capitalizacion_incorrecta="marcar_solo",
-                   correcciones_individuales=None):
+                   espacio_extra="usar_sugerido",
+                   correcciones_individuales=None, formatos_fecha=None):
     config = {"faltante": faltante, "duplicado": duplicado,
               "atipico": atipico, "tipo_invalido": tipo_invalido,
               "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
               "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
               "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
-              "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta}
+              "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta,
+              "espacio_extra": espacio_extra}
     correcciones_individuales = correcciones_individuales or {}
+    formatos_fecha = formatos_fecha or {}
 
     df_limpio = df.copy()
     hallazgos = _detectar_hallazgos(df, factor_iqr=factor_iqr)
@@ -741,6 +831,20 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             "detalle": h["detalle"],
         })
 
+    if config.get("fecha_invalida") == "normalizar_formato_fecha":
+        columnas_fecha_cfg = {
+            h["columna"] for h in hallazgos
+            if h["tipo"] == "fecha_invalida" and h["columna"] and h["columna"] in df_limpio.columns
+        }
+        for col in columnas_fecha_cfg:
+            formato_python = formatos_fecha.get(col, "%Y-%m-%d")
+            df_limpio[col] = _normalizar_fechas_columna(df_limpio[col], formato_python)
+        for r in registro:
+            if r["tipo"] == "fecha_invalida" and r["columna"] in columnas_fecha_cfg:
+                fila_r = r["fila"]
+                if fila_r in df_limpio.index:
+                    r["valor_nuevo"] = str(df_limpio.at[fila_r, r["columna"]])
+
     marcas = {}
     for r in registro:
         sin_corregir = (
@@ -752,7 +856,6 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             continue
         etiqueta = r["tipo"] if r["columna"] == "(fila completa)" else f"{r['tipo']}:{r['columna']}"
         marcas.setdefault(r["fila"], []).append(etiqueta)
-
     if marcas:
         col_marca = "_revisar_calidad"
         while col_marca in df_limpio.columns:
@@ -773,10 +876,12 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
 
 
 def _bloque_config(config: Dict[str, str], factor_iqr: float, valores_fijos: Optional[dict],
-                    correcciones_individuales: Optional[dict] = None) -> str:
+                    correcciones_individuales: Optional[dict] = None,
+                    formatos_fecha: Optional[dict] = None) -> str:
     cfg = {**DEFAULT_CONFIG_EXPORT, **(config or {})}
     valores_fijos = valores_fijos or {}
     correcciones_individuales = correcciones_individuales or {}
+    formatos_fecha = formatos_fecha or {}
     return (
         f"ACCION_FALTANTE = {cfg['faltante']!r}\n"
         f"ACCION_DUPLICADO = {cfg['duplicado']!r}\n"
@@ -790,9 +895,11 @@ def _bloque_config(config: Dict[str, str], factor_iqr: float, valores_fijos: Opt
         f"ACCION_TEXTO_INCONSISTENTE = {cfg['texto_inconsistente']!r}\n"
         f"ACCION_ESTADO_INVALIDO = {cfg['estado_invalido']!r}\n"
         f"ACCION_CAPITALIZACION_INCORRECTA = {cfg['capitalizacion_incorrecta']!r}\n"
+        f"ACCION_ESPACIO_EXTRA = {cfg['espacio_extra']!r}\n"
         f"FACTOR_IQR = {factor_iqr!r}\n"
         f"VALORES_FIJOS = {valores_fijos!r}\n"
         f"CORRECCIONES_INDIVIDUALES = {correcciones_individuales!r}\n"
+        f"FORMATOS_FECHA = {formatos_fecha!r}\n"
     )
 
 
@@ -859,7 +966,8 @@ def generar_script_powerbi(config: Dict[str, str], factor_iqr: float = 1.5,
                             valores_fijos: Optional[dict] = None,
                             correcciones_individuales: Optional[dict] = None,
                             incluir_generico: bool = True,
-                            columnas_reales_por_tipo: Optional[dict] = None) -> str:
+                            columnas_reales_por_tipo: Optional[dict] = None,
+                            formatos_fecha: Optional[dict] = None) -> str:
     """Script Python autocontenido para pegar en Power Query (Transformar -> Ejecutar script de Python)."""
     cabecera = '''# -*- coding: utf-8 -*-
 # =============================================================================
@@ -894,10 +1002,10 @@ dataset_limpio, reporte_limpieza = limpiar_tabla(
     fecha_invalida=ACCION_FECHA_INVALIDA, email_invalido=ACCION_EMAIL_INVALIDO,
     telefono_invalido=ACCION_TELEFONO_INVALIDO, id_duplicado=ACCION_ID_DUPLICADO,
     formula_incorrecta=ACCION_FORMULA_INCORRECTA, texto_inconsistente=ACCION_TEXTO_INCONSISTENTE,
-    estado_invalido=ACCION_ESTADO_INVALIDO, capitalizacion_incorrecta=ACCION_CAPITALIZACION_INCORRECTA,\n    correcciones_individuales=CORRECCIONES_INDIVIDUALES,
+    estado_invalido=ACCION_ESTADO_INVALIDO, capitalizacion_incorrecta=ACCION_CAPITALIZACION_INCORRECTA,\n    espacio_extra=ACCION_ESPACIO_EXTRA,\n    correcciones_individuales=CORRECCIONES_INDIVIDUALES,\n    formatos_fecha=FORMATOS_FECHA,
 )
 '''
-    return cabecera + _bloque_config(config, factor_iqr, valores_fijos, correcciones_individuales) \
+    return cabecera + _bloque_config(config, factor_iqr, valores_fijos, correcciones_individuales, formatos_fecha) \
         + _bloque_columnas_forzadas(incluir_generico, columnas_reales_por_tipo) \
         + "\n\n" + _NUCLEO_LOGICA + pie
 
@@ -906,7 +1014,8 @@ def generar_script_universal(config: Dict[str, str], factor_iqr: float = 1.5,
                               valores_fijos: Optional[dict] = None,
                               correcciones_individuales: Optional[dict] = None,
                               incluir_generico: bool = True,
-                              columnas_reales_por_tipo: Optional[dict] = None) -> str:
+                              columnas_reales_por_tipo: Optional[dict] = None,
+                              formatos_fecha: Optional[dict] = None) -> str:
     """Script autocontenido para usar como libreria (Tableau Prep/TabPy, Alteryx, Qlik,
     notebooks) o como script de linea de comandos, con la misma configuracion elegida
     en la interfaz ya puesta como valor por defecto."""
@@ -954,7 +1063,7 @@ def _main_cli():
         fecha_invalida=ACCION_FECHA_INVALIDA, email_invalido=ACCION_EMAIL_INVALIDO,
         telefono_invalido=ACCION_TELEFONO_INVALIDO, id_duplicado=ACCION_ID_DUPLICADO,
         formula_incorrecta=ACCION_FORMULA_INCORRECTA, texto_inconsistente=ACCION_TEXTO_INCONSISTENTE,
-        estado_invalido=ACCION_ESTADO_INVALIDO, capitalizacion_incorrecta=ACCION_CAPITALIZACION_INCORRECTA,\n    correcciones_individuales=CORRECCIONES_INDIVIDUALES,
+        estado_invalido=ACCION_ESTADO_INVALIDO, capitalizacion_incorrecta=ACCION_CAPITALIZACION_INCORRECTA,\n    espacio_extra=ACCION_ESPACIO_EXTRA,\n    correcciones_individuales=CORRECCIONES_INDIVIDUALES,\n    formatos_fecha=FORMATOS_FECHA,
     )
 
     base, _ext = os.path.splitext(os.path.basename(ruta))
@@ -973,7 +1082,7 @@ def _main_cli():
 if __name__ == "__main__":
     _main_cli()
 '''
-    return cabecera + _bloque_config(config, factor_iqr, valores_fijos, correcciones_individuales) \
+    return cabecera + _bloque_config(config, factor_iqr, valores_fijos, correcciones_individuales, formatos_fecha) \
         + _bloque_columnas_forzadas(incluir_generico, columnas_reales_por_tipo) \
         + "\n\n" + _NUCLEO_LOGICA + pie
 
@@ -1003,11 +1112,13 @@ def generar_editor_m(config: Dict[str, str], factor_iqr: float = 1.5,
                       nombre_paso_anterior: str = "TuPasoAnterior",
                       correcciones_individuales: Optional[dict] = None,
                       incluir_generico: bool = True,
-                      columnas_reales_por_tipo: Optional[dict] = None) -> str:
+                      columnas_reales_por_tipo: Optional[dict] = None,
+                      formatos_fecha: Optional[dict] = None) -> str:
     """Codigo M listo para pegar en el Editor avanzado de Power Query."""
     script_python = generar_script_powerbi(config, factor_iqr, valores_fijos, correcciones_individuales,
                                             incluir_generico=incluir_generico,
-                                            columnas_reales_por_tipo=columnas_reales_por_tipo)
+                                            columnas_reales_por_tipo=columnas_reales_por_tipo,
+                                            formatos_fecha=formatos_fecha)
     script_m = _escapar_m(script_python)
     referencia_paso_anterior = _referencia_m(nombre_paso_anterior)
     return f'''// =============================================================================
