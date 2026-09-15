@@ -41,7 +41,7 @@ class Issue:
     tipo: str            # 'faltante' | 'duplicado' | 'atipico' | 'tipo_invalido' |
                           # 'fecha_invalida' | 'email_invalido' | 'telefono_invalido' |
                           # 'id_duplicado' | 'formula_incorrecta' | 'texto_inconsistente' |
-                          # 'estado_invalido' | 'capitalizacion_incorrecta'
+                          # 'estado_invalido' | 'capitalizacion_incorrecta' | 'espacio_extra'
     columna: Optional[str]
     fila: int             # índice original del DataFrame (0-based)
     valor_original: Any
@@ -76,12 +76,43 @@ def _es_columna_numerica_potencial(serie: pd.Series) -> bool:
     return convertibles.notna().mean() > 0.7 if len(serie.dropna()) else False
 
 
+def _es_valor_vacio(val) -> bool:
+    """True si `val` es NaN/None, o es una celda de texto vacía o que solo
+    contiene espacios en blanco. Estas celdas "se ven vacías" para el
+    usuario aunque pandas no las marque como nulas con isna() (una cadena
+    no vacía, aunque sea solo espacios, no es NaN). Sin este chequeo,
+    quedaban fuera de detectar_faltantes() -- así que ninguna corrección
+    configurada para "faltante" (valor fijo, mediana, etc.) se les
+    aplicaba, dejándolas con el espacio en blanco intacto -- y en cambio
+    colaban en otras detecciones (tipo_invalido, fecha_invalida,
+    email_invalido...) como si fueran un dato corrupto en vez de un campo
+    simplemente vacío."""
+    if pd.isna(val):
+        return True
+    return isinstance(val, str) and val.strip() == ""
+
+
+def _serie_no_vacios(serie: pd.Series) -> pd.Series:
+    """Como serie.dropna(), pero además excluye celdas de texto vacías o
+    que solo contienen espacios en blanco (ver _es_valor_vacio)."""
+    no_nulos = serie.dropna()
+    if no_nulos.empty:
+        return no_nulos
+    es_blanco = no_nulos.map(lambda v: isinstance(v, str) and v.strip() == "")
+    return no_nulos[~es_blanco]
+
+
 def detectar_faltantes(df: pd.DataFrame) -> List[Issue]:
+    """Detecta valores vacíos/nulos, incluyendo celdas de texto que solo
+    contienen espacios en blanco (o texto vacío) -- ver _es_valor_vacio."""
     issues = []
     for col in df.columns:
-        nulos = df[df[col].isna()]
-        for idx in nulos.index:
-            issues.append(Issue("faltante", col, int(idx), None, "Valor vacío/nulo"))
+        for idx, val in df[col].items():
+            if pd.isna(val):
+                issues.append(Issue("faltante", col, int(idx), None, "Valor vacío/nulo"))
+            elif isinstance(val, str) and val.strip() == "":
+                issues.append(Issue("faltante", col, int(idx), val,
+                                     "Valor vacío (celda en blanco o solo con espacios)"))
     return issues
 
 
@@ -113,7 +144,12 @@ def detectar_tipo_invalido(df: pd.DataFrame) -> List[Issue]:
         es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
         if es_texto and _es_columna_numerica_potencial(serie):
             convertidos = pd.to_numeric(serie, errors="coerce")
-            malos = serie[(convertidos.isna()) & (serie.notna())]
+            # Las celdas en blanco (vacías o solo con espacios) ya las
+            # cubre detectar_faltantes(); si no se excluyen aquí, una
+            # misma celda vacía queda marcada dos veces con dos tipos de
+            # hallazgo distintos ("faltante" y "tipo_invalido").
+            no_es_blanco = ~serie.map(lambda v: isinstance(v, str) and v.strip() == "")
+            malos = serie[(convertidos.isna()) & (serie.notna()) & no_es_blanco]
             for idx, val in malos.items():
                 issues.append(Issue("tipo_invalido", col, int(idx), val,
                                      "Se esperaba un valor numérico"))
@@ -229,6 +265,38 @@ _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
 
 
+def detectar_espacios_extra(df: pd.DataFrame, columnas: Optional[List[str]] = None,
+                             auto: bool = True) -> List[Issue]:
+    """Marca celdas de texto con espacios en blanco de más al inicio o al
+    final del valor (ej. " Ana Perez" o "Ana Perez  "), sugiriendo la
+    versión recortada en valor_sugerido. Las celdas que son SOLO espacios
+    (sin texto real) no se reportan aquí -- ya las cubre detectar_faltantes()
+    como valor vacío, no como "texto con espacio de más"."""
+    issues = []
+    if columnas is not None:
+        cols = columnas
+    elif auto:
+        cols = [c for c in df.columns
+                if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c])]
+    else:
+        cols = []
+    for col in cols:
+        if col not in df.columns:
+            continue
+        for idx, val in df[col].items():
+            if not isinstance(val, str):
+                continue
+            recortado = val.strip()
+            if recortado == "" or recortado == val:
+                continue
+            issues.append(Issue(
+                "espacio_extra", col, int(idx), val,
+                "Texto con espacios en blanco de más al inicio o al final",
+                valor_sugerido=recortado,
+            ))
+    return issues
+
+
 def _es_numero_con_sufijo(serie: pd.Series) -> bool:
     """Detecta columnas tipo '7 unidades', '20 unidades' (número + texto fijo).
     _es_columna_numerica_potencial no las detecta porque no son 100% numéricas
@@ -271,8 +339,19 @@ def detectar_fechas_invalidas(df: pd.DataFrame, columnas: Optional[List[str]] = 
         # generar hallazgo para esas columnas especificas.
         admite_pendiente = _columna_admite_fecha_pendiente(col)
         parseado = pd.to_datetime(serie, errors="coerce")
+
+        # Formato dominante de la columna (separador '-' o '/'), calculado
+        # sobre los valores que sí son fechas válidas. Si la columna mezcla
+        # ambos separadores (ej. "2024-01-15" junto con "20/02/2024"), cada
+        # formato es válido por separado, pero la inconsistencia entre
+        # celdas de una misma columna se reporta como hallazgo -- así el
+        # usuario puede normalizarlas todas a un solo formato preferido
+        # (ver ACCIONES_VALIDAS "normalizar_formato_fecha" en cleaner.py).
+        separador_dominante, formatos_presentes = _formato_fecha_dominante(serie, parseado)
+        columna_con_formato_mixto = len(formatos_presentes) > 1
+
         for idx, val in serie.items():
-            if pd.isna(val):
+            if _es_valor_vacio(val):
                 continue
             if admite_pendiente and _es_valor_fecha_pendiente(val):
                 continue
@@ -287,10 +366,55 @@ def detectar_fechas_invalidas(df: pd.DataFrame, columnas: Optional[List[str]] = 
             if lim_min is not None and fecha < lim_min:
                 issues.append(Issue("fecha_invalida", col, int(idx), val,
                                      f"Fecha fuera de rango (anterior a {lim_min.date()})"))
-            elif lim_max is not None and fecha > lim_max:
+                continue
+            if lim_max is not None and fecha > lim_max:
                 issues.append(Issue("fecha_invalida", col, int(idx), val,
                                      f"Fecha fuera de rango (posterior a {lim_max.date()})"))
+                continue
+            if columna_con_formato_mixto:
+                sep_val = _separador_fecha(val)
+                if sep_val is not None and sep_val != separador_dominante:
+                    issues.append(Issue(
+                        "fecha_invalida", col, int(idx), val,
+                        f"Formato de fecha inconsistente: usa separador '{sep_val}', "
+                        f"pero el resto de la columna usa '{separador_dominante}'"
+                    ))
     return issues
+
+
+def _separador_fecha(val) -> Optional[str]:
+    """Devuelve '/' o '-' según el separador que use `val` como texto de
+    fecha (ej. '2024-01-15' -> '-', '15/01/2024' -> '/'). None si no se
+    reconoce ninguno de los dos separadores en el valor (ej. una fecha ya
+    viene como datetime real, o el texto no trae separador)."""
+    if val is None or isinstance(val, (pd.Timestamp,)):
+        return None
+    texto = str(val)
+    tiene_guion = "-" in texto
+    tiene_diagonal = "/" in texto
+    if tiene_guion and not tiene_diagonal:
+        return "-"
+    if tiene_diagonal and not tiene_guion:
+        return "/"
+    return None  # trae ambos o ninguno: no se puede determinar con certeza
+
+
+def _formato_fecha_dominante(serie: pd.Series, parseado: pd.Series) -> tuple[Optional[str], set]:
+    """Cuenta cuántas celdas (ya identificadas como fecha válida) usan cada
+    separador ('-' o '/') y devuelve el más frecuente junto con el conjunto
+    de separadores realmente presentes en la columna."""
+    conteo = {"-": 0, "/": 0}
+    for idx, val in serie.items():
+        if _es_valor_vacio(val) or pd.isna(parseado.loc[idx]):
+            continue
+        sep = _separador_fecha(val)
+        if sep is not None:
+            conteo[sep] += 1
+    presentes = {sep for sep, n in conteo.items() if n > 0}
+    if not presentes:
+        return None, presentes
+    dominante = max(presentes, key=lambda s: conteo[s])
+    return dominante, presentes
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +432,7 @@ def detectar_emails_invalidos(df: pd.DataFrame, columnas: Optional[List[str]] = 
         if col not in df.columns:
             continue
         for idx, val in df[col].items():
-            if pd.isna(val):
+            if _es_valor_vacio(val):
                 continue
             if not _REGEX_EMAIL.match(str(val).strip()):
                 issues.append(Issue("email_invalido", col, int(idx), val,
@@ -354,7 +478,7 @@ def detectar_telefonos_invalidos(df: pd.DataFrame, columnas: Optional[List[str]]
         if col not in df.columns:
             continue
         for idx, val in df[col].items():
-            if pd.isna(val):
+            if _es_valor_vacio(val):
                 continue
             texto = str(val).strip()
             solo_digitos = re.sub(r"\D", "", texto)
@@ -403,7 +527,11 @@ def detectar_ids_duplicados(df: pd.DataFrame, columnas: Optional[List[str]] = No
         if col not in df.columns:
             continue
         serie = df[col]
-        mask = serie.duplicated(keep="first") & serie.notna()
+        # Excluye celdas en blanco (vacías o solo espacios): varias celdas
+        # de ID vacías no son un "ID duplicado" real, son varios registros
+        # sin identificador -- ya lo cubre detectar_faltantes().
+        no_es_blanco = ~serie.map(lambda v: isinstance(v, str) and v.strip() == "")
+        mask = serie.duplicated(keep="first") & serie.notna() & no_es_blanco
         for idx in serie[mask].index:
             issues.append(Issue("id_duplicado", col, int(idx), serie.loc[idx],
                                  f"Valor repetido en columna identificadora '{col}' "
@@ -595,7 +723,7 @@ def detectar_estados_invalidos(df: pd.DataFrame, columnas: Optional[List[str]] =
         if col not in df.columns:
             continue
         for idx, val in df[col].items():
-            if pd.isna(val):
+            if _es_valor_vacio(val):
                 continue
             if not _es_valor_estado_valido(val, validos):
                 issues.append(Issue("estado_invalido", col, int(idx), val,
@@ -637,10 +765,17 @@ def detectar_capitalizacion_incorrecta(df: pd.DataFrame, columnas: Optional[List
         if col not in df.columns:
             continue
         for idx, val in df[col].items():
-            if pd.isna(val) or str(val).strip() == "":
+            if _es_valor_vacio(val):
                 continue
             if not _es_capitalizacion_correcta(val):
-                sugerido = _capitalizar_nombre_propio(val)
+                # Se sugiere la forma capitalizada a partir del texto YA
+                # recortado (sin espacios de más al inicio/final): si no,
+                # cuando la misma celda también tiene un hallazgo de
+                # "espacio_extra" y ambos usan 'usar_sugerido', el espacio
+                # de más quedaba reintroducido por esta sugerencia al
+                # aplicarse despues en cleaner.py.
+                texto_para_sugerir = val.strip() if isinstance(val, str) else val
+                sugerido = _capitalizar_nombre_propio(texto_para_sugerir)
                 issues.append(Issue(
                     "capitalizacion_incorrecta", col, int(idx), val,
                     f"Capitalización inconsistente (sugerido: '{sugerido}')",
@@ -685,7 +820,7 @@ def detectar_texto_inconsistente(df: pd.DataFrame, columnas: Optional[List[str]]
                 continue
             if any(p in str(col).lower() for p in _PATRONES_EXCLUIR_TEXTO):
                 continue
-            no_nulos = serie.dropna()
+            no_nulos = _serie_no_vacios(serie)
             # Excluye columnas que en realidad son numéricas guardadas como
             # texto (ej. "20 unidades", "7 unidades"): sin este chequeo,
             # valores numéricos distintos con el mismo sufijo textual se
@@ -712,7 +847,7 @@ def detectar_texto_inconsistente(df: pd.DataFrame, columnas: Optional[List[str]]
     for col in cols:
         if col not in df.columns:
             continue
-        serie = df[col].dropna()
+        serie = _serie_no_vacios(df[col])
         if serie.empty:
             continue
 
@@ -801,6 +936,12 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
     issues += detectar_faltantes(df)
     issues += detectar_duplicados(df)
     issues += detectar_tipo_invalido(df)
+    # Espacios de más al inicio/final del texto: se detecta temprano (antes
+    # de texto_inconsistente/estado/capitalizacion) para que, si una celda
+    # también tiene un hallazgo mas especifico (ej. capitalizacion
+    # incorrecta), la correccion mas especifica sea la que quede aplicada
+    # al final -- el recorte generico de espacios no debe pisarla.
+    issues += detectar_espacios_extra(df, auto=auto_detectar_columnas)
 
     if detectar_fechas:
         issues += detectar_fechas_invalidas(df, columnas=columnas_fecha, fecha_min=fecha_min,
