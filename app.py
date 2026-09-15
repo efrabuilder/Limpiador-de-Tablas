@@ -31,7 +31,7 @@ from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
-from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES
+from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES, FORMATOS_FECHA_DISPONIBLES, FORMATO_FECHA_POR_DEFECTO, formato_fecha_python, formato_fecha_m
 from data_cleaner.modelo_sql import (
     generar_dot_modelo, generar_script_crear_base_datos, generar_script_modelo_sql,
 )
@@ -53,7 +53,7 @@ OPCIONES_ACCION = {
     "atipico": ["limitar", "reemplazar_mediana", "reemplazar_media",
                 "editar_individualmente", "eliminar_fila", "marcar_solo"],
     "tipo_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
-    "fecha_invalida": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "fecha_invalida": ["eliminar_fila", "valor_fijo", "normalizar_formato_fecha", "editar_individualmente", "marcar_solo"],
     "email_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "telefono_invalido": ["editar_individualmente", "eliminar_fila", "valor_fijo", "marcar_solo"],
     "id_duplicado": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
@@ -61,6 +61,7 @@ OPCIONES_ACCION = {
     "texto_inconsistente": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "estado_invalido": ["eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
     "capitalizacion_incorrecta": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
+    "espacio_extra": ["usar_sugerido", "eliminar_fila", "valor_fijo", "editar_individualmente", "marcar_solo"],
 }
 # "duplicado" (fila completa) queda fuera de "editar_individualmente": un
 # hallazgo de fila duplicada no tiene una sola columna/valor que editar (ver
@@ -79,6 +80,7 @@ NOMBRES_TIPO = {
     "texto_inconsistente": "Variantes / errores de tipeo en texto",
     "estado_invalido": "Estados/valores de estado no reconocidos",
     "capitalizacion_incorrecta": "Nombres/lugares con capitalización inconsistente",
+    "espacio_extra": "Texto con espacios de más al inicio/final",
 }
 
 ICONOS_TIPO = {
@@ -94,6 +96,7 @@ ICONOS_TIPO = {
     "texto_inconsistente": "✏️",
     "estado_invalido": "🚦",
     "capitalizacion_incorrecta": "🔠",
+    "espacio_extra": "␣",
 }
 
 NOMBRES_ACCION = {
@@ -106,6 +109,7 @@ NOMBRES_ACCION = {
     "eliminar_fila": "Eliminar la fila",
     "marcar_solo": "Solo marcar en el reporte (no modifica el dato)",
     "editar_individualmente": "Editar cada uno por separado (corregir dígito a dígito)",
+    "normalizar_formato_fecha": "Normalizar toda la columna a un formato de fecha elegido",
 }
 
 # Nota: PAISES_TELEFONO_DISPONIBLES ahora vive en data_cleaner/patrones.py
@@ -619,6 +623,7 @@ st.caption("Elija qué hacer con cada tipo de problema encontrado.")
 config: dict[str, str] = {}
 valores_fijos: dict[str, object] = {}
 correcciones_individuales: dict[tuple, object] = {}
+formatos_fecha: dict[str, str] = {}
 
 for tipo, cantidad in por_tipo.items():
     if tipo not in OPCIONES_ACCION:
@@ -652,6 +657,26 @@ for tipo, cantidad in por_tipo.items():
                 )
                 if valor != "":
                     valores_fijos[(tipo, col_name)] = valor
+
+    elif accion == "normalizar_formato_fecha":
+        columnas_afectadas = sorted({
+            issue.columna for issue in resultado.issues
+            if issue.tipo == tipo and issue.columna
+        })
+        claves_formato = list(FORMATOS_FECHA_DISPONIBLES.keys())
+        idx_defecto_formato = claves_formato.index(FORMATO_FECHA_POR_DEFECTO) \
+            if FORMATO_FECHA_POR_DEFECTO in claves_formato else 0
+        cols_formato = st.columns(min(len(columnas_afectadas), 4) or 1)
+        for i, col_name in enumerate(columnas_afectadas):
+            with cols_formato[i % len(cols_formato)]:
+                clave_elegida = st.selectbox(
+                    f"Formato de fecha preferido para '{col_name}'",
+                    claves_formato,
+                    index=idx_defecto_formato,
+                    format_func=lambda c: FORMATOS_FECHA_DISPONIBLES[c]["etiqueta"],
+                    key=f"formato_fecha_{tipo}_{col_name}",
+                )
+                formatos_fecha[col_name] = clave_elegida
 
     elif accion == "editar_individualmente":
         issues_tipo = [i for i in resultado.issues if i.tipo == tipo]
@@ -706,6 +731,7 @@ if limpiar_btn:
         df_limpio, registro = limpiar(
             df, resultado.issues, config=config, valores_fijos=valores_fijos,
             correcciones_individuales=correcciones_individuales,
+            formatos_fecha=formatos_fecha,
         )
         tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=st.session_state.nombre_fuente)
         st.session_state.df_limpio = df_limpio
@@ -714,6 +740,7 @@ if limpiar_btn:
         st.session_state.config_aplicada = config
         st.session_state.valores_fijos_aplicados = valores_fijos
         st.session_state.correcciones_individuales_aplicadas = correcciones_individuales
+        st.session_state.formatos_fecha_aplicados = formatos_fecha
 
 # --------------------------------------------------------------------------
 # Paso 4 — Resultado y descargas
@@ -863,6 +890,17 @@ if st.session_state.get("df_limpio") is not None:
     config_aplicada = st.session_state.get("config_aplicada", {})
     valores_fijos_aplicados = st.session_state.get("valores_fijos_aplicados", {})
     correcciones_individuales_aplicadas = st.session_state.get("correcciones_individuales_aplicadas", {})
+    formatos_fecha_aplicados = st.session_state.get("formatos_fecha_aplicados", {})
+    # Los exportadores autocontenidos (script Python) y el de M puro no
+    # conocen el catálogo de claves (patrones.FORMATOS_FECHA_DISPONIBLES);
+    # reciben directamente el formato ya resuelto (strftime de Python o
+    # Date.ToText de M, según el exportador).
+    formatos_fecha_python = {
+        col: formato_fecha_python(clave) for col, clave in formatos_fecha_aplicados.items()
+    }
+    formatos_fecha_m = {
+        col: formato_fecha_m(clave) for col, clave in formatos_fecha_aplicados.items()
+    }
 
     # Columnas que tuvieron hallazgos REALES en el análisis de arriba (por
     # tipo), para el modo "solo configuración" del interruptor de abajo.
@@ -898,6 +936,7 @@ if st.session_state.get("df_limpio") is not None:
         script_pbi = generar_script_powerbi(
             config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados,
             correcciones_individuales=correcciones_individuales_aplicadas,
+            formatos_fecha=formatos_fecha_python,
             **kwargs_generico,
         )
         st.code(script_pbi, language="python")
@@ -915,6 +954,7 @@ if st.session_state.get("df_limpio") is not None:
             config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados,
             nombre_paso_anterior=nombre_paso,
             correcciones_individuales=correcciones_individuales_aplicadas,
+            formatos_fecha=formatos_fecha_python,
             **kwargs_generico,
         )
         st.code(script_m, language="text")
@@ -1003,6 +1043,7 @@ if st.session_state.get("df_limpio") is not None:
             fecha_invalida=config_aplicada.get("fecha_invalida", "marcar_solo"),
             email_invalido=config_aplicada.get("email_invalido", "marcar_solo"),
             telefono_invalido=config_aplicada.get("telefono_invalido", "marcar_solo"),
+            formatos_fecha=formatos_fecha_m,
             correcciones_individuales=st.session_state.get("correcciones_individuales_aplicadas"),
             digitos_telefono=digitos_telefono_manual,
             paises_telefono=paises_telefono_sel,
@@ -1025,6 +1066,7 @@ if st.session_state.get("df_limpio") is not None:
         script_universal = generar_script_universal(
             config_aplicada, factor_iqr=1.5, valores_fijos=valores_fijos_aplicados,
             correcciones_individuales=correcciones_individuales_aplicadas,
+            formatos_fecha=formatos_fecha_python,
         )
         st.code(script_universal, language="python")
         st.download_button(
