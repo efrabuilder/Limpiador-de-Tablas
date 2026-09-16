@@ -287,6 +287,8 @@ def limpiar_endpoint(
     id_duplicado: str = Form(DEFAULT_CONFIG["id_duplicado"]),
     formula_incorrecta: str = Form(DEFAULT_CONFIG["formula_incorrecta"]),
     texto_inconsistente: str = Form(DEFAULT_CONFIG["texto_inconsistente"]),
+    estado_invalido: str = Form(DEFAULT_CONFIG["estado_invalido"]),
+    capitalizacion_incorrecta: str = Form(DEFAULT_CONFIG["capitalizacion_incorrecta"]),
     espacio_extra: str = Form(DEFAULT_CONFIG["espacio_extra"]),
     paises_telefono: str = Form(
         "", description='País(es) para el rango de dígitos de celular, coma-separados '
@@ -319,6 +321,7 @@ def limpiar_endpoint(
         "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
         "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
         "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+        "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta,
         "espacio_extra": espacio_extra,
     }
 
@@ -377,6 +380,8 @@ def limpiar_sql_endpoint(
     id_duplicado: str = Form(DEFAULT_CONFIG["id_duplicado"]),
     formula_incorrecta: str = Form(DEFAULT_CONFIG["formula_incorrecta"]),
     texto_inconsistente: str = Form(DEFAULT_CONFIG["texto_inconsistente"]),
+    estado_invalido: str = Form(DEFAULT_CONFIG["estado_invalido"]),
+    capitalizacion_incorrecta: str = Form(DEFAULT_CONFIG["capitalizacion_incorrecta"]),
     espacio_extra: str = Form(DEFAULT_CONFIG["espacio_extra"]),
     paises_telefono: str = Form(""),
     digitos_telefono_min: Optional[int] = Form(None),
@@ -414,6 +419,7 @@ def limpiar_sql_endpoint(
         "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
         "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
         "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+        "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta,
         "espacio_extra": espacio_extra,
     }
     digitos_telefono = (
