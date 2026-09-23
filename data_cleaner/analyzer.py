@@ -221,6 +221,47 @@ def detectar_atipicos_zscore(df: pd.DataFrame, umbral: float = 3.0,
     return issues
 
 
+def detectar_atipicos_logicos(df: pd.DataFrame, columnas: Optional[List[str]] = None) -> List[Issue]:
+    """Complementa el metodo estadistico (IQR/Z-score) con limites logicos
+    por tipo de dato conocido -- casos que ese metodo no cubre:
+      - Edad (ver patrones.RANGOS_PLAUSIBLES_FIJOS): un valor fuera de
+        [0, 120] es fisicamente imposible sin importar como se distribuya
+        el resto de la columna (ej. edad=190).
+      - Conteos/cantidades (ver patrones.PATRONES_NO_NEGATIVO: quejas,
+        cantidad, unidades, horas...): un valor negativo es imposible (no
+        existen -3 quejas), aunque estadisticamente no se aleje lo
+        suficiente de la media/mediana como para que IQR/Z-score lo marque.
+
+    No reemplaza al metodo estadistico, lo complementa: se fusiona con
+    esos hallazgos en analizar() (misma celda -> un solo Issue) para no
+    duplicar conteos ni aplicar la correccion dos veces."""
+    issues = []
+    columnas = columnas or _columnas_numericas_o_potenciales(df)
+    for col in columnas:
+        if col not in df.columns:
+            continue
+        serie = pd.to_numeric(df[col], errors="coerce")
+        if serie.notna().sum() == 0:
+            continue
+        rango_fijo = _rango_plausible_fijo(col)
+        if rango_fijo is not None:
+            minimo, maximo = rango_fijo
+            fuera = serie[(serie < minimo) | (serie > maximo)]
+            for idx, val in fuera.items():
+                issues.append(Issue(
+                    "atipico", col, int(idx), val,
+                    f"Fuera del rango plausible [{minimo}, {maximo}] para este tipo de dato"
+                ))
+        elif _es_columna_no_negativa(col):
+            negativos = serie[serie < 0]
+            for idx, val in negativos.items():
+                issues.append(Issue(
+                    "atipico", col, int(idx), val,
+                    "Valor negativo no valido para este tipo de dato (conteo/cantidad)"
+                ))
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # Detección de columnas candidatas por nombre (para auto_detectar_columnas=True)
 # ---------------------------------------------------------------------------
@@ -253,6 +294,8 @@ from data_cleaner.patrones import (
     parece_fecha as _parece_fecha,
     rango_digitos_telefono as _rango_digitos_telefono,
     columnas_excluir_de_atipicos as _columnas_excluir_de_atipicos,
+    rango_plausible_fijo as _rango_plausible_fijo,
+    es_columna_no_negativa as _es_columna_no_negativa,
 )
 # _PATRONES_*, _columnas_por_patron y _es_columna_id ahora vienen del modulo
 # compartido data_cleaner.patrones (mismo que usa exportador_m.py), en vez
@@ -765,9 +808,15 @@ def detectar_capitalizacion_incorrecta(df: pd.DataFrame, columnas: Optional[List
     if columnas is not None:
         cols = columnas
     elif auto:
+        # Se excluyen columnas identificadoras (id, codigo, folio, clave...):
+        # "id_cliente" contiene el token "cliente" (patron de nombre propio)
+        # pero sus valores son codigos tipo "CL-1291", no nombres -- sin
+        # esta exclusion, cada fila se marcaba como "capitalizacion
+        # inconsistente" solo por no ser Formato Nombre Propio.
         cols = [
             c for c in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO)
             if (pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c]))
+            and not _es_columna_id(c)
         ]
     else:
         cols = []
@@ -984,10 +1033,11 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
         issues += detectar_capitalizacion_incorrecta(df, columnas=columnas_capitalizacion,
                                                       auto=auto_detectar_columnas)
 
+    atipico_issues: List[Issue] = []
     if metodo_atipicos == "iqr":
-        issues += detectar_atipicos_iqr(df, factor=factor_iqr, columnas=columnas_numericas)
+        atipico_issues = detectar_atipicos_iqr(df, factor=factor_iqr, columnas=columnas_numericas)
     elif metodo_atipicos == "zscore":
-        issues += detectar_atipicos_zscore(df, umbral=umbral_zscore, columnas=columnas_numericas)
+        atipico_issues = detectar_atipicos_zscore(df, umbral=umbral_zscore, columnas=columnas_numericas)
     elif metodo_atipicos == "ambos":
         iqr_issues = detectar_atipicos_iqr(df, factor=factor_iqr, columnas=columnas_numericas)
         zscore_issues = detectar_atipicos_zscore(df, umbral=umbral_zscore, columnas=columnas_numericas)
@@ -1001,7 +1051,24 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
                 combinados[clave].detalle += f" | también atípico por Z-score ({issue.detalle})"
             else:
                 combinados[clave] = issue
-        issues += list(combinados.values())
+        atipico_issues = list(combinados.values())
+
+    if metodo_atipicos in ("iqr", "zscore", "ambos"):
+        # Complementa el metodo estadistico elegido con limites logicos por
+        # tipo de dato conocido (edad, conteos no-negativos): ver
+        # detectar_atipicos_logicos. Se fusiona por (columna, fila) para no
+        # duplicar la misma celda si ya salio atipica por el metodo
+        # estadistico -- solo se le agrega el detalle del limite logico.
+        combinados_logicos: dict[tuple, Issue] = {(i.columna, i.fila): i for i in atipico_issues}
+        for issue in detectar_atipicos_logicos(df, columnas=columnas_numericas):
+            clave = (issue.columna, issue.fila)
+            if clave in combinados_logicos:
+                combinados_logicos[clave].detalle += f" | también fuera de rango lógico ({issue.detalle})"
+            else:
+                combinados_logicos[clave] = issue
+        atipico_issues = list(combinados_logicos.values())
+
+    issues += atipico_issues
 
     return AnalysisResult(
         filas_analizadas=len(df),
