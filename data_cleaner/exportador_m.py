@@ -97,6 +97,7 @@ ACCIONES_SOPORTADAS_M = {
     "texto_inconsistente": {"usar_sugerido", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "estado_invalido": {"valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "capitalizacion_incorrecta": {"usar_sugerido", "marcar_solo", "eliminar_fila", "editar_individualmente"},
+    "espacio_extra": {"usar_sugerido", "marcar_solo", "eliminar_fila", "editar_individualmente"},
 }
 
 # _columnas_por_patron y _es_columna_id ahora vienen de data_cleaner.patrones
@@ -594,6 +595,7 @@ def generar_editor_m_puro(
     texto_inconsistente: str = "marcar_solo",
     estado_invalido: str = "marcar_solo",
     capitalizacion_incorrecta: str = "marcar_solo",
+    espacio_extra: str = "usar_sugerido",
     columnas_fecha: Optional[List[str]] = None,
     fecha_min: Optional[str] = None,
     fecha_max: Optional[str] = None,
@@ -685,6 +687,7 @@ def generar_editor_m_puro(
     a_texto = _accion_o_fallback("texto_inconsistente", texto_inconsistente, comentarios)
     a_estado = _accion_o_fallback("estado_invalido", estado_invalido, comentarios)
     a_capitalizacion = _accion_o_fallback("capitalizacion_incorrecta", capitalizacion_incorrecta, comentarios)
+    a_espacio_extra = _accion_o_fallback("espacio_extra", espacio_extra, comentarios)
 
     # Deteccion en 2 niveles: por nombre de columna primero (rapido); si
     # eso no encuentra nada, se revisan los VALORES reales como respaldo
@@ -812,6 +815,7 @@ def generar_editor_m_puro(
         "fecha_invalida": a_fecha, "email_invalido": a_email, "id_duplicado": a_id,
         "formula_incorrecta": a_formula, "texto_inconsistente": a_texto,
         "estado_invalido": a_estado, "capitalizacion_incorrecta": a_capitalizacion,
+        "espacio_extra": a_espacio_extra,
     }
     columnas_edicion_individual: List[Tuple[str, str]] = []
     if correcciones_individuales:
@@ -847,28 +851,58 @@ def generar_editor_m_puro(
         cb.agregar(f"IndRenombrado_{_tipo_id}_{_nombre_col_id}",
                    'Table.RenameColumns({prev}, {{"_ind_corr_' + _nombre_col_id + '", ' + _m_str(_col_ci) + '}})')
 
-    # -- 2) Limpieza basica de texto (trim) ----------------------------------
-    # Se aplica a TODAS las columnas: el chequeo de "es texto de verdad" pasa
-    # a la funcion RecortarSiEsTexto, que corre en tiempo de ejecucion dentro
-    # de Power Query. Antes se decidia que columnas incluir segun el dtype
-    # que pandas veia al analizar (is_object_dtype / is_string_dtype), lo que
-    # rompia el paso si la columna real en Power Query ya llegaba tipada
-    # como numero/fecha desde un origen previo (ej. Excel.Workbook +
-    # Int64.Type/type date) aunque pandas la hubiera visto como texto.
-    if len(df.columns) > 0:
+    # -- 2) Espacios de mas al inicio/final del texto (regla "espacio_extra") --
+    # Antes esto se aplicaba SIEMPRE a TODAS las columnas, sin mirar la accion
+    # configurada para "espacio_extra" (quedaba igual que "usar_sugerido" pase
+    # lo que pase, incluso si el usuario eligio "marcar_solo" para no tocar el
+    # dato). Ahora respeta la config, igual que las demas reglas.
+    #
+    # El chequeo de "es texto de verdad" pasa a la funcion RecortarSiEsTexto,
+    # que corre en tiempo de ejecucion dentro de Power Query. Antes se decidia
+    # que columnas incluir segun el dtype que pandas veia al analizar
+    # (is_object_dtype / is_string_dtype), lo que rompia el paso si la columna
+    # real en Power Query ya llegaba tipada como numero/fecha desde un origen
+    # previo (ej. Excel.Workbook + Int64.Type/type date) aunque pandas la
+    # hubiera visto como texto. RecortarSiEsTexto deja intacto cualquier valor
+    # que no sea texto (numero, fecha, logico, null), asi que es segura de
+    # aplicar sobre columnas de cualquier tipo sin que Power Query truene.
+    if a_espacio_extra == "usar_sugerido" and len(df.columns) > 0:
         necesita_recortar_fn = True
         pares = ", ".join(f'{{{_m_str(c)}, each RecortarSiEsTexto(_)}}' for c in df.columns)
         cb.agregar("EspaciosRecortados", "Table.TransformColumns({prev}, {" + pares + "})")
+    elif a_espacio_extra == "eliminar_fila" and len(df.columns) > 0:
+        necesita_recortar_fn = True
+        chequeo_sin_espacios = " and ".join(
+            f'([{c}] = RecortarSiEsTexto([{c}]))' for c in df.columns
+        )
+        cb.agregar("SinEspaciosExtra", "Table.SelectRows({prev}, each " + chequeo_sin_espacios + ")")
+    else:  # marcar_solo / editar_individualmente (esta ultima ya se resuelve
+           # arriba, en el bloque generico de correcciones puntuales)
+        comentarios.append(
+            f'  // AVISO: "espacio_extra" quedo en "{a_espacio_extra}": el codigo M puro no '
+            'agrega columnas nuevas (ni _revisar_calidad), asi que el texto con espacios de '
+            'mas al inicio/final no se recorta automaticamente; queda igual que en el origen '
+            '(salvo las celdas con una correccion puntual cargada, si las hay).'
+        )
 
     # -- 3) Texto inconsistente (tabla de correccion horneada) ---------------
     if mapa_texto and a_texto in ("usar_sugerido", "marcar_solo"):
         paso_prev_texto = cb.ultimo
         for col, mapa in mapa_texto.items():
             if a_texto == "usar_sugerido":
-                # Cadena de "if v = X then Y else if ... else v"
+                # Cadena de "if v = X then Y else if ... else v". El mapa de
+                # correcciones se calculo sobre valores YA recortados (ver
+                # df_para_mapa mas arriba), pero el recorte real en el M
+                # generado ahora depende de la accion configurada para
+                # "espacio_extra" -- si quedo en "marcar_solo"/
+                # "editar_individualmente", el valor de "_" en tiempo de
+                # ejecucion puede traer espacios de mas y nunca haria match
+                # contra las claves del mapa. Por eso la comparacion se hace
+                # contra Text.Trim(_) en vez de "_" directo (sin modificar el
+                # valor que finalmente se escribe si no hay match).
                 cadena = "_"
                 for variante, canonica in mapa.items():
-                    cadena = f'if _ = {_m_str(variante)} then {_m_str(canonica)} else ({cadena})'
+                    cadena = f'if Text.Trim(Text.From(_)) = {_m_str(variante)} then {_m_str(canonica)} else ({cadena})'
                 formula = f'{{{_m_str(col)}, each if _ = null then null else {cadena}}}'
                 cb.agregar(f"Corregido_{re.sub(r"[^A-Za-z0-9]", "", col)}",
                            "Table.TransformColumns({prev}, {" + formula + "})")
