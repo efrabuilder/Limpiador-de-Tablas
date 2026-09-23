@@ -1488,6 +1488,7 @@ class LimpiadorApp(tk.Tk):
                     texto_inconsistente=self.config_aplicada.get("texto_inconsistente", "marcar_solo"),
                     estado_invalido=self.config_aplicada.get("estado_invalido", "marcar_solo"),
                     capitalizacion_incorrecta=self.config_aplicada.get("capitalizacion_incorrecta", "marcar_solo"),
+                    espacio_extra=self.config_aplicada.get("espacio_extra", "usar_sugerido"),
                     formatos_fecha=formatos_fecha_m,
                     **_kwargs_generico(),
                 ),
