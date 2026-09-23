@@ -411,16 +411,37 @@ def parece_telefono(serie: pd.Series, umbral: float = 0.7, min_d=7, max_d=15) ->
     return ok.mean() >= umbral
 
 
+_REGEX_FORMA_FECHA_NUMERICA = re.compile(
+    r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}([ T]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?)?$"
+)
+_REGEX_FORMA_FECHA_COMPACTA = re.compile(r"^\d{8}$")
+_REGEX_LETRA_MES = re.compile(r"[A-Za-z]{3,}")
+
+
 def parece_fecha(serie: pd.Series, umbral: float = 0.7) -> bool:
     m = _muestra(serie)
     if len(m) == 0:
         return False
     if pd.api.types.is_datetime64_any_dtype(serie):
         return True
+    m_str = m.astype(str).str.strip()
+    # Solo se intenta parsear como fecha un valor con "forma" de fecha:
+    # separadores tipo dd/mm/aaaa, dd-mm-aaaa, dd.mm.aaaa (con u sin hora),
+    # formato compacto AAAAMMDD, o texto con letras (nombre de mes). Un
+    # numero "pelado" (solo digitos, sin separador) como "7650" o "4750"
+    # NO cuenta como candidato aunque pandas logre "parsearlo": pandas
+    # interpreta un numero suelto de 4 cifras como si fuera solo el anio
+    # (ej. "7650" -> 7650-01-01), lo que confundia columnas de dinero o
+    # cantidades (ej. "4750", "₡7,650") con columnas de fecha.
+    es_candidata = (
+        m_str.str.match(_REGEX_FORMA_FECHA_NUMERICA)
+        | m_str.str.match(_REGEX_FORMA_FECHA_COMPACTA)
+        | m_str.str.contains(_REGEX_LETRA_MES, regex=True)
+    )
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        parseado = pd.to_datetime(m.astype(str), errors="coerce", dayfirst=True)
+        parseado = pd.to_datetime(m_str.where(es_candidata), errors="coerce", dayfirst=True)
     return parseado.notna().mean() >= umbral
 
 
@@ -624,6 +645,57 @@ def detectar_columnas_fecha(df: pd.DataFrame, detector_contenido=None,
             continue
     return candidatas
 
+
+
+# -----------------------------------------------------------------------------
+# Limites logicos por tipo de dato, para COMPLEMENTAR el metodo estadistico
+# de atipicos (IQR/Z-score): un valor puede no alejarse lo suficiente de la
+# media/mediana del resto de la columna como para que IQR/Z-score lo marque,
+# y aun asi ser fisica o logicamente imposible (ej. "quejas" = -3, o "edad"
+# = 190). El metodo estadistico solo mira la distribucion de los datos, no
+# sabe que una edad o un conteo tienen un rango valido de por si.
+# -----------------------------------------------------------------------------
+
+# Columnas que representan un CONTEO o una CANTIDAD: nunca pueden ser
+# negativas, sin importar el dataset (no existen -3 quejas ni -5 unidades).
+# No se les pone techo (a diferencia de RANGOS_PLAUSIBLES_FIJOS) porque el
+# maximo razonable sí varia de un dataset a otro; el piso en 0 no.
+PATRONES_NO_NEGATIVO = (
+    "cantidad", "qty", "quantity", "cant", "unidades", "horas", "hours",
+    "peso", "weight", "quejas", "reclamos", "incidentes", "errores",
+    "fallas", "devoluciones", "denuncias", "ausencias", "faltas",
+    "llamadas", "visitas", "pedidos", "ordenes", "meses", "dias",
+    "anios", "precio", "price", "costo", "cost", "monto", "importe",
+    "salario", "sueldo", "total", "subtotal", "stock", "inventario",
+)
+
+# Columnas con un rango plausible FIJO conocido de antemano (piso Y techo),
+# independiente del dataset: una edad humana siempre esta entre 0 y ~120,
+# nunca es negativa ni de 190 años.
+RANGOS_PLAUSIBLES_FIJOS: dict = {
+    "edad": (0, 120),
+    "age": (0, 120),
+}
+
+
+def rango_plausible_fijo(col) -> Optional[Tuple[float, float]]:
+    """Si el nombre de la columna coincide (por token completo) con una
+    entrada de RANGOS_PLAUSIBLES_FIJOS, devuelve su (minimo, maximo).
+    Si no, devuelve None."""
+    norm = normalizar_nombre(col)
+    tokens = _tokens(norm)
+    for patron, rango in RANGOS_PLAUSIBLES_FIJOS.items():
+        if normalizar_nombre(patron) in tokens:
+            return rango
+    return None
+
+
+def es_columna_no_negativa(col) -> bool:
+    """True si el nombre de columna coincide con un patron de conteo/
+    cantidad (ver PATRONES_NO_NEGATIVO), en cuyo caso un valor negativo se
+    considera logicamente invalido sin importar la distribucion del resto
+    de la columna."""
+    return coincide_patron(col, PATRONES_NO_NEGATIVO)
 
 
 # Columnas a excluir del chequeo estadistico de atipicos (IQR / Z-score)
