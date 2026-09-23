@@ -183,13 +183,28 @@ def _parece_telefono_col(serie, umbral=0.7, min_d=7, max_d=15):
     return solo_digitos.str.len().between(min_d, max_d).mean() >= umbral
 
 
+_REGEX_FORMA_FECHA_NUMERICA = re.compile(r"^\\d{1,4}[-/.]\\d{1,2}[-/.]\\d{1,4}([ T]\\d{1,2}:\\d{2}(:\\d{2})?(\\.\\d+)?)?$")
+_REGEX_FORMA_FECHA_COMPACTA = re.compile(r"^\\d{8}$")
+_REGEX_LETRA_MES = re.compile(r"[A-Za-z]{3,}")
+
+
 def _parece_fecha_col(serie, umbral=0.7):
     m = _muestra_serie(serie)
     if len(m) == 0:
         return False
     if pd.api.types.is_datetime64_any_dtype(serie):
         return True
-    parseado = pd.to_datetime(m.astype(str), errors="coerce", dayfirst=True)
+    m_str = m.astype(str).str.strip()
+    # Solo se intenta parsear como fecha un valor con forma de fecha
+    # (separadores -/.  o texto con letras de mes); un numero pelado como
+    # "7650" NO cuenta aunque pandas lo "parseara" como el anio 7650, lo
+    # que antes confundia columnas de dinero/cantidades con fechas.
+    es_candidata = (
+        m_str.str.match(_REGEX_FORMA_FECHA_NUMERICA)
+        | m_str.str.match(_REGEX_FORMA_FECHA_COMPACTA)
+        | m_str.str.contains(_REGEX_LETRA_MES, regex=True)
+    )
+    parseado = pd.to_datetime(m_str.where(es_candidata), errors="coerce", dayfirst=True)
     return parseado.notna().mean() >= umbral
 
 
@@ -504,7 +519,7 @@ def _detectar_espacios_extra(df):
 def _detectar_capitalizacion_incorrecta(df):
     hallazgos = []
     cols_capitalizacion = COLUMNAS_FORZADAS_CAPITALIZACION if COLUMNAS_FORZADAS_CAPITALIZACION is not None \\
-        else _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO)
+        else [c for c in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO) if not _es_columna_id(c)]
     for col in cols_capitalizacion:
         if not (pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col])):
             continue
@@ -737,8 +752,32 @@ def _interpretar_valor_fijo(valor):
     return valor
 
 
+def _a_numero(serie):
+    directo = pd.to_numeric(serie, errors="coerce")
+    if directo.notna().mean() >= 0.5:
+        return directo
+
+    def _normalizar(v):
+        if not isinstance(v, str):
+            return v
+        v = re.sub(r"[^\\d,.\\-]", "", v.strip())
+        if v in ("", "-"):
+            return None
+        i_coma, i_punto = v.rfind(","), v.rfind(".")
+        if i_coma != -1 and i_punto != -1:
+            v = v.replace(".", "").replace(",", ".") if i_coma > i_punto \\
+                else v.replace(",", "")
+        elif i_coma != -1:
+            partes = v.split(",")
+            v = v.replace(",", "") if all(len(p) == 3 for p in partes[1:]) \\
+                else v.replace(",", ".")
+        return v
+
+    return pd.to_numeric(serie.apply(_normalizar), errors="coerce")
+
+
 def _valor_reemplazo(df, columna, accion, valor_fijo=None):
-    serie_num = pd.to_numeric(df[columna], errors="coerce")
+    serie_num = _a_numero(df[columna])
     if accion == "reemplazar_media":
         return serie_num.mean()
     if accion == "reemplazar_mediana":
