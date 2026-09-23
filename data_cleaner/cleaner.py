@@ -25,6 +25,7 @@ Tipos de hallazgo nuevos (además de faltante/duplicado/atipico/tipo_invalido):
   pueden pasar a 'valor_fijo', 'usar_sugerido' o 'eliminar_fila' vía config.
 """
 from __future__ import annotations
+import re
 import pandas as pd
 import numpy as np
 from typing import Dict, List
@@ -94,8 +95,45 @@ def _interpretar_valor_fijo(valor):
     return valor
 
 
+def _a_numero(serie: pd.Series) -> pd.Series:
+    """Convierte una serie a numerico, tolerando formato de moneda/miles
+    (ej. "₡7,650", "$1,234.56", "1.234,56") ademas de numeros ya limpios.
+
+    Antes, reemplazar_media/mediana/moda usaba pd.to_numeric() directo: en
+    una columna de dinero con simbolo de moneda o separador de miles, TODOS
+    los valores quedaban NaN, asi que la media/mediana/moda salia NaN y el
+    valor de reemplazo terminaba vacio (celda en blanco) en vez del monto
+    esperado -- el usuario pedia mediana/media y, en la practica, el
+    resultado era indistinguible de haber pedido "null"."""
+    directo = pd.to_numeric(serie, errors="coerce")
+    if directo.notna().mean() >= 0.5:
+        return directo
+
+    def _normalizar(v):
+        if not isinstance(v, str):
+            return v
+        v = re.sub(r"[^\d,.\-]", "", v.strip())
+        if v in ("", "-"):
+            return None
+        i_coma, i_punto = v.rfind(","), v.rfind(".")
+        if i_coma != -1 and i_punto != -1:
+            # Trae ambos separadores: el ultimo es el decimal, el otro es
+            # de miles y se descarta (ej. "1,234.56" o "1.234,56").
+            v = v.replace(".", "").replace(",", ".") if i_coma > i_punto \
+                else v.replace(",", "")
+        elif i_coma != -1:
+            # Solo coma: de miles si quedan grupos exactos de 3 digitos
+            # despues de cada una (ej. "7,650"), si no es el decimal.
+            partes = v.split(",")
+            v = v.replace(",", "") if all(len(p) == 3 for p in partes[1:]) \
+                else v.replace(",", ".")
+        return v
+
+    return pd.to_numeric(serie.apply(_normalizar), errors="coerce")
+
+
 def _valor_reemplazo(df: pd.DataFrame, columna: str, accion: str, valor_fijo=None):
-    serie_num = pd.to_numeric(df[columna], errors="coerce")
+    serie_num = _a_numero(df[columna])
     if accion == "reemplazar_media":
         return serie_num.mean()
     if accion == "reemplazar_mediana":
