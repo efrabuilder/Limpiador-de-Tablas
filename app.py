@@ -1054,6 +1054,7 @@ if st.session_state.get("df_limpio") is not None:
             texto_inconsistente=config_aplicada.get("texto_inconsistente", "marcar_solo"),
             estado_invalido=config_aplicada.get("estado_invalido", "marcar_solo"),
             capitalizacion_incorrecta=config_aplicada.get("capitalizacion_incorrecta", "marcar_solo"),
+            espacio_extra=config_aplicada.get("espacio_extra", "usar_sugerido"),
             **kwargs_generico,
         )
         st.code(script_m_puro, language="text")
