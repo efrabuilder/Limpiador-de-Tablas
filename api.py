@@ -571,6 +571,7 @@ def exportar_script_m_puro_endpoint(
     texto_inconsistente: str = Form("marcar_solo"),
     estado_invalido: str = Form("marcar_solo"),
     capitalizacion_incorrecta: str = Form("marcar_solo"),
+    espacio_extra: str = Form(DEFAULT_CONFIG["espacio_extra"]),
     factor_iqr: float = Form(1.5),
     valores_fijos: str = Form("{}", description='JSON con valores fijos por columna'),
     correcciones_individuales: str = Form(
@@ -629,6 +630,7 @@ def exportar_script_m_puro_endpoint(
         texto_inconsistente=texto_inconsistente,
         estado_invalido=estado_invalido,
         capitalizacion_incorrecta=capitalizacion_incorrecta,
+        espacio_extra=espacio_extra,
         correcciones_individuales=correcciones_individuales_dict,
         formatos_fecha={c: formato_fecha_m(clave) for c, clave in _parsear_formatos_fecha_json(formatos_fecha).items()},
     )
