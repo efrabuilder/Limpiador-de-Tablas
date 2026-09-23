@@ -29,8 +29,11 @@ import re
 import pandas as pd
 import numpy as np
 from typing import Dict, List
-from .analyzer import Issue, detectar_atipicos_iqr, _es_valor_vacio
-from .patrones import formato_fecha_python, FORMATO_FECHA_POR_DEFECTO
+from .analyzer import Issue, detectar_atipicos_iqr, _es_valor_vacio, _serie_no_vacios
+from .patrones import (
+    formato_fecha_python, FORMATO_FECHA_POR_DEFECTO,
+    rango_plausible_fijo, es_columna_no_negativa,
+)
 
 ACCIONES_VALIDAS = {
     "eliminar_fila", "reemplazar_media", "reemplazar_mediana",
@@ -132,18 +135,80 @@ def _a_numero(serie: pd.Series) -> pd.Series:
     return pd.to_numeric(serie.apply(_normalizar), errors="coerce")
 
 
+def _es_columna_numerica(serie: pd.Series, serie_num: pd.Series) -> bool:
+    """True si la mayoria de los valores no vacios de la columna se pueden
+    leer como numero (ya sea numeros reales o texto tipo "₡7,650")."""
+    no_vacios = _serie_no_vacios(serie)
+    if no_vacios.empty:
+        return False
+    return serie_num.notna().sum() >= 0.5 * len(no_vacios)
+
+
+def _admite_estadistico(df: pd.DataFrame, columna: str, accion: str) -> bool:
+    """False cuando se pidio media/mediana sobre una columna de texto (ej.
+    'cancelo', 'encuesta_salida'): no existe media ni mediana de un texto,
+    asi que en ese caso se usa la moda (ver _valor_reemplazo)."""
+    if accion not in ("reemplazar_media", "reemplazar_mediana"):
+        return True
+    return _es_columna_numerica(df[columna], _a_numero(df[columna]))
+
+
 def _valor_reemplazo(df: pd.DataFrame, columna: str, accion: str, valor_fijo=None):
-    serie_num = _a_numero(df[columna])
-    if accion == "reemplazar_media":
-        return serie_num.mean()
-    if accion == "reemplazar_mediana":
-        return serie_num.median()
-    if accion == "reemplazar_moda":
-        moda = df[columna].mode(dropna=True)
-        return moda.iloc[0] if not moda.empty else None
     if accion == "valor_fijo":
         return _interpretar_valor_fijo(valor_fijo)
-    return None
+    if accion not in ("reemplazar_media", "reemplazar_mediana", "reemplazar_moda"):
+        return None
+
+    serie = df[columna]
+    serie_num = _a_numero(serie)
+    if _es_columna_numerica(serie, serie_num):
+        if accion == "reemplazar_media":
+            valor = serie_num.mean()
+        elif accion == "reemplazar_mediana":
+            valor = serie_num.median()
+        else:
+            moda = serie_num.mode(dropna=True)
+            valor = moda.iloc[0] if not moda.empty else None
+        return None if valor is None or pd.isna(valor) else valor
+
+    # Columna de texto: media y mediana no existen -> se usa la moda (el
+    # valor mas frecuente entre las celdas NO vacias). Antes, la mediana de
+    # un texto daba NaN y el reporte dejaba la celda en null.
+    moda = _serie_no_vacios(serie).mode()
+    return moda.iloc[0] if not moda.empty else None
+
+
+def _limites_para_limitar(df: pd.DataFrame, columna: str):
+    """Limites (inferior, superior) para la accion 'limitar' de una columna.
+
+    Parte del rango IQR y lo cruza con el rango logico de la columna (edad
+    en [0, 120], conteos/cantidades >= 0), para que un valor imposible (ej.
+    -2 quejas) se lleve al minimo valido en vez de saltar al otro extremo
+    del rango. Si la columna solo tiene enteros, los limites se redondean
+    hacia adentro (no existen 60.5 anios ni 85.75 meses)."""
+    serie = pd.to_numeric(df[columna], errors="coerce")
+    q1, q3 = serie.quantile(0.25), serie.quantile(0.75)
+    iqr = q3 - q1
+    lim_inf, lim_sup = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+
+    rango = rango_plausible_fijo(columna)
+    if rango is not None:
+        minimo, maximo = rango
+        lim_inf = max(lim_inf, minimo) if not pd.isna(lim_inf) else minimo
+        lim_sup = min(lim_sup, maximo) if not pd.isna(lim_sup) else maximo
+    elif es_columna_no_negativa(columna):
+        lim_inf = max(lim_inf, 0) if not pd.isna(lim_inf) else 0
+
+    no_nulos = serie.dropna()
+    es_entera = len(no_nulos) > 0 and bool((no_nulos % 1 == 0).all())
+    if es_entera:
+        if not pd.isna(lim_inf):
+            lim_inf = int(np.ceil(lim_inf))
+        if not pd.isna(lim_sup):
+            lim_sup = int(np.floor(lim_sup))
+        if not pd.isna(lim_inf) and not pd.isna(lim_sup) and lim_inf > lim_sup:
+            lim_inf = lim_sup = int(round(serie.median()))
+    return lim_inf, lim_sup
 
 
 def _normalizar_fechas_columna(serie: pd.Series, formato_python: str) -> pd.Series:
@@ -210,14 +275,31 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
     registro = []
     filas_a_eliminar = set()
 
-    # Pre-calcular límites IQR por columna para la acción "limitar"
+    # Pre-calcular límites por columna para la acción "limitar" (IQR cruzado
+    # con el rango lógico de la columna, ver _limites_para_limitar)
     limites_iqr = {}
     for issue in issues:
         if issue.tipo == "atipico" and issue.columna and issue.columna not in limites_iqr:
-            serie = pd.to_numeric(df[issue.columna], errors="coerce")
-            q1, q3 = serie.quantile(0.25), serie.quantile(0.75)
-            iqr = q3 - q1
-            limites_iqr[issue.columna] = (q1 - 1.5 * iqr, q3 + 1.5 * iqr)
+            limites_iqr[issue.columna] = _limites_para_limitar(df, issue.columna)
+
+    # Cache de media/mediana/moda por (columna, accion): son iguales para
+    # todos los hallazgos de la misma columna, no hace falta recalcularlas.
+    _cache_repl: Dict[tuple, object] = {}
+    _cache_admite: Dict[tuple, bool] = {}
+
+    def _reemplazo(columna, accion, valor_fijo=None):
+        if accion == "valor_fijo":
+            return _valor_reemplazo(df, columna, accion, valor_fijo)
+        clave = (columna, accion)
+        if clave not in _cache_repl:
+            _cache_repl[clave] = _valor_reemplazo(df, columna, accion)
+        return _cache_repl[clave]
+
+    def _admite(columna, accion):
+        clave = (columna, accion)
+        if clave not in _cache_admite:
+            _cache_admite[clave] = _admite_estadistico(df, columna, accion)
+        return _cache_admite[clave]
 
     for issue in issues:
         accion = config.get(issue.tipo, "marcar_solo")
@@ -233,8 +315,8 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
         elif issue.tipo in ("faltante", "tipo_invalido") and accion in (
             "reemplazar_media", "reemplazar_mediana", "reemplazar_moda", "valor_fijo"
         ):
-            valor_nuevo = _valor_reemplazo(
-                df, issue.columna, accion, _buscar_valor_fijo(valores_fijos, issue.tipo, issue.columna)
+            valor_nuevo = _reemplazo(
+                issue.columna, accion, _buscar_valor_fijo(valores_fijos, issue.tipo, issue.columna)
             )
             _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
@@ -242,13 +324,17 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             lim_inf, lim_sup = limites_iqr.get(issue.columna, (None, None))
             valor_original_num = pd.to_numeric(pd.Series([issue.valor_original]), errors="coerce")[0]
             if lim_inf is not None and not pd.isna(valor_original_num):
-                valor_nuevo = lim_inf if valor_original_num < lim_inf else lim_sup
+                valor_nuevo = valor_original_num
+                if not pd.isna(lim_inf) and valor_nuevo < lim_inf:
+                    valor_nuevo = lim_inf
+                if not pd.isna(lim_sup) and valor_nuevo > lim_sup:
+                    valor_nuevo = lim_sup
                 _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
         elif issue.tipo == "atipico" and accion in (
             "reemplazar_media", "reemplazar_mediana", "reemplazar_moda"
         ):
-            valor_nuevo = _valor_reemplazo(df, issue.columna, accion)
+            valor_nuevo = _reemplazo(issue.columna, accion)
             _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
         elif issue.tipo in _TIPOS_CON_SUGERENCIA and accion == "usar_sugerido" \
@@ -271,6 +357,13 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
         else:
             valor_nuevo = issue.valor_original
 
+        detalle = issue.detalle
+        if issue.columna and issue.columna in df.columns \
+                and accion in ("reemplazar_media", "reemplazar_mediana") \
+                and issue.tipo in ("faltante", "tipo_invalido", "atipico") \
+                and not _admite(issue.columna, accion):
+            detalle += " | columna de texto: no admite media/mediana, se usó la moda"
+
         registro.append({
             "tipo": issue.tipo,
             "columna": issue.columna or "(fila completa)",
@@ -278,7 +371,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             "valor_original": issue.valor_original,
             "accion_aplicada": accion,
             "valor_nuevo": valor_nuevo,
-            "detalle": issue.detalle,
+            "detalle": detalle,
         })
 
     # 'normalizar_formato_fecha' no reemplaza celda por celda dentro del
