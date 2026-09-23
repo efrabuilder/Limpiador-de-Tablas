@@ -776,18 +776,35 @@ def _a_numero(serie):
     return pd.to_numeric(serie.apply(_normalizar), errors="coerce")
 
 
+def _es_columna_numerica(serie, serie_num):
+    no_vacios = serie.dropna()
+    no_vacios = no_vacios[~no_vacios.map(lambda v: isinstance(v, str) and v.strip() == "")]
+    if no_vacios.empty:
+        return False
+    return serie_num.notna().sum() >= 0.5 * len(no_vacios)
+
+
 def _valor_reemplazo(df, columna, accion, valor_fijo=None):
-    serie_num = _a_numero(df[columna])
-    if accion == "reemplazar_media":
-        return serie_num.mean()
-    if accion == "reemplazar_mediana":
-        return serie_num.median()
-    if accion == "reemplazar_moda":
-        moda = df[columna].mode(dropna=True)
-        return moda.iloc[0] if not moda.empty else None
     if accion == "valor_fijo":
         return _interpretar_valor_fijo(valor_fijo)
-    return None
+    if accion not in ("reemplazar_media", "reemplazar_mediana", "reemplazar_moda"):
+        return None
+    serie = df[columna]
+    serie_num = _a_numero(serie)
+    if _es_columna_numerica(serie, serie_num):
+        if accion == "reemplazar_media":
+            valor = serie_num.mean()
+        elif accion == "reemplazar_mediana":
+            valor = serie_num.median()
+        else:
+            moda = serie_num.mode(dropna=True)
+            valor = moda.iloc[0] if not moda.empty else None
+        return None if valor is None or pd.isna(valor) else valor
+    # Columna de texto: no existe media/mediana -> se usa la moda de las celdas no vacias.
+    no_vacios = serie.dropna()
+    no_vacios = no_vacios[~no_vacios.map(lambda v: isinstance(v, str) and v.strip() == "")]
+    moda = no_vacios.mode()
+    return moda.iloc[0] if not moda.empty else None
 
 
 def _buscar_valor_fijo(valores_fijos, tipo, columna):
