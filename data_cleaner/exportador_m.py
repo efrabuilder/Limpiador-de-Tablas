@@ -54,7 +54,14 @@ import numpy as np
 # -----------------------------------------------------------------------------
 # Mismos patrones/heurísticas de auto-detección que integraciones_bi/limpiador_powerbi.py
 # -----------------------------------------------------------------------------
+from data_cleaner.analyzer import _mejor_combinacion_formula
 from data_cleaner.patrones import (
+    PATRONES_DESCUENTO as _PATRONES_DESCUENTO,
+    PATRONES_IMPUESTO as _PATRONES_IMPUESTO,
+    PATRONES_ENVIO as _PATRONES_ENVIO,
+    columna_admite_fecha_pendiente as _columna_admite_fecha_pendiente,
+    rango_plausible_fijo as _rango_plausible_fijo,
+    es_columna_no_negativa as _es_columna_no_negativa,
     PATRONES_EMAIL as _PATRONES_EMAIL,
     PATRONES_TELEFONO as _PATRONES_TELEFONO,
     PATRONES_FECHA as _PATRONES_FECHA,
@@ -736,6 +743,28 @@ def generar_editor_m_puro(
         col_precio = (_columnas_por_patron(df, _PATRONES_PRECIO) or [None])[0]
     else:
         col_total = col_cant = col_precio = None
+    # Mismo criterio que analyzer.detectar_formula_incorrecta: si las columnas
+    # se autodetectan por nombre, se elige la combinacion total/cantidad/precio
+    # (+ descuento/impuesto/envio) que de verdad cuadra con los datos, y si ni
+    # la mejor cuadra en al menos el 50% de las filas no se genera la regla
+    # (columnas mal detectadas -> falsos positivos).
+    col_desc = col_imp = col_env = None
+    if not (columna_total or columna_cantidad or columna_precio) and col_total and col_cant and col_precio:
+        _cand_total = _columnas_por_patron(df, _PATRONES_TOTAL)
+        _cand_cant = _columnas_por_patron(df, _PATRONES_CANTIDAD)
+        _cand_precio = _columnas_por_patron(df, _PATRONES_PRECIO)
+        _usadas = set(_cand_total) | set(_cand_cant) | set(_cand_precio)
+        _t, _c, _p, col_desc, col_imp, col_env, _tasa = _mejor_combinacion_formula(
+            df, _cand_total, _cand_cant, _cand_precio,
+            [c for c in _columnas_por_patron(df, _PATRONES_DESCUENTO) if c not in _usadas],
+            [c for c in _columnas_por_patron(df, _PATRONES_IMPUESTO) if c not in _usadas],
+            [c for c in _columnas_por_patron(df, _PATRONES_ENVIO) if c not in _usadas],
+        )
+        if _tasa < 0.5:
+            col_total = col_cant = col_precio = None
+            col_desc = col_imp = col_env = None
+        else:
+            col_total, col_cant, col_precio = _t, _c, _p
     hay_formula = bool(col_total and col_cant and col_precio and
                         all(c in df.columns for c in (col_total, col_cant, col_precio)))
 
@@ -854,6 +883,12 @@ def generar_editor_m_puro(
     for col in cols_fecha:
         if col not in df.columns:
             continue
+        if _columna_admite_fecha_pendiente(col):
+            comentarios.append(
+                f'  // AVISO: en la columna "{col}" valores como "Pendiente" / "No aplica" son '
+                f'validos (no se marcan como fecha invalida), pero al convertir la columna a tipo '
+                f'fecha en M quedan en null.'
+            )
         rango_check = ""
         if fecha_min:
             rango_check += f' or _v < #date({",".join(str(int(x)) for x in str(fecha_min).split("-"))})'
@@ -1027,7 +1062,14 @@ def generar_editor_m_puro(
         nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
         if a_faltante == "valor_fijo":
             _paso_relleno_valor_fijo(cb, comentarios, f"SinFaltantesTexto_{nombre_col_id}", col, valores_fijos, "faltante")
-        elif a_faltante == "reemplazar_moda":
+        elif a_faltante in ("reemplazar_moda", "reemplazar_mediana", "reemplazar_media"):
+            # Media/mediana no existen para texto: se usa la moda (igual que
+            # data_cleaner/cleaner.py).
+            if a_faltante != "reemplazar_moda":
+                comentarios.append(
+                    f'  // AVISO: la columna de texto "{col}" no admite media/mediana; '
+                    f'se uso la moda (valor mas frecuente) para rellenar los faltantes.'
+                )
             expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             cb.agregar(f"SinFaltantesTexto_{nombre_col_id}",
                        "Table.ReplaceValue({prev}, null, " + expr_relleno +
@@ -1046,13 +1088,28 @@ def generar_editor_m_puro(
         for col in columnas_numericas_potenciales:
             nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
             if a_atipico == "limitar":
+                # Limites = IQR cruzado con el rango logico de la columna
+                # (edad 0-120, conteos >= 0) y, si la columna solo tiene
+                # enteros, redondeados hacia adentro (igual que cleaner.py).
+                expr_li = f"_q1 - {factor_iqr} * _iqr"
+                expr_ls = f"_q3 + {factor_iqr} * _iqr"
+                rango_logico = _rango_plausible_fijo(col)
+                if rango_logico is not None:
+                    expr_li = f"List.Max({{{expr_li}, {rango_logico[0]}}})"
+                    expr_ls = f"List.Min({{{expr_ls}, {rango_logico[1]}}})"
+                elif _es_columna_no_negativa(col):
+                    expr_li = f"List.Max({{{expr_li}, 0}})"
+                _nums = pd.to_numeric(df[col], errors="coerce").dropna()
+                if len(_nums) > 0 and bool((_nums % 1 == 0).all()):
+                    expr_li = f"Number.RoundUp({expr_li})"
+                    expr_ls = f"Number.RoundDown({expr_ls})"
                 cb.agregar(
                     f"LimitesAtipico_{nombre_col_id}",
                     (f"let _lista = List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})), "
                      f"_q1 = Percentil(_lista, 0.25), _q3 = Percentil(_lista, 0.75), "
                      f"_iqr = if _q1 = null or _q3 = null then null else _q3 - _q1, "
-                     f"_li = if _iqr = null then null else _q1 - {factor_iqr} * _iqr, "
-                     f"_ls = if _iqr = null then null else _q3 + {factor_iqr} * _iqr "
+                     f"_li = if _iqr = null then null else {expr_li}, "
+                     f"_ls = if _iqr = null then null else {expr_ls} "
                      f"in Table.TransformColumns({{prev}}, {{{{{_m_str(col)}, each "
                      f"if _ = null or _li = null then _ else if _ < _li then _li else if _ > _ls then _ls else _"
                      f", type number}}}})")
@@ -1068,9 +1125,16 @@ def generar_editor_m_puro(
 
     # -- 7) Formula (Total = Cantidad x Precio) -------------------------------
     if hay_formula:
+        expr_esperado = f"[{col_cant}] * [{col_precio}]"
+        if col_desc:
+            expr_esperado += f" - (if [{col_desc}] = null then 0 else [{col_desc}])"
+        if col_imp:
+            expr_esperado += f" + (if [{col_imp}] = null then 0 else [{col_imp}])"
+        if col_env:
+            expr_esperado += f" + (if [{col_env}] = null then 0 else [{col_env}])"
         cb.agregar("FormulaEsperada",
                    "Table.AddColumn({prev}, \"_total_esperado\", each "
-                   f"if [{col_cant}] = null or [{col_precio}] = null then null else [{col_cant}] * [{col_precio}], type number)")
+                   f"if [{col_cant}] = null or [{col_precio}] = null then null else {expr_esperado}, type number)")
         if a_formula == "usar_sugerido":
             # Se reemplaza la columna de total por el valor recalculado
             # (Cantidad x Precio) manteniendo el nombre original, en vez de
