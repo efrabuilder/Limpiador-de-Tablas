@@ -112,6 +112,15 @@ _PATRONES_NO_TELEFONO = (
     "conocimiento_embarque", "folio_pago", "numero_folio", "codigo_rastreo", "numero_seguimiento",
     "seguimiento", "numero_referencia", "referencia_pago",
 )
+# Ajustes de la formula Total (descuento se resta; impuesto y envio se suman)
+# y fechas donde "Pendiente" / "No aplica" es un valor legitimo -- copia de
+# PATRONES_DESCUENTO/IMPUESTO/ENVIO, PATRONES_FECHA_CON_PENDIENTE y
+# VALORES_FECHA_PENDIENTE de data_cleaner/patrones.py.
+_PATRONES_DESCUENTO = ('descuento', 'discount', 'rebaja', 'bonificacion', 'dcto')
+_PATRONES_IMPUESTO = ('impuesto', 'iva', 'tax', 'itbis', 'vat')
+_PATRONES_ENVIO = ('envio', 'flete', 'shipping', 'freight', 'logistico')
+_PATRONES_FECHA_CON_PENDIENTE = ('cobro', 'pago', 'entrega', 'ingreso')
+_VALORES_FECHA_PENDIENTE = ('pendiente', 'pendiente de pago', 'pendiente de cobro', 'pendiente de entrega', 'por cobrar', 'por pagar', 'por entregar', 'no aplica', 'n/a', 'na', 'no corresponde', 'sin fecha', 'no fecha', 'no definido', 'no definida', 'sin definir', 'null', 'none', '-')
 _REGEX_EMAIL = re.compile(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,}$")
 _REGEX_TELEFONO_FORMATO = re.compile(r"^[\\d\\s\\-\\+\\(\\)]+$")
 
@@ -145,6 +154,59 @@ def _coincide_patron_columna(col, patrones):
 
 def _columnas_por_patron(df, patrones):
     return [col for col in df.columns if _coincide_patron_columna(col, patrones)]
+
+
+# Limites logicos por tipo de columna (ver RANGOS_PLAUSIBLES_FIJOS y
+# PATRONES_NO_NEGATIVO en data_cleaner/patrones.py).
+_PATRONES_EDAD = ("edad", "age")
+_PATRONES_NO_NEGATIVO = (
+    "cantidad", "qty", "quantity", "cant", "unidades", "horas", "hours",
+    "peso", "weight", "quejas", "reclamos", "incidentes", "errores",
+    "fallas", "devoluciones", "denuncias", "ausencias", "faltas",
+    "llamadas", "visitas", "pedidos", "ordenes", "meses", "dias",
+    "anios", "precio", "price", "costo", "cost", "monto", "importe",
+    "salario", "sueldo", "total", "subtotal", "stock", "inventario",
+)
+
+
+def _normalizar_valor_texto(valor):
+    s = str(valor).strip().lower()
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return " ".join(s.split())
+
+
+def _es_valor_fecha_pendiente(valor):
+    if valor is None:
+        return False
+    return _normalizar_valor_texto(valor) in _VALORES_FECHA_PENDIENTE
+
+
+def _columna_admite_fecha_pendiente(col):
+    return _coincide_patron_columna(col, _PATRONES_FECHA_CON_PENDIENTE)
+
+
+def _limites_limitar(df, col, factor_iqr):
+    """Limites (inf, sup) para 'limitar': IQR cruzado con el rango logico de
+    la columna (edad 0-120, conteos >= 0); en columnas de solo enteros se
+    redondean hacia adentro."""
+    serie = pd.to_numeric(df[col], errors="coerce")
+    q1, q3 = serie.quantile(0.25), serie.quantile(0.75)
+    iqr = q3 - q1
+    lim_inf, lim_sup = q1 - factor_iqr * iqr, q3 + factor_iqr * iqr
+    if _coincide_patron_columna(col, _PATRONES_EDAD):
+        lim_inf = max(lim_inf, 0) if not pd.isna(lim_inf) else 0
+        lim_sup = min(lim_sup, 120) if not pd.isna(lim_sup) else 120
+    elif _coincide_patron_columna(col, _PATRONES_NO_NEGATIVO):
+        lim_inf = max(lim_inf, 0) if not pd.isna(lim_inf) else 0
+    no_nulos = serie.dropna()
+    if len(no_nulos) > 0 and bool((no_nulos % 1 == 0).all()):
+        if not pd.isna(lim_inf):
+            lim_inf = int(np.ceil(lim_inf))
+        if not pd.isna(lim_sup):
+            lim_sup = int(np.floor(lim_sup))
+        if not pd.isna(lim_inf) and not pd.isna(lim_sup) and lim_inf > lim_sup:
+            lim_inf = lim_sup = int(round(serie.median()))
+    return lim_inf, lim_sup
 
 
 def _es_columna_id(col):
@@ -395,6 +457,7 @@ def _detectar_fechas_invalidas(df):
         else _detectar_columnas_fecha(df, _parece_fecha_col)
     for col in cols_fecha:
         serie = df[col]
+        admite_pendiente = _columna_admite_fecha_pendiente(col)
         parseado = pd.to_datetime(serie, errors="coerce")
 
         # Separador dominante ('-' o '/'), calculado solo sobre celdas que
@@ -420,6 +483,8 @@ def _detectar_fechas_invalidas(df):
 
         for idx, val in serie.items():
             if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
+                continue
+            if admite_pendiente and _es_valor_fecha_pendiente(val):
                 continue
             fecha = parseado.loc[idx]
             if pd.isna(fecha):
@@ -555,7 +620,48 @@ def _detectar_ids_duplicados(df, umbral_unicidad=0.9):
     return hallazgos
 
 
-def _detectar_formula_incorrecta(df, tolerancia=0.01):
+def _mejor_combinacion_formula(df, cand_total, cand_cant, cand_precio,
+                                cand_descuento, cand_impuesto, cand_envio, tolerancia=0.01):
+    """Prueba cada combinacion total/cantidad/precio (+ descuento/impuesto/
+    envio opcionales) y elige la que mas filas cuadra (ver analyzer.py)."""
+    opciones_descuento = list(cand_descuento or []) + [None]
+    opciones_impuesto = list(cand_impuesto or []) + [None]
+    opciones_envio = list(cand_envio or []) + [None]
+    mejor = (cand_total[0], cand_cant[0], cand_precio[0], None, None, None)
+    mejor_tasa = -1.0
+    for t in cand_total:
+        for c in cand_cant:
+            for p in cand_precio:
+                if len({t, c, p}) < 3:
+                    continue
+                total = pd.to_numeric(df[t], errors="coerce")
+                base = pd.to_numeric(df[c], errors="coerce") * pd.to_numeric(df[p], errors="coerce")
+                for d in opciones_descuento:
+                    for i in opciones_impuesto:
+                        for e in opciones_envio:
+                            usados = [x for x in (d, i, e) if x is not None]
+                            if set(usados) & {t, c, p} or len(usados) != len(set(usados)):
+                                continue
+                            esperado = base.copy()
+                            if d is not None:
+                                esperado = esperado - pd.to_numeric(df[d], errors="coerce").fillna(0)
+                            if i is not None:
+                                esperado = esperado + pd.to_numeric(df[i], errors="coerce").fillna(0)
+                            if e is not None:
+                                esperado = esperado + pd.to_numeric(df[e], errors="coerce").fillna(0)
+                            valido = total.notna() & esperado.notna()
+                            if valido.sum() == 0:
+                                continue
+                            limite = (esperado.abs() * tolerancia).clip(lower=0.01)
+                            coincide = ((total - esperado).abs() <= limite) & valido
+                            tasa = coincide.sum() / valido.sum()
+                            if tasa > mejor_tasa:
+                                mejor_tasa = tasa
+                                mejor = (t, c, p, d, i, e)
+    return (*mejor, max(mejor_tasa, 0.0))
+
+
+def _detectar_formula_incorrecta(df, tolerancia=0.01, tasa_minima=0.5):
     hallazgos = []
     if COLUMNAS_FORZADAS_FORMULA is False:
         return hallazgos
@@ -564,22 +670,40 @@ def _detectar_formula_incorrecta(df, tolerancia=0.01):
     cand_precio = _columnas_por_patron(df, _PATRONES_PRECIO)
     if not (cand_total and cand_cant and cand_precio):
         return hallazgos
-    columna_total, columna_cantidad, columna_precio = cand_total[0], cand_cant[0], cand_precio[0]
+    usadas = set(cand_total) | set(cand_cant) | set(cand_precio)
+    cand_descuento = [c for c in _columnas_por_patron(df, _PATRONES_DESCUENTO) if c not in usadas]
+    cand_impuesto = [c for c in _columnas_por_patron(df, _PATRONES_IMPUESTO) if c not in usadas]
+    cand_envio = [c for c in _columnas_por_patron(df, _PATRONES_ENVIO) if c not in usadas]
+    (columna_total, columna_cantidad, columna_precio,
+     columna_descuento, columna_impuesto, columna_envio, tasa) = _mejor_combinacion_formula(
+        df, cand_total, cand_cant, cand_precio, cand_descuento, cand_impuesto, cand_envio, tolerancia)
+    # Si ni la mejor combinacion cuadra en al menos tasa_minima de las filas,
+    # lo mas probable es que las columnas autodetectadas sean las equivocadas:
+    # no se reporta nada en vez de inundar con falsos positivos.
+    if tasa < tasa_minima:
+        return hallazgos
 
     total = pd.to_numeric(df[columna_total], errors="coerce")
-    cantidad = pd.to_numeric(df[columna_cantidad], errors="coerce")
-    precio = pd.to_numeric(df[columna_precio], errors="coerce")
-    esperado = cantidad * precio
-    diferencia = (total - esperado).abs()
+    esperado = pd.to_numeric(df[columna_cantidad], errors="coerce") * pd.to_numeric(df[columna_precio], errors="coerce")
+    detalle_formula = f"{columna_cantidad} x {columna_precio}"
+    if columna_descuento:
+        esperado = esperado - pd.to_numeric(df[columna_descuento], errors="coerce").fillna(0)
+        detalle_formula += f" - {columna_descuento}"
+    if columna_impuesto:
+        esperado = esperado + pd.to_numeric(df[columna_impuesto], errors="coerce").fillna(0)
+        detalle_formula += f" + {columna_impuesto}"
+    if columna_envio:
+        esperado = esperado + pd.to_numeric(df[columna_envio], errors="coerce").fillna(0)
+        detalle_formula += f" + {columna_envio}"
     limite = (esperado.abs() * tolerancia).clip(lower=0.01)
-    mal = (diferencia > limite) & total.notna() & esperado.notna()
+    mal = ((total - esperado).abs() > limite) & total.notna() & esperado.notna()
 
     for idx in df[mal].index:
         valor_correcto = esperado.loc[idx]
         hallazgos.append({
             "tipo": "formula_incorrecta", "columna": columna_total, "fila": int(idx),
             "valor_original": df.loc[idx, columna_total],
-            "detalle": f"{columna_total} no coincide con {columna_cantidad} x {columna_precio}",
+            "detalle": f"{columna_total} no coincide con {detalle_formula} (esperado ~ {valor_correcto:.2f})",
             "valor_sugerido": round(float(valor_correcto), 2) if pd.notna(valor_correcto) else None,
         })
     return hallazgos
@@ -710,6 +834,29 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
             hallazgos.append({"tipo": "atipico", "columna": col, "fila": int(idx),
                                "valor_original": val,
                                "detalle": f"Fuera de rango [{lim_inf:.2f}, {lim_sup:.2f}] (IQR)"})
+
+    # Atipicos logicos (edad fuera de [0, 120]; conteos/cantidades negativos):
+    # se fusionan por (columna, fila) con los estadisticos para no duplicar.
+    ya_atipico = {(h["columna"], h["fila"]): h for h in hallazgos if h["tipo"] == "atipico"}
+    for col in _columnas_para_atipicos(df):
+        serie = pd.to_numeric(df[col], errors="coerce")
+        if _coincide_patron_columna(col, _PATRONES_EDAD):
+            fuera = serie[(serie < 0) | (serie > 120)]
+            motivo = "Fuera del rango plausible [0, 120] para este tipo de dato"
+        elif _coincide_patron_columna(col, _PATRONES_NO_NEGATIVO):
+            fuera = serie[serie < 0]
+            motivo = "Valor negativo no valido para este tipo de dato (conteo/cantidad)"
+        else:
+            continue
+        for idx, val in fuera.items():
+            clave = (col, int(idx))
+            if clave in ya_atipico:
+                ya_atipico[clave]["detalle"] += f" | tambien fuera de rango logico ({motivo})"
+            else:
+                h = {"tipo": "atipico", "columna": col, "fila": int(idx),
+                     "valor_original": val, "detalle": motivo}
+                hallazgos.append(h)
+                ya_atipico[clave] = h
 
     return hallazgos
 
@@ -851,10 +998,7 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
     limites_iqr = {}
     for h in hallazgos:
         if h["tipo"] == "atipico" and h["columna"] not in limites_iqr:
-            serie = pd.to_numeric(df[h["columna"]], errors="coerce")
-            q1, q3 = serie.quantile(0.25), serie.quantile(0.75)
-            iqr = q3 - q1
-            limites_iqr[h["columna"]] = (q1 - factor_iqr * iqr, q3 + factor_iqr * iqr)
+            limites_iqr[h["columna"]] = _limites_limitar(df, h["columna"], factor_iqr)
 
     registro = []
     filas_a_eliminar = set()
@@ -876,7 +1020,11 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             lim_inf, lim_sup = limites_iqr.get(h["columna"], (None, None))
             val_num = pd.to_numeric(pd.Series([h["valor_original"]]), errors="coerce")[0]
             if lim_inf is not None and not pd.isna(val_num):
-                valor_nuevo = lim_inf if val_num < lim_inf else lim_sup
+                valor_nuevo = val_num
+                if not pd.isna(lim_inf) and valor_nuevo < lim_inf:
+                    valor_nuevo = lim_inf
+                if not pd.isna(lim_sup) and valor_nuevo > lim_sup:
+                    valor_nuevo = lim_sup
                 _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
         elif h["tipo"] == "atipico" and accion in (
                 "reemplazar_media", "reemplazar_mediana", "reemplazar_moda"):
