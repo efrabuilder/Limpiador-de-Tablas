@@ -99,6 +99,13 @@ def _imprimir_resumen(resultado) -> None:
     for tipo, cantidad in resultado.por_tipo().items():
         tabla.add_row(f"  {tipo}", str(cantidad))
     console.print(tabla)
+    if resultado.columnas_excluidas_atipicos_por_contenido:
+        cols = ", ".join(f"[bold]{c}[/bold]" for c in resultado.columnas_excluidas_atipicos_por_contenido)
+        console.print(
+            f"[yellow]ℹ️  Excluidas del chequeo de atípicos por su CONTENIDO (no por el nombre): "
+            f"{cols}. Parecen identificadores de un solo uso. Si en realidad son una magnitud "
+            f"continua (precio, cantidad...), revíselas a mano.[/yellow]"
+        )
 
 
 def _parsear_lista_columnas(valor: Optional[str]) -> Optional[List[str]]:
