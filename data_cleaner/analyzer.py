@@ -55,6 +55,15 @@ class AnalysisResult:
     filas_analizadas: int
     columnas_analizadas: int
     issues: List[Issue] = field(default_factory=list)
+    # Columnas excluidas del chequeo de atipicos porque su CONTENIDO parece
+    # un identificador de un solo uso (respaldo automatico para nombres
+    # nuevos no contemplados en PATRONES_IDENTIFICADORES_NO_TELEFONO, ver
+    # patrones.columnas_identificador_serie_por_contenido). Se expone aqui
+    # -- en vez de solo aplicarse en silencio -- para poder revisarla: si
+    # alguna de estas columnas en realidad SI es una magnitud continua, se
+    # nota en el reporte en lugar de perder su chequeo de atipicos sin que
+    # nadie se de cuenta.
+    columnas_excluidas_atipicos_por_contenido: List[str] = field(default_factory=list)
 
     def por_tipo(self) -> dict:
         resumen = {}
@@ -260,6 +269,15 @@ def detectar_atipicos_logicos(df: pd.DataFrame, columnas: Optional[List[str]] = 
                     "atipico", col, int(idx), val,
                     "Valor negativo no valido para este tipo de dato (conteo/cantidad)"
                 ))
+            techo = _techo_probable_conteo_acotado(serie)
+            if techo is not None:
+                excedidos = serie[serie > techo]
+                for idx, val in excedidos.items():
+                    issues.append(Issue(
+                        "atipico", col, int(idx), val,
+                        f"Fuera del rango plausible [0, {techo}] inferido para esta columna "
+                        f"(el resto de los datos sugiere una escala acotada 1-{techo})"
+                    ))
     return issues
 
 
@@ -295,8 +313,11 @@ from data_cleaner.patrones import (
     parece_fecha as _parece_fecha,
     rango_digitos_telefono as _rango_digitos_telefono,
     columnas_excluir_de_atipicos as _columnas_excluir_de_atipicos,
+    columnas_identificador_serie_por_nombre as _columnas_identificador_serie_por_nombre,
+    columnas_identificador_serie_por_contenido as _columnas_identificador_serie_por_contenido,
     rango_plausible_fijo as _rango_plausible_fijo,
     es_columna_no_negativa as _es_columna_no_negativa,
+    techo_probable_conteo_acotado as _techo_probable_conteo_acotado,
     a_numero_tolerante as _a_numero_tolerante,
 )
 # _PATRONES_*, _columnas_por_patron y _es_columna_id ahora vienen del modulo
@@ -1072,8 +1093,18 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
 
     issues += atipico_issues
 
+    # Se recalcula aparte (no altera atipico_issues): solo sirve para
+    # avisar en el reporte cuales columnas se excluyeron del chequeo de
+    # atipicos por el respaldo de CONTENIDO (nombre nuevo no contemplado),
+    # a diferencia de las excluidas por nombre conocido (chasis, motor...)
+    # que no hace falta señalar por separado.
+    columnas_excluidas_contenido = _columnas_identificador_serie_por_contenido(
+        df, excluir=_columnas_identificador_serie_por_nombre(df)
+    )
+
     return AnalysisResult(
         filas_analizadas=len(df),
         columnas_analizadas=len(df.columns),
         issues=issues,
+        columnas_excluidas_atipicos_por_contenido=columnas_excluidas_contenido,
     )
