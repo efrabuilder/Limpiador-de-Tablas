@@ -42,6 +42,16 @@ def construir_reporte(resultado: AnalysisResult, registro_acciones: List[dict],
     for columna, cantidad in por_columna.items():
         filas_resumen.append((f"  {columna}", cantidad))
 
+    if resultado.columnas_excluidas_atipicos_por_contenido:
+        filas_resumen.append(("", ""))
+        filas_resumen.append(("--- Columnas excluidas del chequeo de atípicos (por contenido) ---", ""))
+        for columna in resultado.columnas_excluidas_atipicos_por_contenido:
+            filas_resumen.append((
+                f"  {columna}",
+                "Parece un identificador de un solo uso (valores casi todos únicos, mismo largo "
+                "de dígitos). Si en realidad es una magnitud continua, revísela a mano.",
+            ))
+
     resumen = pd.DataFrame(filas_resumen, columns=["Indicador", "Valor"])
 
     return {"resumen": resumen, "detalle": detalle}
@@ -80,4 +90,10 @@ def imprimir_resumen_consola(resultado: AnalysisResult) -> None:
     print("-" * 50)
     for tipo, cantidad in resultado.por_tipo().items():
         print(f"  {tipo:<15} {cantidad}")
+    if resultado.columnas_excluidas_atipicos_por_contenido:
+        cols = ", ".join(resultado.columnas_excluidas_atipicos_por_contenido)
+        print("-" * 50)
+        print(f"AVISO: excluidas del chequeo de atípicos por su CONTENIDO (no por el nombre): {cols}")
+        print("       Parecen identificadores de un solo uso. Si en realidad son una magnitud")
+        print("       continua (precio, cantidad...), revíselas a mano.")
     print("=" * 50 + "\n")
