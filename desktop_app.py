@@ -959,6 +959,15 @@ class LimpiadorApp(tk.Tk):
             f"Análisis completo: {len(self.resultado.issues)} hallazgo(s) en "
             f"{len(self.df)} filas."
         )
+        if self.resultado.columnas_excluidas_atipicos_por_contenido:
+            cols = ", ".join(self.resultado.columnas_excluidas_atipicos_por_contenido)
+            messagebox.showinfo(
+                "Columnas excluidas de atípicos",
+                f"Se excluyó del chequeo de atípicos, por su CONTENIDO (no por el nombre): {cols}.\n\n"
+                "Parece(n) un identificador de un solo uso (valores casi todos únicos, mismo largo "
+                "de dígitos). Si en realidad es una magnitud continua (precio, cantidad...), "
+                "revíselas a mano.",
+            )
 
     def _construir_panel_config(self) -> None:
         for widget in self.marco_tipos.winfo_children():
