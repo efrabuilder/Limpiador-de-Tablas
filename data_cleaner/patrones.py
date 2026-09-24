@@ -834,12 +834,105 @@ def columnas_excluir_de_atipicos(df: pd.DataFrame) -> List[str]:
     estadistica a la media); estos identificadores de serie no tienen
     chequeo de formato propio, simplemente se excluyen del estadistico.
     """
+    excluidas_nivel1 = columnas_identificador_serie_por_nombre(df)
+    cols_serie_contenido = columnas_identificador_serie_por_contenido(df, excluir=excluidas_nivel1)
+    return list(dict.fromkeys(excluidas_nivel1 + cols_serie_contenido))
+
+
+def columnas_identificador_serie_por_nombre(df: pd.DataFrame) -> List[str]:
+    """Nivel 1: identificadores/telefono/fax reconocidos por NOMBRE (ver
+    columnas_excluir_de_atipicos). Expuesta por separado para poder
+    calcular el respaldo por contenido (Nivel 2) EXCLUYENDO lo que ya se
+    reconocio por nombre, sin duplicar la logica en cada lugar que la
+    necesita."""
     cols_id = [c for c in df.columns if es_columna_id(c)]
     cols_serie = [c for c in df.columns if c not in cols_id
                   and coincide_patron(c, PATRONES_NO_TELEFONO)]
     cols_tel = detectar_columnas(df, PATRONES_TELEFONO, parece_telefono, excluir=cols_id,
                                   excluir_por_nombre=PATRONES_NO_TELEFONO)
     return list(dict.fromkeys(cols_id + cols_serie + cols_tel))
+
+
+# -----------------------------------------------------------------------------
+# Respaldo por CONTENIDO (Nivel 2) para identificadores de un solo uso que
+# ningun patron de PATRONES_IDENTIFICADORES_NO_TELEFONO reconoce por su
+# NOMBRE (ej. "numero_engranaje", "cod_transm", un nombre en otro idioma o
+# mal escrito). Sin esto, una columna nueva de este tipo vuelve a pasar por
+# IQR/Z-score igual que "chasis"/"motor" antes de agregarse a la lista, y
+# sale marcada como atipica por error -- solo que ahora ya no haria falta
+# agregarla a mano cada vez.
+# -----------------------------------------------------------------------------
+def parece_identificador_serie(serie: pd.Series, umbral_unicidad: float = 0.95,
+                                umbral_longitud_fija: float = 0.9,
+                                min_digitos: int = 6) -> bool:
+    """True si el CONTENIDO de la columna tiene toda la forma de un
+    identificador de un solo uso (numero de chasis/motor/serie...), no de
+    una magnitud continua (precio, cantidad, salario...).
+
+    Se exigen TODAS estas señales a la vez, a proposito estricto: este
+    respaldo se equivoca "de mas seguro" excluyendo de menos (un
+    identificador real que no se reconoce sigue yendo por IQR, como ya
+    pasaba antes de este cambio) que excluyendo de mas (una columna que en
+    realidad SI es una magnitud continua queda sin chequeo de atipicos sin
+    que nadie lo note, que es el error que no se quiere pasar por alto):
+      - Los valores son mayormente numericos y ENTEROS (sin parte
+        decimal): un monto en dinero o un porcentaje suele traer
+        decimales tarde o temprano; un numero de serie no.
+      - Casi todos son unicos (>= umbral_unicidad): un identificador de un
+        solo uso no deberia repetirse entre filas; un precio, una
+        cantidad o un salario si pueden repetirse.
+      - La cantidad de digitos es CASI SIEMPRE la misma (>= umbral_longitud_fija
+        de las filas comparten el largo mas comun): un VIN/chasis tiene un
+        largo fijo por diseño de fabrica; un monto en dinero varia de
+        largo de una fila a otra (1200 vs 85000).
+      - Ese largo fijo es de al menos `min_digitos` digitos: una escala de
+        calificacion (1-10) o un conteo pequeño (unidades, meses) tiene
+        1-2 digitos y NO debe excluirse por esto -- ya tiene su propio
+        tratamiento (ver PATRONES_NO_NEGATIVO / techo_probable_conteo_acotado).
+    """
+    valores = serie.dropna()
+    if len(valores) < 5:
+        return False
+    numeros = a_numero_tolerante(valores)
+    if numeros.notna().mean() < 0.9:
+        return False
+    numeros = numeros.dropna()
+    if len(numeros) == 0 or not bool((numeros % 1 == 0).all()):
+        return False
+    if numeros.nunique() / len(numeros) < umbral_unicidad:
+        return False
+    largos = numeros.astype("int64").abs().astype(str).str.len()
+    moda = largos.mode()
+    if moda.empty:
+        return False
+    largo_moda = int(moda.iloc[0])
+    if largo_moda < min_digitos:
+        return False
+    return (largos == largo_moda).mean() >= umbral_longitud_fija
+
+
+def columnas_identificador_serie_por_contenido(df: pd.DataFrame,
+                                                excluir: Iterable[str] = ()) -> List[str]:
+    """Columnas no cubiertas por el Nivel 1 (nombre) cuyo contenido parece
+    un identificador de un solo uso (ver parece_identificador_serie). Se
+    saltan a proposito las columnas que YA tienen un tratamiento propio
+    como magnitud/conteo (edad, o cualquier patron de PATRONES_NO_NEGATIVO
+    como cantidad/precio/quejas...): esas nunca deben excluirse del
+    chequeo de atipicos por este respaldo, aunque su contenido resultara
+    mayormente unico (ej. un "precio" con pocos valores repetidos)."""
+    excluir = set(excluir)
+    candidatas = []
+    for col in df.columns:
+        if col in excluir or es_columna_id(col):
+            continue
+        if rango_plausible_fijo(col) is not None or es_columna_no_negativa(col):
+            continue
+        try:
+            if parece_identificador_serie(df[col]):
+                candidatas.append(col)
+        except Exception:
+            continue
+    return candidatas
 
 
 # -----------------------------------------------------------------------------
