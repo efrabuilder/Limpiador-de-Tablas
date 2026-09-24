@@ -40,6 +40,49 @@ from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
 
+
+def a_numero_tolerante(serie: pd.Series) -> pd.Series:
+    """Convierte una serie a numerico, tolerando formato de moneda/miles
+    (ej. "₡7,650", "$1,234.56", "1.234,56") ademas de numeros ya limpios.
+
+    Se usa para calcular estadisticas (media/mediana/moda, atipicos por
+    IQR/Z-score, limites de "limitar") sobre columnas de dinero/cantidad
+    que vienen con simbolo de moneda o separador de miles: pd.to_numeric()
+    directo las vuelve TODAS NaN, así que sin esto una columna de dinero
+    consistente (ej. "₡X,XXX" en todas las filas) queda invisible para el
+    calculo estadistico (ni se le detectan atipicos, ni sirve para
+    reemplazar faltantes con media/mediana/moda).
+
+    OJO: esto es a proposito mas permisivo que detectar_tipo_invalido()
+    (que sigue usando pd.to_numeric estricto): aqui el objetivo es poder
+    CALCULAR sobre el dato tal como esta, no decidir si su formato es
+    consistente con el resto de la columna."""
+    directo = pd.to_numeric(serie, errors="coerce")
+    if directo.notna().mean() >= 0.5:
+        return directo
+
+    def _normalizar(v):
+        if not isinstance(v, str):
+            return v
+        v = re.sub(r"[^\d,.\-]", "", v.strip())
+        if v in ("", "-"):
+            return None
+        i_coma, i_punto = v.rfind(","), v.rfind(".")
+        if i_coma != -1 and i_punto != -1:
+            # Trae ambos separadores: el ultimo es el decimal, el otro es
+            # de miles y se descarta (ej. "1,234.56" o "1.234,56").
+            v = v.replace(".", "").replace(",", ".") if i_coma > i_punto \
+                else v.replace(",", "")
+        elif i_coma != -1:
+            # Solo coma: de miles si quedan grupos exactos de 3 digitos
+            # despues de cada una (ej. "7,650"), si no es el decimal.
+            partes = v.split(",")
+            v = v.replace(",", "") if all(len(p) == 3 for p in partes[1:]) \
+                else v.replace(",", ".")
+        return v
+
+    return pd.to_numeric(serie.apply(_normalizar), errors="coerce")
+
 # -----------------------------------------------------------------------------
 # Normalización de nombres de columna
 # -----------------------------------------------------------------------------
@@ -696,6 +739,46 @@ def es_columna_no_negativa(col) -> bool:
     considera logicamente invalido sin importar la distribucion del resto
     de la columna."""
     return coincide_patron(col, PATRONES_NO_NEGATIVO)
+
+
+def a_numero_tolerante(serie: pd.Series) -> pd.Series:
+    """Convierte una serie a numerico, tolerando formato de moneda/miles
+    (ej. "₡7,650", "$1,234.56", "1.234,56") ademas de numeros ya limpios.
+
+    Uso: SOLO para decidir si una columna es candidata a deteccion de
+    atipicos (IQR/Z-score) y para convertir sus valores antes de calcular
+    cuartiles/limites -- no para detectar_tipo_invalido, que debe seguir
+    usando pd.to_numeric() sin tolerancia: ahi el objetivo es justamente
+    encontrar celdas con un formato distinto al resto de la columna (ej.
+    "₡7,650" entre puros numeros limpios), y si se tolerara el formato de
+    moneda ahi tambien, esas inconsistencias dejarian de detectarse.
+
+    Sin esta version tolerante, una columna de dinero formateada de forma
+    CONSISTENTE en todas sus filas (ej. "₡7,650" en las 300 filas) fallaba
+    el chequeo de "es candidata numerica" (pd.to_numeric fallaba en el
+    100% de las celdas), asi que quedaba invisible para IQR/Z-score: un
+    monto absurdo como "₡999,999,999" no se detectaba como atipico."""
+    directo = pd.to_numeric(serie, errors="coerce")
+    if directo.notna().mean() >= 0.5:
+        return directo
+
+    def _normalizar(v):
+        if not isinstance(v, str):
+            return v
+        v = re.sub(r"[^\d,.\-]", "", v.strip())
+        if v in ("", "-"):
+            return None
+        i_coma, i_punto = v.rfind(","), v.rfind(".")
+        if i_coma != -1 and i_punto != -1:
+            v = v.replace(".", "").replace(",", ".") if i_coma > i_punto \
+                else v.replace(",", "")
+        elif i_coma != -1:
+            partes = v.split(",")
+            v = v.replace(",", "") if all(len(p) == 3 for p in partes[1:]) \
+                else v.replace(",", ".")
+        return v
+
+    return pd.to_numeric(serie.apply(_normalizar), errors="coerce")
 
 
 # Columnas a excluir del chequeo estadistico de atipicos (IQR / Z-score)
