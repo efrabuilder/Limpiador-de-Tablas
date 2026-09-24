@@ -599,6 +599,15 @@ if por_columna:
     st.caption("Hallazgos por columna")
     st.bar_chart(pd.Series(por_columna, name="hallazgos"))
 
+if resultado.columnas_excluidas_atipicos_por_contenido:
+    cols_auto = ", ".join(f"**{c}**" for c in resultado.columnas_excluidas_atipicos_por_contenido)
+    st.info(
+        f"ℹ️ Se excluyó del chequeo de atípicos, por su contenido (no por el nombre): "
+        f"{cols_auto}. Parece un identificador de un solo uso (valores casi todos únicos, "
+        f"mismo largo de dígitos). Si en realidad es una magnitud continua (precio, cantidad...), "
+        f"avísele al desarrollador para ajustarlo."
+    )
+
 with st.expander("Ver detalle de hallazgos"):
     detalle_preview = pd.DataFrame([
         {
