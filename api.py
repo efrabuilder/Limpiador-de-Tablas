@@ -65,6 +65,7 @@ class AnalisisOut(BaseModel):
     por_tipo: dict
     por_columna: dict
     hallazgos: list[HallazgoOut]
+    columnas_excluidas_atipicos_por_contenido: list[str] = []
 
 
 class ExportarSqlIn(BaseModel):
@@ -218,6 +219,7 @@ def analizar_endpoint(
         por_tipo=resultado.por_tipo(),
         por_columna=resultado.por_columna(),
         hallazgos=hallazgos,
+        columnas_excluidas_atipicos_por_contenido=resultado.columnas_excluidas_atipicos_por_contenido,
     )
 
 
@@ -270,6 +272,7 @@ def analizar_sql_endpoint(
         por_tipo=resultado.por_tipo(),
         por_columna=resultado.por_columna(),
         hallazgos=hallazgos,
+        columnas_excluidas_atipicos_por_contenido=resultado.columnas_excluidas_atipicos_por_contenido,
     )
 
 
