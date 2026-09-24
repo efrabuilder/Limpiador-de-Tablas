@@ -171,7 +171,8 @@ def _columnas_numericas_o_potenciales(df: pd.DataFrame) -> List[str]:
             continue
         serie = df[col]
         es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
-        if es_texto and _es_columna_numerica_potencial(serie):
+        if es_texto and (_es_columna_numerica_potencial(serie)
+                          or _a_numero_tolerante(serie.dropna()).notna().mean() > 0.7):
             cols.append(col)
     return cols
 
@@ -184,7 +185,7 @@ def detectar_atipicos_iqr(df: pd.DataFrame, factor: float = 1.5,
     for col in columnas:
         if col not in df.columns:
             continue
-        serie = pd.to_numeric(df[col], errors="coerce")
+        serie = _a_numero_tolerante(df[col])
         q1, q3 = serie.quantile(0.25), serie.quantile(0.75)
         iqr = q3 - q1
         if iqr == 0 or pd.isna(iqr):
@@ -207,7 +208,7 @@ def detectar_atipicos_zscore(df: pd.DataFrame, umbral: float = 3.0,
     for col in columnas:
         if col not in df.columns:
             continue
-        serie = pd.to_numeric(df[col], errors="coerce")
+        serie = _a_numero_tolerante(df[col])
         media, std = serie.mean(), serie.std()
         if std == 0 or pd.isna(std):
             continue
@@ -240,7 +241,7 @@ def detectar_atipicos_logicos(df: pd.DataFrame, columnas: Optional[List[str]] = 
     for col in columnas:
         if col not in df.columns:
             continue
-        serie = pd.to_numeric(df[col], errors="coerce")
+        serie = _a_numero_tolerante(df[col])
         if serie.notna().sum() == 0:
             continue
         rango_fijo = _rango_plausible_fijo(col)
@@ -296,6 +297,7 @@ from data_cleaner.patrones import (
     columnas_excluir_de_atipicos as _columnas_excluir_de_atipicos,
     rango_plausible_fijo as _rango_plausible_fijo,
     es_columna_no_negativa as _es_columna_no_negativa,
+    a_numero_tolerante as _a_numero_tolerante,
 )
 # _PATRONES_*, _columnas_por_patron y _es_columna_id ahora vienen del modulo
 # compartido data_cleaner.patrones (mismo que usa exportador_m.py), en vez
