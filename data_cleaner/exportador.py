@@ -169,6 +169,24 @@ _PATRONES_NO_NEGATIVO = (
 )
 
 
+# Techos "probables" para columnas de conteo (_PATRONES_NO_NEGATIVO) cuyo
+# techo real varia segun el negocio (ver la version completa/comentada en
+# data_cleaner/patrones.py, techo_probable_conteo_acotado): se infiere del
+# propio dato (Q3) si se comporta como una escala acotada 1-5 o 1-10, en
+# vez de asumir un solo techo fijo para todos los negocios.
+_TECHOS_ESCALA_CONTEO_ACOTADO = (5, 10)
+
+
+def _techo_probable_conteo_acotado(serie):
+    q3 = serie.quantile(0.75)
+    if pd.isna(q3):
+        return None
+    for techo in _TECHOS_ESCALA_CONTEO_ACOTADO:
+        if q3 <= techo:
+            return techo
+    return None
+
+
 def _normalizar_valor_texto(valor):
     s = str(valor).strip().lower()
     s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
@@ -198,6 +216,9 @@ def _limites_limitar(df, col, factor_iqr):
         lim_sup = min(lim_sup, 120) if not pd.isna(lim_sup) else 120
     elif _coincide_patron_columna(col, _PATRONES_NO_NEGATIVO):
         lim_inf = max(lim_inf, 0) if not pd.isna(lim_inf) else 0
+        techo = _techo_probable_conteo_acotado(serie)
+        if techo is not None:
+            lim_sup = min(lim_sup, techo) if not pd.isna(lim_sup) else techo
     no_nulos = serie.dropna()
     if len(no_nulos) > 0 and bool((no_nulos % 1 == 0).all()):
         if not pd.isna(lim_inf):
@@ -306,13 +327,17 @@ def _columna_numerica_potencial(serie):
 
 
 def _columnas_excluir_de_atipicos(df):
-    """Columnas que no deben pasar por IQR: identificadores y telefono/fax
-    (no son magnitudes continuas, no existe una "distribucion normal"
-    esperada para ellas -- ver la version completa en data_cleaner/patrones.py)."""
+    """Columnas que no deben pasar por IQR: identificadores, telefono/fax
+    y numeros de serie de un solo uso (chasis, VIN, motor, placa, SKU,
+    poliza/factura/cuenta, tracking... ver _PATRONES_NO_TELEFONO). No son
+    magnitudes continuas, no existe una "distribucion normal" esperada
+    para ellas -- ver la version completa en data_cleaner/patrones.py)."""
     cols_id = [col for col in df.columns if _es_columna_id(col)]
+    cols_serie = [col for col in df.columns if col not in cols_id
+                  and _coincide_patron_columna(col, _PATRONES_NO_TELEFONO)]
     cols_tel = _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col,
                                              excluir_por_nombre=_PATRONES_NO_TELEFONO)
-    return set(cols_id) | set(cols_tel)
+    return set(cols_id) | set(cols_serie) | set(cols_tel)
 
 
 def _columnas_para_atipicos(df):
@@ -841,23 +866,32 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
     ya_atipico = {(h["columna"], h["fila"]): h for h in hallazgos if h["tipo"] == "atipico"}
     for col in _columnas_para_atipicos(df):
         serie = _a_numero(df[col])
+        pendientes = []
         if _coincide_patron_columna(col, _PATRONES_EDAD):
             fuera = serie[(serie < 0) | (serie > 120)]
             motivo = "Fuera del rango plausible [0, 120] para este tipo de dato"
+            pendientes.append((fuera, motivo))
         elif _coincide_patron_columna(col, _PATRONES_NO_NEGATIVO):
-            fuera = serie[serie < 0]
-            motivo = "Valor negativo no valido para este tipo de dato (conteo/cantidad)"
+            negativos = serie[serie < 0]
+            pendientes.append((negativos, "Valor negativo no valido para este tipo de dato (conteo/cantidad)"))
+            techo = _techo_probable_conteo_acotado(serie)
+            if techo is not None:
+                excedidos = serie[serie > techo]
+                motivo_techo = (f"Fuera del rango plausible [0, {techo}] inferido para esta columna "
+                                 f"(el resto de los datos sugiere una escala acotada 1-{techo})")
+                pendientes.append((excedidos, motivo_techo))
         else:
             continue
-        for idx, val in fuera.items():
-            clave = (col, int(idx))
-            if clave in ya_atipico:
-                ya_atipico[clave]["detalle"] += f" | tambien fuera de rango logico ({motivo})"
-            else:
-                h = {"tipo": "atipico", "columna": col, "fila": int(idx),
-                     "valor_original": val, "detalle": motivo}
-                hallazgos.append(h)
-                ya_atipico[clave] = h
+        for fuera, motivo in pendientes:
+            for idx, val in fuera.items():
+                clave = (col, int(idx))
+                if clave in ya_atipico:
+                    ya_atipico[clave]["detalle"] += f" | tambien fuera de rango logico ({motivo})"
+                else:
+                    h = {"tipo": "atipico", "columna": col, "fila": int(idx),
+                         "valor_original": val, "detalle": motivo}
+                    hallazgos.append(h)
+                    ya_atipico[clave] = h
 
     return hallazgos
 
