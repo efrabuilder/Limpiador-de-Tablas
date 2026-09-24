@@ -32,7 +32,7 @@ from typing import Dict, List
 from .analyzer import Issue, detectar_atipicos_iqr, _es_valor_vacio, _serie_no_vacios
 from .patrones import (
     formato_fecha_python, FORMATO_FECHA_POR_DEFECTO,
-    rango_plausible_fijo, es_columna_no_negativa,
+    rango_plausible_fijo, es_columna_no_negativa, a_numero_tolerante,
 )
 
 ACCIONES_VALIDAS = {
@@ -99,40 +99,7 @@ def _interpretar_valor_fijo(valor):
 
 
 def _a_numero(serie: pd.Series) -> pd.Series:
-    """Convierte una serie a numerico, tolerando formato de moneda/miles
-    (ej. "₡7,650", "$1,234.56", "1.234,56") ademas de numeros ya limpios.
-
-    Antes, reemplazar_media/mediana/moda usaba pd.to_numeric() directo: en
-    una columna de dinero con simbolo de moneda o separador de miles, TODOS
-    los valores quedaban NaN, asi que la media/mediana/moda salia NaN y el
-    valor de reemplazo terminaba vacio (celda en blanco) en vez del monto
-    esperado -- el usuario pedia mediana/media y, en la practica, el
-    resultado era indistinguible de haber pedido "null"."""
-    directo = pd.to_numeric(serie, errors="coerce")
-    if directo.notna().mean() >= 0.5:
-        return directo
-
-    def _normalizar(v):
-        if not isinstance(v, str):
-            return v
-        v = re.sub(r"[^\d,.\-]", "", v.strip())
-        if v in ("", "-"):
-            return None
-        i_coma, i_punto = v.rfind(","), v.rfind(".")
-        if i_coma != -1 and i_punto != -1:
-            # Trae ambos separadores: el ultimo es el decimal, el otro es
-            # de miles y se descarta (ej. "1,234.56" o "1.234,56").
-            v = v.replace(".", "").replace(",", ".") if i_coma > i_punto \
-                else v.replace(",", "")
-        elif i_coma != -1:
-            # Solo coma: de miles si quedan grupos exactos de 3 digitos
-            # despues de cada una (ej. "7,650"), si no es el decimal.
-            partes = v.split(",")
-            v = v.replace(",", "") if all(len(p) == 3 for p in partes[1:]) \
-                else v.replace(",", ".")
-        return v
-
-    return pd.to_numeric(serie.apply(_normalizar), errors="coerce")
+    return a_numero_tolerante(serie)
 
 
 def _es_columna_numerica(serie: pd.Series, serie_num: pd.Series) -> bool:
@@ -186,7 +153,7 @@ def _limites_para_limitar(df: pd.DataFrame, columna: str):
     -2 quejas) se lleve al minimo valido en vez de saltar al otro extremo
     del rango. Si la columna solo tiene enteros, los limites se redondean
     hacia adentro (no existen 60.5 anios ni 85.75 meses)."""
-    serie = pd.to_numeric(df[columna], errors="coerce")
+    serie = _a_numero(df[columna])
     q1, q3 = serie.quantile(0.25), serie.quantile(0.75)
     iqr = q3 - q1
     lim_inf, lim_sup = q1 - 1.5 * iqr, q3 + 1.5 * iqr
@@ -322,7 +289,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
 
         elif issue.tipo == "atipico" and accion == "limitar":
             lim_inf, lim_sup = limites_iqr.get(issue.columna, (None, None))
-            valor_original_num = pd.to_numeric(pd.Series([issue.valor_original]), errors="coerce")[0]
+            valor_original_num = _a_numero(pd.Series([issue.valor_original]))[0]
             if lim_inf is not None and not pd.isna(valor_original_num):
                 valor_nuevo = valor_original_num
                 if not pd.isna(lim_inf) and valor_nuevo < lim_inf:
