@@ -326,18 +326,67 @@ def _columna_numerica_potencial(serie):
     return convertibles.notna().mean() > 0.7
 
 
-def _columnas_excluir_de_atipicos(df):
-    """Columnas que no deben pasar por IQR: identificadores, telefono/fax
-    y numeros de serie de un solo uso (chasis, VIN, motor, placa, SKU,
-    poliza/factura/cuenta, tracking... ver _PATRONES_NO_TELEFONO). No son
-    magnitudes continuas, no existe una "distribucion normal" esperada
-    para ellas -- ver la version completa en data_cleaner/patrones.py)."""
+def _columnas_identificador_serie_por_nombre(df):
     cols_id = [col for col in df.columns if _es_columna_id(col)]
     cols_serie = [col for col in df.columns if col not in cols_id
                   and _coincide_patron_columna(col, _PATRONES_NO_TELEFONO)]
     cols_tel = _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col,
                                              excluir_por_nombre=_PATRONES_NO_TELEFONO)
     return set(cols_id) | set(cols_serie) | set(cols_tel)
+
+
+def _parece_identificador_serie(serie, umbral_unicidad=0.95, umbral_longitud_fija=0.9, min_digitos=6):
+    """Respaldo por CONTENIDO (Nivel 2) para identificadores de un solo uso
+    que ningun patron reconoce por NOMBRE (ej. "numero_engranaje") -- ver
+    la version completa/comentada en data_cleaner/patrones.py
+    (parece_identificador_serie)."""
+    valores = serie.dropna()
+    if len(valores) < 5:
+        return False
+    numeros = _a_numero(valores)
+    if numeros.notna().mean() < 0.9:
+        return False
+    numeros = numeros.dropna()
+    if len(numeros) == 0 or not bool((numeros % 1 == 0).all()):
+        return False
+    if numeros.nunique() / len(numeros) < umbral_unicidad:
+        return False
+    largos = numeros.astype("int64").abs().astype(str).str.len()
+    moda = largos.mode()
+    if moda.empty:
+        return False
+    largo_moda = int(moda.iloc[0])
+    if largo_moda < min_digitos:
+        return False
+    return (largos == largo_moda).mean() >= umbral_longitud_fija
+
+
+def _columnas_identificador_serie_por_contenido(df, excluir=()):
+    excluir = set(excluir)
+    candidatas = []
+    for col in df.columns:
+        if col in excluir or _es_columna_id(col):
+            continue
+        if _coincide_patron_columna(col, _PATRONES_EDAD) or _coincide_patron_columna(col, _PATRONES_NO_NEGATIVO):
+            continue
+        try:
+            if _parece_identificador_serie(df[col]):
+                candidatas.append(col)
+        except Exception:
+            continue
+    return candidatas
+
+
+def _columnas_excluir_de_atipicos(df):
+    """Columnas que no deben pasar por IQR: identificadores, telefono/fax
+    y numeros de serie de un solo uso (chasis, VIN, motor, placa, SKU,
+    poliza/factura/cuenta, tracking... ver _PATRONES_NO_TELEFONO por
+    NOMBRE, mas un respaldo por CONTENIDO para nombres nuevos). No son
+    magnitudes continuas, no existe una "distribucion normal" esperada
+    para ellas -- ver la version completa en data_cleaner/patrones.py)."""
+    excluidas_nivel1 = _columnas_identificador_serie_por_nombre(df)
+    excluidas_contenido = _columnas_identificador_serie_por_contenido(df, excluir=excluidas_nivel1)
+    return set(excluidas_nivel1) | set(excluidas_contenido)
 
 
 def _columnas_para_atipicos(df):
@@ -1346,6 +1395,17 @@ def _main_cli():
     print(f"Hallazgos detectados: {len(df_reporte)}")
     print(f"Tabla limpia guardada en:  {ruta_limpio}")
     print(f"Reporte guardado en:       {ruta_reporte}")
+
+    cols_auto_excluidas = _columnas_identificador_serie_por_contenido(
+        df, excluir=_columnas_identificador_serie_por_nombre(df)
+    )
+    if cols_auto_excluidas:
+        print(
+            "AVISO: se excluyo del chequeo de atipicos, por su CONTENIDO (no por el "
+            f"nombre), a: {', '.join(cols_auto_excluidas)} -- parece un identificador de "
+            "un solo uso (valores casi todos unicos, mismo largo de digitos). Si en "
+            "realidad es una magnitud continua (precio, cantidad...), revisela a mano."
+        )
 
 
 if __name__ == "__main__":
