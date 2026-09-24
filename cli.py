@@ -31,6 +31,7 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, exportar,
 )
+from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES
 
 app = typer.Typer(
@@ -386,6 +387,172 @@ def limpiar_cmd(
     console.print(f"   Archivo limpio:  {ruta_limpio}")
     console.print(f"   Reporte:         {ruta_reporte}")
     console.print(f"   Filas finales:   {len(df_limpio)} (originales: {len(df)})")
+
+
+@app.command("generar-m")
+def generar_m_cmd(
+    input: Optional[str] = typer.Option(None, "--input", "-i", help="Ruta del archivo CSV/Excel a analizar (o use --input-sql-conexion)."),
+    input_sql_conexion: Optional[str] = typer.Option(
+        None, "--input-sql-conexion", help="Cadena de conexión SQLAlchemy de origen, en vez de --input.",
+    ),
+    input_sql_tabla: Optional[str] = typer.Option(None, "--input-sql-tabla", help="Tabla a leer (o use --input-sql-query)."),
+    input_sql_query: Optional[str] = typer.Option(None, "--input-sql-query", help="Consulta SQL a ejecutar (o use --input-sql-tabla)."),
+    outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta donde guardar el archivo .m generado."),
+    salida: str = typer.Option("codigo_generado.m", "--salida", help="Nombre del archivo .m dentro de --outdir."),
+    nombre_paso_anterior: str = typer.Option(
+        "TuPasoAnterior", "--nombre-paso-anterior",
+        help="Nombre EXACTO del paso previo en Power Query (el que entrega la tabla ya "
+             "cargada) al que se debe encadenar el código generado. Revíselo en el panel "
+             "'Pasos aplicados' del Editor de Power Query.",
+    ),
+    faltante: str = typer.Option(DEFAULT_CONFIG["faltante"], "--faltante",
+                                  help=f"Acción para valores faltantes: {', '.join(ACCIONES_FALTANTE)}."),
+    duplicado: str = typer.Option(DEFAULT_CONFIG["duplicado"], "--duplicado",
+                                   help=f"Acción para filas duplicadas: {', '.join(ACCIONES_DUPLICADO)}."),
+    atipico: str = typer.Option(DEFAULT_CONFIG["atipico"], "--atipico",
+                                 help=f"Acción para valores atípicos: {', '.join(ACCIONES_ATIPICO)}."),
+    tipo_invalido: str = typer.Option(DEFAULT_CONFIG["tipo_invalido"], "--tipo-invalido",
+                                       help=f"Acción para errores de tipo: {', '.join(ACCIONES_TIPO_INVALIDO)}."),
+    fecha_invalida: str = typer.Option(DEFAULT_CONFIG["fecha_invalida"], "--fecha-invalida",
+                                        help=f"Acción para fechas inválidas: {', '.join(ACCIONES_FECHA)}."),
+    email_invalido: str = typer.Option(DEFAULT_CONFIG["email_invalido"], "--email-invalido",
+                                        help=f"Acción para emails inválidos: {', '.join(ACCIONES_EMAIL)}."),
+    telefono_invalido: str = typer.Option(DEFAULT_CONFIG["telefono_invalido"], "--telefono-invalido",
+                                           help=f"Acción para teléfonos inválidos: {', '.join(ACCIONES_TELEFONO)}."),
+    id_duplicado: str = typer.Option(DEFAULT_CONFIG["id_duplicado"], "--id-duplicado",
+                                      help=f"Acción para IDs duplicados: {', '.join(ACCIONES_ID_DUPLICADO)}."),
+    formula_incorrecta: str = typer.Option(DEFAULT_CONFIG["formula_incorrecta"], "--formula-incorrecta",
+                                            help=f"Acción para Total≠Cantidad×Precio: {', '.join(ACCIONES_FORMULA)}."),
+    texto_inconsistente: str = typer.Option(DEFAULT_CONFIG["texto_inconsistente"], "--texto-inconsistente",
+                                             help=f"Acción para variantes de texto: {', '.join(ACCIONES_TEXTO)}."),
+    estado_invalido: str = typer.Option(DEFAULT_CONFIG["estado_invalido"], "--estado-invalido",
+                                         help=f"Acción para estados no reconocidos: {', '.join(ACCIONES_ESTADO)}."),
+    capitalizacion_incorrecta: str = typer.Option(DEFAULT_CONFIG["capitalizacion_incorrecta"], "--capitalizacion-incorrecta",
+                                                   help=f"Acción para capitalización inconsistente: {', '.join(ACCIONES_CAPITALIZACION)}."),
+    espacio_extra: str = typer.Option(DEFAULT_CONFIG["espacio_extra"], "--espacio-extra",
+                                       help=f"Acción para texto con espacios de más: {', '.join(ACCIONES_ESPACIO_EXTRA)}."),
+    valor_fijo: List[str] = typer.Option(
+        [], "--valor-fijo", help="Valor fijo por columna, formato columna=valor. Repetible."
+    ),
+    formato_fecha: List[str] = typer.Option(
+        [], "--formato-fecha",
+        help="Formato de fecha preferido por columna (solo si --fecha-invalida "
+             f"normalizar_formato_fecha), formato columna=clave. Claves válidas: "
+             f"{', '.join(FORMATOS_FECHA_DISPONIBLES.keys())}. Repetible.",
+    ),
+    sin_auto_columnas: bool = typer.Option(False, "--sin-auto-columnas",
+                                            help="Desactiva la auto-detección de columnas por nombre "
+                                                 "para fecha/email/teléfono/id/fórmula/texto."),
+    columnas_fecha: Optional[str] = typer.Option(None, "--columnas-fecha", help="Columnas de fecha (coma-separadas)."),
+    fecha_min: Optional[str] = typer.Option(None, "--fecha-min", help="Fecha mínima válida (AAAA-MM-DD)."),
+    fecha_max: Optional[str] = typer.Option(None, "--fecha-max", help="Fecha máxima válida (AAAA-MM-DD)."),
+    columnas_email: Optional[str] = typer.Option(None, "--columnas-email", help="Columnas de email (coma-separadas)."),
+    columnas_telefono: Optional[str] = typer.Option(None, "--columnas-telefono", help="Columnas de teléfono (coma-separadas)."),
+    digitos_telefono: Optional[str] = typer.Option(
+        None, "--digitos-telefono",
+        help="Rango de dígitos válido, formato min-max (ej. 8-8). Si no se indica, "
+             "se calcula por --paises-telefono, o al rango internacional amplio "
+             "(7-15 dígitos) si tampoco se indican países.",
+    ),
+    paises_telefono: Optional[str] = typer.Option(
+        None, "--paises-telefono",
+        help="País(es) para el rango de dígitos de celular (coma-separados, ej. 'cr,mexico'). "
+             "Ignorado si se indica --digitos-telefono explícitamente.",
+    ),
+    permitir_codigo_pais: bool = typer.Option(
+        True, "--permitir-codigo-pais/--no-permitir-codigo-pais",
+        help="Acepta el mismo número con 1-3 dígitos extra al inicio (código de país sin '+').",
+    ),
+    columnas_id: Optional[str] = typer.Option(None, "--columnas-id", help="Columnas identificadoras (coma-separadas)."),
+    total: Optional[str] = typer.Option(None, "--total", help="Columna de total (regla Total = Cantidad × Precio)."),
+    cantidad: Optional[str] = typer.Option(None, "--cantidad", help="Columna de cantidad."),
+    precio: Optional[str] = typer.Option(None, "--precio", help="Columna de precio unitario."),
+    columnas_texto: Optional[str] = typer.Option(None, "--columnas-texto", help="Columnas categóricas (coma-separadas)."),
+):
+    """Genera código M 100% nativo (sin Python.Execute) para pegar en el
+    Editor avanzado de Power Query, equivalente a lo que hace 'limpiar' pero
+    sin depender de Python ni de este proyecto una vez pegado.
+
+    Ejemplo:
+        python cli.py generar-m --input clientes.xlsx --outdir salida \\
+            --nombre-paso-anterior "Tipo cambiado" --faltante reemplazar_mediana \\
+            --atipico limitar
+    """
+    if not input and not (input_sql_conexion and (input_sql_tabla or input_sql_query)):
+        console.print("[red]Indique --input, o --input-sql-conexion junto con --input-sql-tabla/--input-sql-query.[/red]")
+        raise typer.Exit(code=2)
+    if input and not os.path.exists(input):
+        console.print(f"[red]No existe el archivo: {input}[/red]")
+        raise typer.Exit(code=1)
+
+    acciones_validas = {
+        "faltante": ACCIONES_FALTANTE, "duplicado": ACCIONES_DUPLICADO,
+        "atipico": ACCIONES_ATIPICO, "tipo_invalido": ACCIONES_TIPO_INVALIDO,
+        "fecha_invalida": ACCIONES_FECHA, "email_invalido": ACCIONES_EMAIL,
+        "telefono_invalido": ACCIONES_TELEFONO, "id_duplicado": ACCIONES_ID_DUPLICADO,
+        "formula_incorrecta": ACCIONES_FORMULA, "texto_inconsistente": ACCIONES_TEXTO,
+        "estado_invalido": ACCIONES_ESTADO,
+        "capitalizacion_incorrecta": ACCIONES_CAPITALIZACION,
+        "espacio_extra": ACCIONES_ESPACIO_EXTRA,
+    }
+    config = {"faltante": faltante, "duplicado": duplicado,
+              "atipico": atipico, "tipo_invalido": tipo_invalido,
+              "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
+              "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
+              "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+              "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta,
+              "espacio_extra": espacio_extra}
+    for tipo, accion in config.items():
+        if accion not in acciones_validas[tipo]:
+            console.print(f"[red]Acción inválida para {tipo}: '{accion}'. "
+                           f"Válidas: {', '.join(acciones_validas[tipo])}[/red]")
+            raise typer.Exit(code=2)
+
+    valores_fijos = _parsear_valores_fijos(valor_fijo)
+    formatos_fecha = _parsear_formatos_fecha(formato_fecha)
+
+    os.makedirs(outdir, exist_ok=True)
+    if input:
+        df = load_table(input, kind="auto")
+    else:
+        try:
+            df = load_table(input_sql_conexion, kind="sql", table_name=input_sql_tabla, query=input_sql_query)
+        except Exception as exc:
+            console.print(f"[red]No se pudo leer de la base de datos: {exc}[/red]")
+            raise typer.Exit(code=1)
+    console.print(f"Tabla cargada: [bold]{len(df)}[/bold] filas x [bold]{len(df.columns)}[/bold] columnas.")
+
+    faltan = [tipo for tipo, accion in config.items() if accion == "valor_fijo" and not valores_fijos]
+    if faltan:
+        console.print(f"[red]Falta --valor-fijo columna=valor para el/los tipo(s): {', '.join(faltan)}[/red]")
+        raise typer.Exit(code=2)
+
+    _cols_o_vacia = (lambda v: _parsear_lista_columnas(v) or []) if sin_auto_columnas \
+        else _parsear_lista_columnas
+    codigo_m = generar_editor_m_puro(
+        df, config=config, valores_fijos=valores_fijos,
+        nombre_paso_anterior=nombre_paso_anterior,
+        formatos_fecha=formatos_fecha,
+        columnas_fecha=_cols_o_vacia(columnas_fecha), fecha_min=fecha_min, fecha_max=fecha_max,
+        columnas_email=_cols_o_vacia(columnas_email),
+        columnas_telefono=_cols_o_vacia(columnas_telefono),
+        digitos_telefono=_resolver_digitos_telefono(digitos_telefono),
+        paises_telefono=_parsear_lista_columnas(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais,
+        columnas_id=_cols_o_vacia(columnas_id),
+        columna_total=total, columna_cantidad=cantidad, columna_precio=precio,
+        columnas_texto=_cols_o_vacia(columnas_texto),
+        incluir_generico=not sin_auto_columnas,
+    )
+
+    ruta_m = os.path.join(outdir, salida)
+    with open(ruta_m, "w", encoding="utf-8") as f:
+        f.write(codigo_m)
+
+    console.print("\n[bold green]✅ Código M generado.[/bold green]")
+    console.print(f"   Archivo:  {ruta_m}")
+    console.print("   Ábralo, copie todo el contenido y péguelo en el Editor avanzado de Power Query,")
+    console.print(f"   encadenado después del paso \"{nombre_paso_anterior}\".")
 
 
 @app.command("modelo-sql")
