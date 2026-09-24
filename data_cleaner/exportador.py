@@ -189,7 +189,7 @@ def _limites_limitar(df, col, factor_iqr):
     """Limites (inf, sup) para 'limitar': IQR cruzado con el rango logico de
     la columna (edad 0-120, conteos >= 0); en columnas de solo enteros se
     redondean hacia adentro."""
-    serie = pd.to_numeric(df[col], errors="coerce")
+    serie = _a_numero(df[col])
     q1, q3 = serie.quantile(0.25), serie.quantile(0.75)
     iqr = q3 - q1
     lim_inf, lim_sup = q1 - factor_iqr * iqr, q3 + factor_iqr * iqr
@@ -323,7 +323,8 @@ def _columnas_para_atipicos(df):
             continue
         serie = df[col]
         es_texto = pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)
-        if es_texto and _columna_numerica_potencial(serie):
+        if es_texto and (_columna_numerica_potencial(serie)
+                          or _a_numero(serie.dropna()).notna().mean() > 0.7):
             columnas.append(col)
     return columnas
 
@@ -823,7 +824,7 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
     hallazgos += _detectar_capitalizacion_incorrecta(df)
 
     for col in _columnas_para_atipicos(df):
-        serie = pd.to_numeric(df[col], errors="coerce")
+        serie = _a_numero(df[col])
         q1, q3 = serie.quantile(0.25), serie.quantile(0.75)
         iqr = q3 - q1
         if iqr == 0 or pd.isna(iqr):
@@ -839,7 +840,7 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
     # se fusionan por (columna, fila) con los estadisticos para no duplicar.
     ya_atipico = {(h["columna"], h["fila"]): h for h in hallazgos if h["tipo"] == "atipico"}
     for col in _columnas_para_atipicos(df):
-        serie = pd.to_numeric(df[col], errors="coerce")
+        serie = _a_numero(df[col])
         if _coincide_patron_columna(col, _PATRONES_EDAD):
             fuera = serie[(serie < 0) | (serie > 120)]
             motivo = "Fuera del rango plausible [0, 120] para este tipo de dato"
@@ -1018,7 +1019,7 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
         elif h["tipo"] == "atipico" and accion == "limitar":
             lim_inf, lim_sup = limites_iqr.get(h["columna"], (None, None))
-            val_num = pd.to_numeric(pd.Series([h["valor_original"]]), errors="coerce")[0]
+            val_num = _a_numero(pd.Series([h["valor_original"]]))[0]
             if lim_inf is not None and not pd.isna(val_num):
                 valor_nuevo = val_num
                 if not pd.isna(lim_inf) and valor_nuevo < lim_inf:
@@ -1048,6 +1049,13 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             else:
                 valor_nuevo = h["valor_original"]
 
+        detalle = h["detalle"]
+        if h["columna"] and h["columna"] in df.columns \\
+                and accion in ("reemplazar_media", "reemplazar_mediana") \\
+                and h["tipo"] in ("faltante", "tipo_invalido", "atipico") \\
+                and not _es_columna_numerica(df[h["columna"]], _a_numero(df[h["columna"]])):
+            detalle += " | columna de texto: no admite media/mediana, se usó la moda"
+
         registro.append({
             "tipo": h["tipo"],
             "columna": h["columna"] or "(fila completa)",
@@ -1055,7 +1063,7 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             "valor_original": str(h["valor_original"]),
             "accion_aplicada": accion,
             "valor_nuevo": str(valor_nuevo),
-            "detalle": h["detalle"],
+            "detalle": detalle,
         })
 
     if config.get("fecha_invalida") == "normalizar_formato_fecha":
