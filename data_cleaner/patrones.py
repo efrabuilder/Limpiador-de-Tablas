@@ -741,6 +741,37 @@ def es_columna_no_negativa(col) -> bool:
     return coincide_patron(col, PATRONES_NO_NEGATIVO)
 
 
+# Techos "probables" para columnas de conteo (PATRONES_NO_NEGATIVO) cuyo
+# techo real varia segun el negocio: una columna "quejas" puede ser una
+# encuesta de satisfaccion en escala 1-5 en un negocio, un puntaje 1-10
+# (estilo NPS) en otro, o simplemente un conteo abierto de reclamos
+# historicos que puede superar largamente el 10 en un tercero -- a
+# diferencia de edad, que siempre es 0-120 sin importar el dataset, aqui
+# NO hay un unico techo universal valido para todos los casos.
+# En vez de fijar un techo (que romperia la mitad de los negocios), se
+# infiere del propio dato: se usa el tercer cuartil (Q3) -- el "grueso" de
+# la columna, poco sensible a un puñado de atipicos -- para decidir si esta
+# columna se comporta como una escala acotada conocida (1-5 o 1-10) o como
+# un conteo abierto. Si Q3 cae dentro de alguna de las dos escalas, se usa
+# ese techo; si Q3 ya esta por encima de ambas, se deja sin techo (solo el
+# piso en 0 sigue aplicando via es_columna_no_negativa).
+TECHOS_ESCALA_CONTEO_ACOTADO: Tuple[int, ...] = (5, 10)
+
+
+def techo_probable_conteo_acotado(serie: pd.Series) -> Optional[float]:
+    """Para una columna de conteo (ver PATRONES_NO_NEGATIVO): si el Q3 de
+    sus valores cae dentro de una escala acotada conocida (ver
+    TECHOS_ESCALA_CONTEO_ACOTADO), devuelve ese techo; si el Q3 ya esta por
+    encima de todas (conteo abierto, no una escala fija), devuelve None."""
+    q3 = serie.quantile(0.75)
+    if pd.isna(q3):
+        return None
+    for techo in TECHOS_ESCALA_CONTEO_ACOTADO:
+        if q3 <= techo:
+            return techo
+    return None
+
+
 def a_numero_tolerante(serie: pd.Series) -> pd.Series:
     """Convierte una serie a numerico, tolerando formato de moneda/miles
     (ej. "₡7,650", "$1,234.56", "1.234,56") ademas de numeros ya limpios.
@@ -785,21 +816,30 @@ def a_numero_tolerante(serie: pd.Series) -> pd.Series:
 # -----------------------------------------------------------------------------
 def columnas_excluir_de_atipicos(df: pd.DataFrame) -> List[str]:
     """Columnas que NO deben pasar por el chequeo de atipicos por IQR/Z-score:
-    identificadores (id, codigo, folio, clave...) y telefono/fax.
+    identificadores (id, codigo, folio, clave...), telefono/fax, y
+    numeros de serie de un solo uso (chasis, VIN, motor, placa, SKU,
+    numero de poliza/factura/cuenta, tracking... ver
+    PATRONES_IDENTIFICADORES_NO_TELEFONO).
 
     Ninguna de ellas es una magnitud continua -- no existe una
-    "distribucion normal" esperada para un codigo postal o un numero de
-    telefono -- asi que aplicarles IQR/Z-score solo genera falsos
-    positivos (ej. un codigo postal valido de otra ciudad, o un telefono
-    con codigo de pais, marcados como "atipicos" por estar numericamente
-    lejos del grueso de los datos). El chequeo correcto para telefonos ya
-    existe en detectar_telefonos_invalidos (valida formato/longitud, no
-    cercania estadistica a la media).
+    "distribucion normal" esperada para un codigo postal, un numero de
+    telefono o un numero de chasis -- asi que aplicarles IQR/Z-score solo
+    genera falsos positivos (ej. un codigo postal valido de otra ciudad,
+    un telefono con codigo de pais, o un chasis/motor con una numeracion
+    distinta a la del resto del lote, marcados como "atipicos" por estar
+    numericamente lejos del grueso de los datos, cuando en realidad cada
+    chasis/motor es unico por diseño -- no se espera que se agrupen cerca
+    de una media). El chequeo correcto para telefonos ya existe en
+    detectar_telefonos_invalidos (valida formato/longitud, no cercania
+    estadistica a la media); estos identificadores de serie no tienen
+    chequeo de formato propio, simplemente se excluyen del estadistico.
     """
     cols_id = [c for c in df.columns if es_columna_id(c)]
+    cols_serie = [c for c in df.columns if c not in cols_id
+                  and coincide_patron(c, PATRONES_NO_TELEFONO)]
     cols_tel = detectar_columnas(df, PATRONES_TELEFONO, parece_telefono, excluir=cols_id,
                                   excluir_por_nombre=PATRONES_NO_TELEFONO)
-    return list(dict.fromkeys(cols_id + cols_tel))
+    return list(dict.fromkeys(cols_id + cols_serie + cols_tel))
 
 
 # -----------------------------------------------------------------------------
