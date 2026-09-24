@@ -449,6 +449,15 @@ def parece_telefono(serie: pd.Series, umbral: float = 0.7, min_d=7, max_d=15) ->
     m = m[~con_anio]
     if len(m) == 0:
         return False
+    # Se descartan valores con parte decimal (ej. "31120.23", "1,234.56"):
+    # un monto con centavos, no un telefono. Sin este filtro, al quitarle
+    # el separador decimal quedan puros digitos que por casualidad caen en
+    # el rango de longitud de un telefono (ej. "31120.23" -> "3112023", 7
+    # digitos -- se confundia con un celular valido de Costa Rica).
+    con_decimal = m.str.contains(r'^\s*-?[\d.,]*\d[.,]\d{1,2}\s*$', regex=True)
+    m = m[~con_decimal]
+    if len(m) == 0:
+        return False
     solo_digitos = m.str.replace(r"\D", "", regex=True)
     ok = solo_digitos.str.len().between(min_d, max_d)
     return ok.mean() >= umbral
