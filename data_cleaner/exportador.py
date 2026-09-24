@@ -262,6 +262,10 @@ def _parece_telefono_col(serie, umbral=0.7, min_d=7, max_d=15):
     m = m[~con_anio]
     if len(m) == 0:
         return False
+    con_decimal = m.str.contains(r'^\\s*-?[\\d.,]*\\d[.,]\\d{1,2}\\s*$', regex=True)
+    m = m[~con_decimal]
+    if len(m) == 0:
+        return False
     solo_digitos = m.str.replace(r"\\D", "", regex=True)
     return solo_digitos.str.len().between(min_d, max_d).mean() >= umbral
 
