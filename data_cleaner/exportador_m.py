@@ -139,14 +139,6 @@ def _buscar_valor_fijo(valores_fijos: dict, tipo: str, columna: str):
     return valores_fijos.get(columna)
 
 
-def _paso_relleno_valor_fijo(cb, comentarios, nombre_paso: str, col: str,
-                              valores_fijos: dict, tipo: str) -> None:
-    """Agrega un paso Table.ReplaceValue que rellena nulos de 'col' con el
-    valor fijo configurado para (tipo, col). Si no hay ningun valor fijo
-    guardado (la app deberia haberlo exigido, pero por si llega vacio via
-    API/CLI), no genera un paso roto con el texto literal "None": deja un
-    aviso explicando que falta configurar el valor.
-    """
 def _es_null_explicito(valor) -> bool:
     """True si el usuario escribio literalmente "null" (sin importar
     mayusculas) como valor fijo -- lo interpretamos como el null real de M,
