@@ -112,6 +112,14 @@ _PATRONES_NO_TELEFONO = (
     "conocimiento_embarque", "folio_pago", "numero_folio", "codigo_rastreo", "numero_seguimiento",
     "seguimiento", "numero_referencia", "referencia_pago",
 )
+# Columnas que son la POSICION de una fila dentro de un grupo (renglon de
+# una factura, numero de item de un pedido), no una magnitud real -- ver
+# data_cleaner/patrones.py PATRONES_POSICION_SECUENCIAL para el detalle.
+_PATRONES_POSICION_SECUENCIAL = (
+    "linea", "renglon", "item", "numero_linea", "num_linea", "nro_linea",
+    "numero_item", "num_item", "nro_item", "posicion", "orden_linea",
+    "secuencia", "correlativo", "consecutivo", "detalle_linea",
+)
 # Ajustes de la formula Total (descuento se resta; impuesto y envio se suman)
 # y fechas donde "Pendiente" / "No aplica" es un valor legitimo -- copia de
 # PATRONES_DESCUENTO/IMPUESTO/ENVIO, PATRONES_FECHA_CON_PENDIENTE y
@@ -333,7 +341,8 @@ def _columna_numerica_potencial(serie):
 def _columnas_identificador_serie_por_nombre(df):
     cols_id = [col for col in df.columns if _es_columna_id(col)]
     cols_serie = [col for col in df.columns if col not in cols_id
-                  and _coincide_patron_columna(col, _PATRONES_NO_TELEFONO)]
+                  and (_coincide_patron_columna(col, _PATRONES_NO_TELEFONO)
+                       or _coincide_patron_columna(col, _PATRONES_POSICION_SECUENCIAL))]
     cols_tel = _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col,
                                              excluir_por_nombre=_PATRONES_NO_TELEFONO)
     return set(cols_id) | set(cols_serie) | set(cols_tel)
