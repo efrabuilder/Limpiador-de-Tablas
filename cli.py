@@ -539,6 +539,15 @@ def generar_m_cmd(
     codigo_m = generar_editor_m_puro(
         df, config=config, valores_fijos=valores_fijos,
         nombre_paso_anterior=nombre_paso_anterior,
+        # generar_editor_m_puro solo lee 'faltante'/'duplicado'/'atipico'/
+        # 'tipo_invalido' de `config`; las 9 reglas "nuevas" deben pasarse
+        # como kwargs propios o quedan silenciosamente en su default
+        # ("marcar_solo"/"usar_sugerido") sin importar lo que pida --xxx.
+        fecha_invalida=fecha_invalida, email_invalido=email_invalido,
+        telefono_invalido=telefono_invalido, id_duplicado=id_duplicado,
+        formula_incorrecta=formula_incorrecta, texto_inconsistente=texto_inconsistente,
+        estado_invalido=estado_invalido, capitalizacion_incorrecta=capitalizacion_incorrecta,
+        espacio_extra=espacio_extra,
         formatos_fecha=formatos_fecha,
         columnas_fecha=_cols_o_vacia(columnas_fecha), fecha_min=fecha_min, fecha_max=fecha_max,
         columnas_email=_cols_o_vacia(columnas_email),
