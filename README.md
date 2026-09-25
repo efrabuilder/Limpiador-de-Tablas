@@ -300,17 +300,21 @@ Funciona sin problema en SQL Server, MySQL y PostgreSQL.
 ```
 data_cleaner/
 ├── data_cleaner/
-│   ├── loaders.py     # Carga CSV / Excel (una hoja, todas o varias por separado) / SQL
-│   ├── analyzer.py    # Detección de faltantes, duplicados, tipo y atípicos
-│   ├── cleaner.py      # Aplica las acciones de corrección elegidas
-│   ├── report.py       # Genera el reporte (Resumen + Detalle)
-│   ├── exporters.py    # Exporta el archivo limpio (CSV/Excel/SQL)
-│   └── modelo_sql.py   # Modelo de datos estrella/copo de nieve (PK/FK + diagrama)
+│   ├── loaders.py       # Carga CSV / Excel (una hoja, todas o varias por separado) / SQL
+│   ├── analyzer.py      # Detección de faltantes, duplicados, tipo y atípicos
+│   ├── cleaner.py       # Aplica las acciones de corrección elegidas
+│   ├── patrones.py      # Patrones/heurísticas compartidos (fechas, emails, teléfonos, etc.)
+│   ├── report.py        # Genera el reporte (Resumen + Detalle)
+│   ├── exporters.py     # Exporta el archivo limpio (CSV/Excel/SQL)
+│   ├── exportador.py    # Genera el reporte Excel con formato/resaltado
+│   ├── exportador_m.py  # Genera el editor de consultas M (Power Query) con los pasos de limpieza
+│   └── modelo_sql.py    # Modelo de datos estrella/copo de nieve (PK/FK + diagrama)
 ├── app.py                       # Interfaz web (Streamlit)
 ├── desktop_app.py                # Interfaz de escritorio (Tkinter)
 ├── cli.py                        # CLI por flags (automatización)
 ├── api.py                        # API REST (FastAPI)
 ├── excel_a_sql.py                # Script: Excel (varias hojas) -> modelo SQL con PK/FK
+├── generar_m.py                  # Script: genera el editor M (Power Query) desde la línea de comandos
 ├── notebook_interactivo.ipynb    # Notebook interactivo (Jupyter + ipywidgets)
 ├── main.py                       # CLI interactiva (con preguntas)
 ├── ejemplo_datos.csv             # Datos de ejemplo para probar
