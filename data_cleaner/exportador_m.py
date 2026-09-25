@@ -62,6 +62,11 @@ from data_cleaner.patrones import (
     columna_admite_fecha_pendiente as _columna_admite_fecha_pendiente,
     rango_plausible_fijo as _rango_plausible_fijo,
     es_columna_no_negativa as _es_columna_no_negativa,
+    columnas_excluir_de_atipicos as _columnas_excluir_de_atipicos,
+    columnas_identificador_serie_por_nombre as _columnas_identificador_serie_por_nombre,
+    columnas_identificador_serie_por_contenido as _columnas_identificador_serie_por_contenido,
+    techo_probable_conteo_acotado as _techo_probable_conteo_acotado,
+    a_numero_tolerante as _a_numero_tolerante,
     PATRONES_EMAIL as _PATRONES_EMAIL,
     PATRONES_TELEFONO as _PATRONES_TELEFONO,
     PATRONES_FECHA as _PATRONES_FECHA,
@@ -1118,13 +1123,36 @@ def generar_editor_m_puro(
     if necesita_percentil_fn:
         pass  # la funcion se inyecta al final del bloque de atipicos
 
+    # Columnas que SI entran a la conversion numerica/faltante (arriba) pero
+    # NO deben pasar por IQR/limitar: identificadores de serie de un solo uso
+    # (chasis, motor, o por CONTENIDO como "numero_engranaje" sin nombre
+    # reconocido -- ver patrones.columnas_excluir_de_atipicos). Aplicarles
+    # IQR las marcaria como "atipicas" por error, ya que cada una es unica
+    # por diseño y no se espera que se agrupen cerca de una media.
+    excluidas_atipico_por_nombre = set(_columnas_identificador_serie_por_nombre(df))
+    excluidas_atipico_contenido = _columnas_identificador_serie_por_contenido(
+        df, excluir=excluidas_atipico_por_nombre
+    )
+    excluidas_atipico = excluidas_atipico_por_nombre | set(excluidas_atipico_contenido)
+    columnas_para_atipico = [c for c in columnas_numericas_potenciales if c not in excluidas_atipico]
+    if excluidas_atipico_contenido:
+        cols_aviso = ", ".join(excluidas_atipico_contenido)
+        comentarios.append(
+            f'  // AVISO: excluidas del chequeo de atipicos por su CONTENIDO (no por el nombre): '
+            f'{cols_aviso}. Parecen identificador(es) de un solo uso (valores casi todos unicos, '
+            f'mismo largo de digitos). Si en realidad son una magnitud continua (precio, '
+            f'cantidad...), reviselas a mano.'
+        )
+
     if a_atipico != "marcar_solo" or True:
-        for col in columnas_numericas_potenciales:
+        for col in columnas_para_atipico:
             nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
             if a_atipico == "limitar":
                 # Limites = IQR cruzado con el rango logico de la columna
-                # (edad 0-120, conteos >= 0) y, si la columna solo tiene
-                # enteros, redondeados hacia adentro (igual que cleaner.py).
+                # (edad 0-120, conteos >= 0, y si el Q3 sugiere una escala
+                # acotada tipo 1-10, tambien ese techo) y, si la columna
+                # solo tiene enteros, redondeados hacia adentro (igual que
+                # cleaner.py).
                 expr_li = f"_q1 - {factor_iqr} * _iqr"
                 expr_ls = f"_q3 + {factor_iqr} * _iqr"
                 rango_logico = _rango_plausible_fijo(col)
@@ -1133,6 +1161,9 @@ def generar_editor_m_puro(
                     expr_ls = f"List.Min({{{expr_ls}, {rango_logico[1]}}})"
                 elif _es_columna_no_negativa(col):
                     expr_li = f"List.Max({{{expr_li}, 0}})"
+                    techo = _techo_probable_conteo_acotado(_a_numero_tolerante(df[col]))
+                    if techo is not None:
+                        expr_ls = f"List.Min({{{expr_ls}, {techo}}})"
                 _nums = pd.to_numeric(df[col], errors="coerce").dropna()
                 if len(_nums) > 0 and bool((_nums % 1 == 0).all()):
                     expr_li = f"Number.RoundUp({expr_li})"
