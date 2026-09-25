@@ -36,6 +36,7 @@ había ninguna.
 from __future__ import annotations
 import re
 import unicodedata
+import datetime
 from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
@@ -56,12 +57,29 @@ def a_numero_tolerante(serie: pd.Series) -> pd.Series:
     OJO: esto es a proposito mas permisivo que detectar_tipo_invalido()
     (que sigue usando pd.to_numeric estricto): aqui el objetivo es poder
     CALCULAR sobre el dato tal como esta, no decidir si su formato es
-    consistente con el resto de la columna."""
+    consistente con el resto de la columna.
+
+    Guardado contra fechas (bug real encontrado): una columna 'object' con
+    fechas mezcladas con celdas vacias (ej. un Excel donde no todas las
+    filas de "fecha entrega" quedaron tipadas igual) contiene Timestamp +
+    None -- pd.to_numeric() directo sobre eso da NaN en el 100% de los
+    casos, asi que sin este corte se caia al fallback de abajo. Ahi,
+    serie.apply(_normalizar) devuelve esos mismos Timestamp/None sin
+    tocarlos (no son str), pero pandas RE-INFIERE el tipo de la serie
+    resultante como datetime64 -- y sobre ESA si pd.to_numeric() "funciona":
+    convierte cada fecha a nanosegundos, y cada None/NaT al entero
+    centinela -9223372036854775808. Ese numero absurdo terminaba colando
+    como si fuera un valor real de la columna (y hasta se marcaba como
+    atipico), en vez de tratarse como el dato faltante que en realidad es."""
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        return pd.Series(float("nan"), index=serie.index, dtype="float64")
     directo = pd.to_numeric(serie, errors="coerce")
     if directo.notna().mean() >= 0.5:
         return directo
 
     def _normalizar(v):
+        if isinstance(v, (pd.Timestamp, datetime.date, datetime.datetime)):
+            return None
         if not isinstance(v, str):
             return v
         v = re.sub(r"[^\d,.\-]", "", v.strip())
@@ -81,7 +99,12 @@ def a_numero_tolerante(serie: pd.Series) -> pd.Series:
                 else v.replace(",", ".")
         return v
 
-    return pd.to_numeric(serie.apply(_normalizar), errors="coerce")
+    normalizada = serie.apply(_normalizar)
+    if pd.api.types.is_datetime64_any_dtype(normalizada):
+        # .apply() re-infirio el tipo como fecha (ver nota arriba) -- no
+        # hay nada numerico real que rescatar aqui.
+        return pd.Series(float("nan"), index=serie.index, dtype="float64")
+    return pd.to_numeric(normalizada, errors="coerce")
 
 # -----------------------------------------------------------------------------
 # Normalización de nombres de columna
@@ -191,6 +214,23 @@ PATRONES_IDENTIFICADORES_NO_TELEFONO: dict[str, Tuple[str, ...]] = {
 # `excluir_por_nombre` en detectar_columnas().
 PATRONES_NO_TELEFONO: Tuple[str, ...] = tuple(
     p for patrones in PATRONES_IDENTIFICADORES_NO_TELEFONO.values() for p in patrones
+)
+
+# -----------------------------------------------------------------------------
+# Columnas que son la POSICION/orden de una fila dentro de un grupo (ej. el
+# renglon de una factura, el numero de item de un pedido) y NO una magnitud
+# real. A diferencia de los identificadores de arriba, su contenido no tiene
+# nada de especial (son numeros pequeños tipo 1, 2, 3...), asi que no hay
+# forma de reconocerlas por CONTENIDO -- se reconocen solo por NOMBRE. Sin
+# esta lista, IQR/Z-score las marca como "atipicas" en el extremo de la
+# distribucion: la mayoria de facturas/pedidos tienen pocos renglones (1-5),
+# asi que las pocas facturas largas (renglon 13, 20, 21...) salen "fuera de
+# rango" aunque sean perfectamente normales -- cada factura es su propio
+# grupo, no tiene sentido comparar el renglon de una factura con el de otra.
+PATRONES_POSICION_SECUENCIAL: Tuple[str, ...] = (
+    "linea", "renglon", "item", "numero_linea", "num_linea", "nro_linea",
+    "numero_item", "num_item", "nro_item", "posicion", "orden_linea",
+    "secuencia", "correlativo", "consecutivo", "detalle_linea",
 )
 
 
@@ -781,54 +821,15 @@ def techo_probable_conteo_acotado(serie: pd.Series) -> Optional[float]:
     return None
 
 
-def a_numero_tolerante(serie: pd.Series) -> pd.Series:
-    """Convierte una serie a numerico, tolerando formato de moneda/miles
-    (ej. "₡7,650", "$1,234.56", "1.234,56") ademas de numeros ya limpios.
-
-    Uso: SOLO para decidir si una columna es candidata a deteccion de
-    atipicos (IQR/Z-score) y para convertir sus valores antes de calcular
-    cuartiles/limites -- no para detectar_tipo_invalido, que debe seguir
-    usando pd.to_numeric() sin tolerancia: ahi el objetivo es justamente
-    encontrar celdas con un formato distinto al resto de la columna (ej.
-    "₡7,650" entre puros numeros limpios), y si se tolerara el formato de
-    moneda ahi tambien, esas inconsistencias dejarian de detectarse.
-
-    Sin esta version tolerante, una columna de dinero formateada de forma
-    CONSISTENTE en todas sus filas (ej. "₡7,650" en las 300 filas) fallaba
-    el chequeo de "es candidata numerica" (pd.to_numeric fallaba en el
-    100% de las celdas), asi que quedaba invisible para IQR/Z-score: un
-    monto absurdo como "₡999,999,999" no se detectaba como atipico."""
-    directo = pd.to_numeric(serie, errors="coerce")
-    if directo.notna().mean() >= 0.5:
-        return directo
-
-    def _normalizar(v):
-        if not isinstance(v, str):
-            return v
-        v = re.sub(r"[^\d,.\-]", "", v.strip())
-        if v in ("", "-"):
-            return None
-        i_coma, i_punto = v.rfind(","), v.rfind(".")
-        if i_coma != -1 and i_punto != -1:
-            v = v.replace(".", "").replace(",", ".") if i_coma > i_punto \
-                else v.replace(",", "")
-        elif i_coma != -1:
-            partes = v.split(",")
-            v = v.replace(",", "") if all(len(p) == 3 for p in partes[1:]) \
-                else v.replace(",", ".")
-        return v
-
-    return pd.to_numeric(serie.apply(_normalizar), errors="coerce")
-
-
 # Columnas a excluir del chequeo estadistico de atipicos (IQR / Z-score)
 # -----------------------------------------------------------------------------
 def columnas_excluir_de_atipicos(df: pd.DataFrame) -> List[str]:
     """Columnas que NO deben pasar por el chequeo de atipicos por IQR/Z-score:
-    identificadores (id, codigo, folio, clave...), telefono/fax, y
+    identificadores (id, codigo, folio, clave...), telefono/fax,
     numeros de serie de un solo uso (chasis, VIN, motor, placa, SKU,
     numero de poliza/factura/cuenta, tracking... ver
-    PATRONES_IDENTIFICADORES_NO_TELEFONO).
+    PATRONES_IDENTIFICADORES_NO_TELEFONO), y columnas de POSICION dentro de
+    un grupo (linea, renglon, item... ver PATRONES_POSICION_SECUENCIAL).
 
     Ninguna de ellas es una magnitud continua -- no existe una
     "distribucion normal" esperada para un codigo postal, un numero de
@@ -849,14 +850,15 @@ def columnas_excluir_de_atipicos(df: pd.DataFrame) -> List[str]:
 
 
 def columnas_identificador_serie_por_nombre(df: pd.DataFrame) -> List[str]:
-    """Nivel 1: identificadores/telefono/fax reconocidos por NOMBRE (ver
-    columnas_excluir_de_atipicos). Expuesta por separado para poder
-    calcular el respaldo por contenido (Nivel 2) EXCLUYENDO lo que ya se
-    reconocio por nombre, sin duplicar la logica en cada lugar que la
-    necesita."""
+    """Nivel 1: identificadores/telefono/fax/posicion-secuencial reconocidos
+    por NOMBRE (ver columnas_excluir_de_atipicos). Expuesta por separado
+    para poder calcular el respaldo por contenido (Nivel 2) EXCLUYENDO lo
+    que ya se reconocio por nombre, sin duplicar la logica en cada lugar
+    que la necesita."""
     cols_id = [c for c in df.columns if es_columna_id(c)]
     cols_serie = [c for c in df.columns if c not in cols_id
-                  and coincide_patron(c, PATRONES_NO_TELEFONO)]
+                  and (coincide_patron(c, PATRONES_NO_TELEFONO)
+                       or coincide_patron(c, PATRONES_POSICION_SECUENCIAL))]
     cols_tel = detectar_columnas(df, PATRONES_TELEFONO, parece_telefono, excluir=cols_id,
                                   excluir_por_nombre=PATRONES_NO_TELEFONO)
     return list(dict.fromkeys(cols_id + cols_serie + cols_tel))
