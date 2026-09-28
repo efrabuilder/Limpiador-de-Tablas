@@ -1109,6 +1109,9 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
         elif accion == "eliminar_fila":
             filas_a_eliminar.add(h["fila"])
             valor_nuevo = "(fila eliminada)"
+        elif h["tipo"] == "faltante" and accion == "rellenar_nan":
+            valor_nuevo = np.nan
+            _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
         elif h["tipo"] in ("faltante", "tipo_invalido") and accion in (
                 "reemplazar_media", "reemplazar_mediana", "reemplazar_moda", "valor_fijo"):
             valor_nuevo = _valor_reemplazo(df, h["columna"], accion, _buscar_valor_fijo(valores_fijos, h["tipo"], h["columna"]))
