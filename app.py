@@ -48,7 +48,7 @@ st.set_page_config(
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_mediana", "reemplazar_media", "reemplazar_moda",
-                 "valor_fijo", "editar_individualmente", "eliminar_fila", "marcar_solo"],
+                 "valor_fijo", "rellenar_nan", "editar_individualmente", "eliminar_fila", "marcar_solo"],
     "duplicado": ["eliminar_fila", "marcar_solo"],
     "atipico": ["limitar", "reemplazar_mediana", "reemplazar_media",
                 "editar_individualmente", "eliminar_fila", "marcar_solo"],
@@ -104,6 +104,7 @@ NOMBRES_ACCION = {
     "reemplazar_mediana": "Reemplazar por la mediana",
     "reemplazar_moda": "Reemplazar por la moda",
     "valor_fijo": "Reemplazar por un valor fijo",
+    "rellenar_nan": "Dejar las celdas vacías como NaN (sin inventar valores)",
     "limitar": "Limitar al rango válido (winsorizing)",
     "usar_sugerido": "Usar el valor sugerido por el análisis",
     "eliminar_fila": "Eliminar la fila",
