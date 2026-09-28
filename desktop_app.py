@@ -34,7 +34,7 @@ from data_cleaner.modelo_sql import (
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_mediana", "reemplazar_media", "reemplazar_moda",
-                 "valor_fijo", "editar_individualmente", "eliminar_fila", "marcar_solo"],
+                 "valor_fijo", "rellenar_nan", "editar_individualmente", "eliminar_fila", "marcar_solo"],
     "duplicado": ["eliminar_fila", "marcar_solo"],
     "atipico": ["limitar", "reemplazar_mediana", "reemplazar_media",
                 "editar_individualmente", "eliminar_fila", "marcar_solo"],
