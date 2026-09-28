@@ -41,7 +41,7 @@ app = typer.Typer(
 console = Console()
 
 ACCIONES_FALTANTE = ["reemplazar_media", "reemplazar_mediana", "reemplazar_moda",
-                      "valor_fijo", "eliminar_fila", "marcar_solo"]
+                      "valor_fijo", "rellenar_nan", "eliminar_fila", "marcar_solo"]
 ACCIONES_DUPLICADO = ["eliminar_fila", "marcar_solo"]
 ACCIONES_ATIPICO = ["limitar", "reemplazar_mediana", "reemplazar_media",
                      "eliminar_fila", "marcar_solo"]
