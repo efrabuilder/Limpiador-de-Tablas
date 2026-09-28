@@ -24,7 +24,7 @@ from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES, FORMATO_FECHA_POR_
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_media", "reemplazar_mediana", "reemplazar_moda",
-                 "valor_fijo", "eliminar_fila", "marcar_solo"],
+                 "valor_fijo", "rellenar_nan", "eliminar_fila", "marcar_solo"],
     "duplicado": ["eliminar_fila", "marcar_solo"],
     "atipico": ["limitar", "reemplazar_mediana", "reemplazar_media",
                 "eliminar_fila", "marcar_solo"],
