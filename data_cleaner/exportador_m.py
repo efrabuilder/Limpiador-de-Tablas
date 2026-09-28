@@ -90,7 +90,7 @@ _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
 
 ACCIONES_SOPORTADAS_M = {
-    "faltante": {"reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "valor_fijo", "marcar_solo", "eliminar_fila", "editar_individualmente"},
+    "faltante": {"reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "valor_fijo", "rellenar_nan", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "duplicado": {"eliminar_fila", "marcar_solo"},
     "atipico": {"limitar", "reemplazar_mediana", "reemplazar_media", "reemplazar_moda", "marcar_solo", "eliminar_fila", "editar_individualmente"},
     "tipo_invalido": {"marcar_solo", "valor_fijo", "eliminar_fila", "editar_individualmente"},
@@ -174,6 +174,15 @@ def _paso_relleno_valor_fijo(cb, comentarios, nombre_paso: str, col: str,
     cb.agregar(nombre_paso,
                "Table.ReplaceValue({prev}, null, " + expr_relleno +
                f", Replacer.ReplaceValue, {{{_m_str(col)}}})")
+
+
+def _paso_blancos_a_null(cb, nombre_paso: str, col: str) -> None:
+    """Agrega un paso que convierte a null real las celdas de texto vacias o
+    con solo espacios de 'col' (accion "rellenar_nan"). Es type-safe: si la
+    celda no es texto (numero, fecha...) se deja tal cual."""
+    cb.agregar(nombre_paso,
+               "Table.TransformColumns({prev}, {{" + _m_str(col) +
+               ", each if _ is null then null else if _ is text and Text.Trim(_) = \"\" then null else _}})")
 
 
 def _m_ident(nombre: str) -> str:
@@ -1093,6 +1102,8 @@ def generar_editor_m_puro(
         nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
         if a_faltante == "valor_fijo":
             _paso_relleno_valor_fijo(cb, comentarios, f"SinFaltantesTexto_{nombre_col_id}", col, valores_fijos, "faltante")
+        elif a_faltante == "rellenar_nan":
+            _paso_blancos_a_null(cb, f"SinFaltantesTexto_{nombre_col_id}", col)
         elif a_faltante in ("reemplazar_moda", "reemplazar_mediana", "reemplazar_media"):
             # Media/mediana no existen para texto: se usa la moda (igual que
             # data_cleaner/cleaner.py).
@@ -1245,6 +1256,8 @@ def generar_editor_m_puro(
         # "faltante" nunca se aplicaba a los telefonos vacios.
         if a_faltante == "valor_fijo":
             _paso_relleno_valor_fijo(cb, comentarios, f"SinFaltantesTelefono_{nombre_col_id}", col, valores_fijos, "faltante")
+        elif a_faltante == "rellenar_nan":
+            _paso_blancos_a_null(cb, f"SinFaltantesTelefono_{nombre_col_id}", col)
         elif a_faltante == "reemplazar_moda":
             expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             cb.agregar(f"SinFaltantesTelefono_{nombre_col_id}",
@@ -1319,6 +1332,8 @@ def generar_editor_m_puro(
         # abajo solo miraba "email_invalido", no "faltante".
         if a_faltante == "valor_fijo":
             _paso_relleno_valor_fijo(cb, comentarios, f"SinFaltantesEmail_{nombre_col_id}", col, valores_fijos, "faltante")
+        elif a_faltante == "rellenar_nan":
+            _paso_blancos_a_null(cb, f"SinFaltantesEmail_{nombre_col_id}", col)
         elif a_faltante == "reemplazar_moda":
             expr_relleno = f"List.Mode(List.RemoveNulls(Table.Column({{prev}}, {_m_str(col)})))"
             cb.agregar(f"SinFaltantesEmail_{nombre_col_id}",
