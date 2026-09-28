@@ -10,6 +10,9 @@ Acciones disponibles:
   - 'limitar' (winsorize): recorta atípicos al límite del rango válido (IQR)
   - 'marcar_solo'        : no modifica el dato, solo queda registrado en el reporte
   - 'valor_fijo'         : reemplaza por un valor fijo dado (para faltantes)
+  - 'rellenar_nan'       : (solo 'faltante') convierte las celdas vacías o que
+                            solo tienen espacios en blanco en NaN real; no
+                            inventa ningún valor
   - 'usar_sugerido'      : reemplaza por el valor sugerido calculado por el
                             analizador (ej. total correcto, forma canónica de
                             un texto); solo aplica a 'formula_incorrecta' y
@@ -38,7 +41,7 @@ from .patrones import (
 ACCIONES_VALIDAS = {
     "eliminar_fila", "reemplazar_media", "reemplazar_mediana",
     "reemplazar_moda", "limitar", "marcar_solo", "valor_fijo", "usar_sugerido",
-    "editar_individualmente", "normalizar_formato_fecha",
+    "editar_individualmente", "normalizar_formato_fecha", "rellenar_nan",
 }
 
 DEFAULT_CONFIG = {
@@ -278,6 +281,11 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
         elif accion == "eliminar_fila":
             filas_a_eliminar.add(issue.fila)
             valor_nuevo = "(fila eliminada)"
+
+        elif issue.tipo == "faltante" and accion == "rellenar_nan":
+            # Celda vacía o solo con espacios -> NaN real (si ya era NaN queda igual).
+            valor_nuevo = np.nan
+            _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
 
         elif issue.tipo in ("faltante", "tipo_invalido") and accion in (
             "reemplazar_media", "reemplazar_mediana", "reemplazar_moda", "valor_fijo"
