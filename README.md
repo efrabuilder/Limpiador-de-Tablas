@@ -57,6 +57,9 @@ Para cada tipo de problema, usted elige la acción a aplicar:
 - `reemplazar_media` / `reemplazar_mediana` / `reemplazar_moda`
 - `limitar` (winsorizing: recorta el atípico al límite válido más cercano)
 - `valor_fijo` (usted define el valor de reemplazo)
+- `rellenar_nan` (solo para `faltante`: convierte las celdas vacías o con solo
+  espacios en blanco en NaN real, sin inventar ningún valor; en Power BI
+  llegan como `null`)
 - `usar_sugerido` (solo para `formula_incorrecta` y `texto_inconsistente`:
   usa el valor correcto/canónico que el propio analizador calculó — el
   total esperado, o la grafía más frecuente de ese texto)
