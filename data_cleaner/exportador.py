@@ -112,6 +112,14 @@ _PATRONES_NO_TELEFONO = (
     "conocimiento_embarque", "folio_pago", "numero_folio", "codigo_rastreo", "numero_seguimiento",
     "seguimiento", "numero_referencia", "referencia_pago",
 )
+# Latitud / longitud: numeros con muchos decimales (o enteros sin separador)
+# que NO son telefono -- ver PATRONES_COORDENADAS en data_cleaner/patrones.py.
+# Se excluyen solo de la deteccion de telefono, no del chequeo de atipicos.
+_PATRONES_COORDENADAS = (
+    "latitud", "latitude", "lat", "longitud", "longitude", "lon", "lng", "long",
+    "coordenada", "coordenadas", "coord", "coords", "gps",
+)
+_PATRONES_NO_TELEFONO_TODOS = _PATRONES_NO_TELEFONO + _PATRONES_COORDENADAS
 # Columnas que son la POSICION de una fila dentro de un grupo (renglon de
 # una factura, numero de item de un pedido), no una magnitud real -- ver
 # data_cleaner/patrones.py PATRONES_POSICION_SECUENCIAL para el detalle.
@@ -274,6 +282,11 @@ def _parece_telefono_col(serie, umbral=0.7, min_d=7, max_d=15):
     m = m[~con_decimal]
     if len(m) == 0:
         return False
+    con_coordenada = m.str.contains(
+        r'^\\s*-\\d{1,3}[.,]\\d{3,}\\s*$|^\\s*\\d{1,3}[.,]\\d{5,}\\s*$', regex=True)
+    m = m[~con_coordenada]
+    if len(m) == 0:
+        return False
     solo_digitos = m.str.replace(r"\\D", "", regex=True)
     return solo_digitos.str.len().between(min_d, max_d).mean() >= umbral
 
@@ -344,7 +357,7 @@ def _columnas_identificador_serie_por_nombre(df):
                   and (_coincide_patron_columna(col, _PATRONES_NO_TELEFONO)
                        or _coincide_patron_columna(col, _PATRONES_POSICION_SECUENCIAL))]
     cols_tel = _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col,
-                                             excluir_por_nombre=_PATRONES_NO_TELEFONO)
+                                             excluir_por_nombre=_PATRONES_NO_TELEFONO_TODOS)
     return set(cols_id) | set(cols_serie) | set(cols_tel)
 
 
@@ -617,7 +630,7 @@ def _detectar_telefonos_invalidos(df, min_digitos=7, max_digitos=15, permitir_co
     hallazgos = []
     cols_telefono = COLUMNAS_FORZADAS_TELEFONO if COLUMNAS_FORZADAS_TELEFONO is not None \\
         else _detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col,
-                                           excluir_por_nombre=_PATRONES_NO_TELEFONO)
+                                           excluir_por_nombre=_PATRONES_NO_TELEFONO_TODOS)
     for col in cols_telefono:
         for idx, val in df[col].items():
             if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
@@ -886,7 +899,8 @@ def _detectar_hallazgos(df, factor_iqr=1.5):
                            "valor_original": df.loc[idx].to_dict(),
                            "detalle": "Fila duplicada (identica a una anterior)"})
 
-    cols_telefono_tipo = set(_detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col))
+    cols_telefono_tipo = set(_detectar_columnas_combinado(df, _PATRONES_TELEFONO, _parece_telefono_col,
+                                                           excluir_por_nombre=_PATRONES_NO_TELEFONO_TODOS))
     for col in df.columns:
         if col in cols_telefono_tipo:
             continue
