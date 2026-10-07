@@ -136,8 +136,40 @@ def describir_regla(regla: str, valor: str = "", grupo: str = "", nulos: int = 0
         "moda": "Rellenados con el valor más frecuente",
         "mediana_por_grupo": f"Rellenados con la mediana por «{grupo}»",
         "eliminar_columna": "Columna eliminada",
+        "rellenar_nan": "Celdas vacías convertidas a nulo real",
     }
     return frases.get(regla, REGLAS_NULOS.get(regla, regla)) + cantidad
+
+
+# Acciones de la limpieza clásica -> regla equivalente de la limpieza guiada.
+_ACCION_CLASICA_A_REGLA = {
+    "reemplazar_media": "media", "reemplazar_mediana": "mediana", "reemplazar_moda": "moda",
+    "valor_fijo": "valor_fijo", "eliminar_fila": "eliminar_fila", "rellenar_nan": "rellenar_nan",
+    "marcar_solo": "dejar",
+}
+
+
+def reglas_desde_registro(registro: List[Dict]) -> List[Dict]:
+    """Convierte el registro de la limpieza clásica en frases de «Tratamiento
+    de nulos» por columna (solo los hallazgos de tipo faltante). Si en una
+    columna se aplicaron varios tratamientos, los lista con su cantidad."""
+    por_columna: Dict[str, Dict[str, Dict]] = {}
+    for r in registro or []:
+        if r.get("tipo") != "faltante":
+            continue
+        accion = r.get("accion_aplicada", "")
+        grupo = por_columna.setdefault(r["columna"], {}).setdefault(
+            accion, {"n": 0, "valor": r.get("valor_nuevo", "")})
+        grupo["n"] += 1
+    reglas = []
+    for columna, acciones in por_columna.items():
+        frases = []
+        for accion, datos in acciones.items():
+            regla = _ACCION_CLASICA_A_REGLA.get(accion, accion)
+            valor = "" if pd.isna(datos["valor"]) else str(datos["valor"])
+            frases.append(describir_regla(regla, valor, "", datos["n"]))
+        reglas.append({"columna": columna, "descripcion": "; ".join(frases)})
+    return reglas
 
 
 # --------------------------------------------------------------------------
@@ -149,7 +181,8 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
                           tokens=TOKENS_NULOS_BASE) -> pd.DataFrame:
     """Diccionario de datos de `df` (una fila por campo).
     `reglas`: lista [{columna, regla, valor, grupo, nulos}] de la limpieza
-    guiada, para contar qué se hizo con los nulos de cada campo.
+    guiada (o [{columna, descripcion}] ya redactadas, ver
+    reglas_desde_registro), para contar qué se hizo con los nulos de cada campo.
     `origenes`: {columna: texto} con la tabla de la que viene cada campo
     (útil en una tabla maestra que sale de un merge). Las columnas
     «Descripción» y «Justificación de negocio» quedan para completar."""
@@ -171,18 +204,24 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
             tratamiento = ""
         elif col in por_columna:
             r = por_columna[col]
-            tratamiento = describir_regla(r["regla"], r.get("valor", ""), r.get("grupo", ""),
-                                          int(r.get("nulos", 0) or 0))
+            tratamiento = r.get("descripcion") or describir_regla(
+                r["regla"], r.get("valor", ""), r.get("grupo", ""), int(r.get("nulos", 0) or 0))
         else:
             tratamiento = "Sin nulos" if nulos == 0 else f"Quedan {nulos} vacíos"
+        if str(col).startswith("_revisar_calidad"):  # columna de marca de la limpieza clásica
+            descripcion = ("Marca interna de la limpieza: lista los hallazgos que se dejaron solo "
+                           "marcados en esa fila (vacío si no hay ninguno).")
+            tratamiento = "No aplica (columna de marca)"
         fila = {
             "N°": i,
             "Campo": col,
             "Descripción": descripcion,
             "Tipo de dato": tipo,
             "Rol": ROLES[rol],
-            "Nulos": "No" if nulos == 0 else f"Sí ({nulos})",
-            "Completitud %": round((1 - nulos / total) * 100, 1),
+            "Nulos": ("No aplica" if str(col).startswith("_revisar_calidad")
+                      else "No" if nulos == 0 else f"Sí ({nulos})"),
+            "Completitud %": (np.nan if str(col).startswith("_revisar_calidad")
+                              else round((1 - nulos / total) * 100, 1)),
             "Valores únicos": int(serie.nunique(dropna=True)),
             "Rango o ejemplos": resumen_valores(serie, tipo, tokens),
         }
