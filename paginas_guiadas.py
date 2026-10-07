@@ -155,7 +155,7 @@ def _boton_enviar_a_clasica(df: pd.DataFrame, nombre: str, al_enviar, prefijo: s
 
 def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reglas=None,
                          origenes=None, fuentes=None, eliminadas=None, llaves=None,
-                         cruces=None) -> None:
+                         cruces=None, etapas=None, controles_extra=None, advertencias=None) -> None:
     """Diccionario de datos de la tabla maestra. Se completan la descripción, la justificación
     y la clasificación ejecutiva de cada campo, y se descargan los dos documentos:
     el diccionario técnico (Excel, para ingenieros y Power BI) y el documento de alcance
@@ -188,6 +188,35 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
                    "(quedan resaltados en amarillo en el Excel).")
     resumen = DD.resumen_tabla(df, nombre, editado, fuentes, eliminadas)
 
+    with st.expander("✍️ Textos del documento de alcance (opcional)"):
+        st.caption("Lo que sale de los datos (tamaños, llaves, completitud, faltantes, tipos) se calcula solo. "
+                   "Aquí escribe lo que solo usted sabe; lo que deje vacío se redacta de forma neutra.")
+        k = f"{prefijo}_alc"
+        a1, a2 = st.columns(2)
+        proyecto = a1.text_input("Proyecto o curso", key=f"{k}_proyecto",
+                                 placeholder="Proyecto final de análisis de datos")
+        autor = a2.text_input("Autor(a)", key=f"{k}_autor")
+        proposito = st.text_area("Propósito: para qué se prepara esta tabla", key=f"{k}_proposito", height=90)
+        conclusion = st.text_area("Conclusión ejecutiva", key=f"{k}_conclusion", height=90,
+                                  placeholder="Si lo deja vacío se resume el tamaño, la completitud y los duplicados.")
+        alcance = st.text_area("Alcance: qué cubre y qué no cubre", key=f"{k}_alcance", height=70)
+        unidad = st.text_input("Unidad de análisis (por ejemplo: una fila por póliza)", key=f"{k}_unidad")
+        preparacion = st.text_area("Preparación de datos: qué se hizo (separe los párrafos con una línea en blanco)",
+                                   key=f"{k}_preparacion", height=90)
+        recomendacion = st.text_area("Recomendación para la siguiente fase", key=f"{k}_recomendacion", height=70)
+        fuentes_doc = st.text_input("Fuentes documentales", key=f"{k}_fuentes")
+        st.markdown("**Aspectos pendientes adicionales** (se suman a los que se detectan solos)")
+        extra = st.data_editor(pd.DataFrame({"Aspecto pendiente": pd.Series(dtype="str"),
+                                             "Implicación y acción necesaria": pd.Series(dtype="str")}),
+                               num_rows="dynamic", hide_index=True, key=f"{k}_pendientes",
+                               use_container_width=True)
+    textos = {"proyecto": proyecto, "autor": autor, "proposito": proposito, "conclusion": conclusion,
+              "alcance": alcance, "unidad_analisis": unidad, "preparacion": preparacion,
+              "recomendacion": recomendacion, "fuentes_documentales": fuentes_doc}
+    pendientes_extra = [(str(a), str(b)) for a, b in zip(extra.iloc[:, 0], extra.iloc[:, 1])
+                        if str(a).strip() and str(a) != "None"]
+    pendientes_extra += [("Advertencia del cruce", str(av)) for av in (advertencias or [])]
+
     st.markdown("**Descargar el diccionario en el formato que necesite**")
     c1, c2 = st.columns(2)
     with c1:
@@ -201,7 +230,9 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
         st.caption("**Ejecutivo (Word)** · documento de alcance: arquitectura final, llaves de unión y "
                    "solo las variables críticas. Remite al Excel técnico para el detalle.")
         try:
-            documento = DD.documento_alcance_docx(df, editado, resumen, nombre, fuentes, cruces, eliminadas)
+            documento = DD.documento_alcance_docx(
+                df, editado, nombre, fuentes, cruces, eliminadas, textos=textos, etapas=etapas,
+                controles_extra=controles_extra, pendientes_extra=pendientes_extra)
         except ImportError:
             st.info("Para generar el documento de alcance instale python-docx: `pip install python-docx`.")
         else:
@@ -394,8 +425,12 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     reglas_aplicadas = resultado.get("reglas") or []
     eliminadas = [r["columna"] for r in reglas_aplicadas
                   if r["regla"] == "eliminar_columna" and r.get("nulos")]
-    seccion_diccionario(resultado["df"], "lg", base_nombre, reglas_aplicadas,
-                         fuentes=[resultado["nombre"]], eliminadas=eliminadas)
+    seccion_diccionario(
+        resultado["df"], "lg", base_nombre, reglas_aplicadas,
+        fuentes=[resultado["nombre"]], eliminadas=eliminadas,
+        etapas=[("Tabla original", f"{DD._n(aud['filas_antes'])} filas y {aud['columnas_antes']} columnas"),
+                ("Tabla limpia final", f"{DD._n(aud['filas_despues'])} filas y {aud['columnas_despues']} columnas"),
+                ("Celdas nulas", f"{DD._n(aud['nulos_antes'])} antes y {DD._n(aud['nulos_despues'])} después")])
 
 
 # --------------------------------------------------------------------------
@@ -597,4 +632,12 @@ def pagina_merge(al_enviar_a_clasica=None) -> None:
                "cruce": prm["how"]} for ca, cb in zip(prm["claves_a"], prm["claves_b"])]
     seccion_diccionario(resultado["df"], "m", "tabla_maestra", origenes=origenes,
                          fuentes=[f"A: {meta_a['nombre']}", f"B: {meta_b['nombre']}"],
-                         llaves=llaves_union, cruces=cruces)
+                         llaves=llaves_union, cruces=cruces,
+                         etapas=[(f"Tabla A: {meta_a['nombre']}", f"{DD._n(aud['filas_a'])} filas y {df_a.shape[1]} columnas"),
+                                 (f"Tabla B: {meta_b['nombre']}", f"{DD._n(aud['filas_b'])} filas y {df_b.shape[1]} columnas"),
+                                 ("Tabla maestra final",
+                                  f"{DD._n(len(resultado['df']))} filas y {resultado['df'].shape[1]} columnas")],
+                         controles_extra=[("Filas de A con pareja en B", f"{aud['pct_filas_con_pareja']} %",
+                                           "Porcentaje de filas de A que encontraron su fila en B; no demuestra que "
+                                           "cada cruce sea correcto.")],
+                         advertencias=aud["advertencias"])
