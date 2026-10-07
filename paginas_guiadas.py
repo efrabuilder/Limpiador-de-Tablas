@@ -27,6 +27,7 @@ from data_cleaner import merge_tablas as MT
 from data_cleaner.loaders import leer_tabla_subida, listar_hojas, tabla_a_bytes, es_archivo_excel
 
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 # --------------------------------------------------------------------------
@@ -153,14 +154,19 @@ def _boton_enviar_a_clasica(df: pd.DataFrame, nombre: str, al_enviar, prefijo: s
 
 
 def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reglas=None,
-                         origenes=None, fuentes=None, eliminadas=None) -> None:
-    """Diccionario de datos de la tabla maestra: se completan la descripción y la
-    justificación de cada campo y se descarga en Excel (hojas Resumen y Diccionario)."""
+                         origenes=None, fuentes=None, eliminadas=None, llaves=None,
+                         uniones=None) -> None:
+    """Diccionario de datos de la tabla maestra. Se completan la descripción, la justificación
+    y la clasificación ejecutiva de cada campo, y se descargan los dos documentos:
+    el diccionario técnico (CSV, para ingenieros y Power BI) y el documento de alcance
+    (Word, para quien decide). También queda disponible el Excel con Resumen y Diccionario."""
     st.subheader("📘 Diccionario de datos de la tabla maestra")
-    st.caption("Tipo, completitud, valores únicos y rango salen de los datos. La descripción y la "
-               "justificación de negocio las escribe usted: es lo que más le sirve a quien decide.")
+    st.caption("Tipo, completitud, valores únicos y rango salen de los datos. La descripción, la "
+               "justificación de negocio y la clasificación ejecutiva las escribe usted: es lo que "
+               "más le sirve a quien decide.")
     nombre = st.text_input("Nombre de la tabla maestra", value=nombre_defecto, key=f"{prefijo}_dic_nombre")
-    base = DD.construir_diccionario(df, reglas, origenes)
+    base = DD.construir_diccionario(df, reglas, origenes, llaves=llaves)
+    base[DD.COLUMNA_CLASIFICACION] = base[DD.COLUMNA_CLASIFICACION].replace("", None)  # celda vacía del selector
     fijas = [c for c in base.columns if c not in DD.COLUMNAS_EDITABLES]
     editado = st.data_editor(
         base, hide_index=True, disabled=fijas,
@@ -169,16 +175,46 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
             "Descripción": st.column_config.TextColumn("Descripción", width="large"),
             "Justificación de negocio": st.column_config.TextColumn("Justificación de negocio",
                                                                     width="large"),
+            DD.COLUMNA_CLASIFICACION: st.column_config.SelectboxColumn(
+                DD.COLUMNA_CLASIFICACION, options=list(DD.CLASIFICACIONES), width="medium",
+                help="Marque los KPIs, las variables calculadas o transformadas y las llaves: "
+                     "son las únicas variables que explica el documento de alcance."),
         },
     )
+    editado[DD.COLUMNA_CLASIFICACION] = editado[DD.COLUMNA_CLASIFICACION].fillna("")
     sin_descripcion = int((editado["Descripción"].fillna("").astype(str).str.strip() == "").sum())
     if sin_descripcion:
         st.warning(f"{sin_descripcion} de {len(editado)} campos todavía no tienen descripción "
                    "(quedan resaltados en amarillo en el Excel).")
     resumen = DD.resumen_tabla(df, nombre, editado, fuentes, eliminadas)
-    st.download_button("⬇️ Diccionario de datos (Excel)", DD.diccionario_a_excel(editado, resumen),
-                       file_name=f"diccionario_{_nombre_base(nombre)}.xlsx", mime=MIME_XLSX,
-                       key=f"{prefijo}_dic_descarga")
+
+    st.markdown("**Descargar el diccionario en el formato que necesite**")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.caption("**Técnico (CSV)** · una fila por campo, con tipos nativos y límites lógicos. "
+                   "Para ingenieros, catálogos de datos y Power BI.")
+        st.download_button("⬇️ Diccionario técnico (CSV)", DD.diccionario_tecnico_csv(df, editado),
+                           file_name=DD.NOMBRE_CSV_TECNICO, mime="text/csv",
+                           key=f"{prefijo}_dic_descarga_csv", use_container_width=True)
+    with c2:
+        st.caption("**Ejecutivo (Word)** · documento de alcance: arquitectura final y solo las "
+                   "variables críticas. Remite al CSV para el detalle.")
+        try:
+            documento = DD.documento_alcance_docx(df, editado, resumen, nombre, fuentes, uniones, eliminadas)
+        except ImportError:
+            st.info("Para generar el documento de alcance instale python-docx: `pip install python-docx`.")
+        else:
+            st.download_button("⬇️ Documento de alcance (Word)", documento,
+                               file_name=f"documento_alcance_{_nombre_base(nombre)}.docx",
+                               mime=MIME_DOCX, key=f"{prefijo}_dic_descarga_docx",
+                               use_container_width=True)
+    with c3:
+        st.caption("**Excel** · resumen y diccionario completos en un solo libro, para revisar y completar.")
+        st.download_button("⬇️ Diccionario de datos (Excel)", DD.diccionario_a_excel(editado, resumen),
+                           file_name=f"diccionario_{_nombre_base(nombre)}.xlsx", mime=MIME_XLSX,
+                           key=f"{prefijo}_dic_descarga", use_container_width=True)
+    st.caption(f"Entregue los dos primeros juntos y en la misma carpeta: el documento de alcance "
+               f"enlaza a «{DD.NOMBRE_CSV_TECNICO}».")
 
 
 # --------------------------------------------------------------------------
@@ -558,5 +594,11 @@ def pagina_merge(al_enviar_a_clasica=None) -> None:
 
     origenes = {c: ("Auditoría del merge" if c == "_merge" else
                     "Tabla A" if c in df_a.columns else "Tabla B") for c in resultado["df"].columns}
+    prm = resultado["params"]
+    llaves_union = list(prm["claves_a"]) + [c for c in prm["claves_b"]
+                                            if c not in prm["claves_a"] and c in resultado["df"].columns]
+    uniones = [f"{meta_a['nombre']} ({ca}) con {meta_b['nombre']} ({cb}), cruce «{prm['how']}»"
+               for ca, cb in zip(prm["claves_a"], prm["claves_b"])]
     seccion_diccionario(resultado["df"], "m", "tabla_maestra", origenes=origenes,
-                         fuentes=[f"A: {meta_a['nombre']}", f"B: {meta_b['nombre']}"])
+                         fuentes=[f"A: {meta_a['nombre']}", f"B: {meta_b['nombre']}"],
+                         llaves=llaves_union, uniones=uniones)
