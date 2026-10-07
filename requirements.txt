@@ -1,5 +1,6 @@
 pandas>=2.0
 openpyxl>=3.1
+python-docx>=1.1
 sqlalchemy>=2.0
 streamlit>=1.38
 typer>=0.12
