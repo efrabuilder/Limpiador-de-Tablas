@@ -582,67 +582,128 @@ def _tabla_word(doc, encabezados: List[str], filas: List[List[str]], anchos_cm: 
     doc.add_paragraph()
 
 
-def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, resumen: pd.DataFrame,
-                           nombre: str, fuentes: Optional[List[str]] = None,
+_MESES = ("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+          "septiembre", "octubre", "noviembre", "diciembre")
+
+
+def _n(valor) -> str:
+    """Miles con punto, como en español: 6512 -> '6.512'."""
+    return f"{int(valor):,}".replace(",", ".")
+
+
+def _pct(valor) -> str:
+    """'100 %' o '97,5 %'."""
+    valor = float(valor)
+    if pd.isna(valor):
+        return "No aplica"
+    return (f"{int(valor)} %" if valor.is_integer() else f"{valor:.1f}".replace(".", ",") + " %")
+
+
+def _frase(texto: str) -> str:
+    """Texto limpio y terminado en punto."""
+    texto = str(texto or "").strip()
+    return texto if not texto or texto[-1] in ".!?" else texto + "."
+
+
+def _fecha_larga(fecha: datetime) -> str:
+    return f"{fecha.day} de {_MESES[fecha.month - 1]} de {fecha.year}"
+
+
+def _campo_pagina(parrafo) -> None:
+    """Inserta el número de página (campo PAGE) al final del párrafo."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    campo = OxmlElement("w:fldSimple")
+    campo.set(qn("w:instr"), "PAGE")
+    corrida = OxmlElement("w:r")
+    texto = OxmlElement("w:t")
+    texto.text = "1"
+    corrida.append(texto)
+    campo.append(corrida)
+    parrafo._p.append(campo)
+
+
+def _parrafo_destacado(doc, etiqueta: str, texto: str) -> None:
+    """Párrafo con fondo suave y la etiqueta en negrita («Conclusión ejecutiva.», etc.)."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    parrafo = doc.add_paragraph()
+    parrafo.add_run(f"{etiqueta} ").bold = True
+    parrafo.add_run(texto)
+    relleno = OxmlElement("w:shd")
+    relleno.set(qn("w:val"), "clear")
+    relleno.set(qn("w:fill"), "EAF0FA")
+    parrafo._p.get_or_add_pPr().append(relleno)
+
+
+def _parrafo_con_etiqueta(doc, etiqueta: str, texto: str) -> None:
+    parrafo = doc.add_paragraph()
+    parrafo.add_run(f"{etiqueta} ").bold = True
+    parrafo.add_run(texto)
+
+
+def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, nombre: str,
+                           fuentes: Optional[List[str]] = None,
                            cruces: Optional[List[Dict]] = None,
                            columnas_eliminadas: Optional[List[str]] = None,
-                           nombre_tecnico: str = NOMBRE_TECNICO) -> bytes:
-    """Documento de alcance (diccionario ejecutivo) en Word, para quien decide.
+                           nombre_tecnico: str = NOMBRE_TECNICO,
+                           textos: Optional[Dict[str, str]] = None,
+                           etapas: Optional[List[tuple]] = None,
+                           controles_extra: Optional[List[tuple]] = None,
+                           pendientes_extra: Optional[List[tuple]] = None) -> bytes:
+    """Documento de alcance y diccionario ejecutivo en Word, para quien decide.
 
-    No copia la tabla completa de campos: la Sección 2 resume la arquitectura final y
-    explica solo las variables críticas (KPIs, variables calculadas o transformadas y
-    llaves de unión), y remite al Excel técnico para el detalle de cada campo.
-    `cruces`: lista de uniones hechas, [{tabla_a, col_a, tabla_b, col_b, cruce}]; con ella la
-    sección 2.2 muestra las llaves de unión reales. Sin ella lista los identificadores.
+    Estructura (la misma de un documento de alcance de proyecto):
+      1 Propósito y alcance         (conclusión ejecutiva y tabla Etapa / Resultado)
+      2 Arquitectura final y variables críticas del negocio  (unidad de análisis, tabla de
+        llaves, KPIs y variables transformadas, y la referencia al Excel técnico)
+      3 Preparación de datos y resultados del proceso        (tabla de controles y faltantes)
+      4 Indicadores y condiciones para su uso                (aspectos pendientes)
+      5 Recomendación para la siguiente fase, y fuentes documentales.
+    No copia la tabla completa de campos: ese detalle vive en el Excel técnico.
+
+    Lo que se calcula de los datos va solo (tamaños, completitud, unicidad de llaves, faltantes,
+    campos con tipo equivocado). Lo que solo sabe la persona se pasa en `textos`, con las claves
+    opcionales: proyecto, autor, proposito, conclusion, alcance, unidad_analisis, preparacion,
+    recomendacion, fuentes_documentales. Si falta una, se redacta un texto neutro.
+    `cruces`: [{tabla_a, col_a, tabla_b, col_b, cruce}] de las uniones hechas.
+    `etapas`, `controles_extra`, `pendientes_extra`: filas (tuplas) que se suman a las tablas.
     Requiere python-docx."""
     from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
+
+    textos = {k: str(v).strip() for k, v in (textos or {}).items() if v and str(v).strip()}
+    proyecto = textos.get("proyecto", "Proyecto de análisis de datos")
+    total, filas_df = len(diccionario), len(df)
+    hoy = datetime.now()
 
     doc = Document()
     doc.styles["Normal"].font.name = "Calibri"
     doc.styles["Normal"].font.size = Pt(11)
-    total = len(diccionario)
+    encabezado = doc.sections[0].header.paragraphs[0]
+    encabezado.text = f"{proyecto} | Diccionario ejecutivo "
+    _campo_pagina(encabezado)
+    for corrida in encabezado.runs:
+        corrida.font.size = Pt(9)
 
-    doc.add_heading(f"Documento de alcance: {nombre}", level=0)
-    doc.add_paragraph(f"Diccionario ejecutivo de la tabla maestra · generado el "
-                      f"{datetime.now():%Y-%m-%d}").runs[0].italic = True
+    # ---- portada
+    doc.add_heading("Documento de alcance y diccionario ejecutivo", level=0)
+    doc.add_paragraph(f"Tabla maestra «{nombre}»").runs[0].italic = True
+    firma = " | ".join(x for x in (textos.get("autor", ""), _fecha_larga(hoy)) if x)
+    doc.add_paragraph(firma).runs[0].italic = True
 
-    # ---- 1. Alcance
-    doc.add_heading("1. Alcance y resumen", level=1)
-    doc.add_paragraph(
-        f"Este documento describe, en lenguaje de negocio, la tabla maestra «{nombre}»: de qué "
-        "está hecha, qué tan completa es y cuáles son las variables que sostienen las decisiones. "
-        "No reproduce el listado completo de campos; ese detalle vive en el diccionario técnico.")
-    _tabla_word(doc, ["Dato", "Valor"],
-                [[r["Dato"], r["Valor"]] for _, r in resumen.iterrows()], [5.5, 11.0])
-
-    # ---- 2. Arquitectura y variables críticas
-    doc.add_heading("2. Arquitectura final y variables críticas de negocio", level=1)
-    doc.add_heading("2.1 Arquitectura final", level=2)
-    por_rol = diccionario["Rol"].value_counts()
-    composicion = ", ".join(f"{n} de tipo {rol}" for rol, n in por_rol.items())
-    texto = (f"La tabla maestra reúne {len(df):,} registros y {total} campos ({composicion}).")
-    if fuentes:
-        texto += " Se construyó a partir de: " + "; ".join(fuentes) + "."
-    doc.add_paragraph(texto)
-    if cruces:
-        doc.add_paragraph("Cómo se unieron las fuentes:")
-        for c in cruces:
-            doc.add_paragraph(f"{c['tabla_a']} ({c['col_a']}) con {c['tabla_b']} ({c['col_b']}); "
-                              f"cruce {_nombre_cruce(c.get('cruce'))}", style="List Bullet")
-    if columnas_eliminadas:
-        doc.add_paragraph("Se descartaron por exceso de datos faltantes: " + ", ".join(columnas_eliminadas) + ".")
-
+    # ---- datos calculados que se reutilizan
+    nulos_por_col = {c: int(es_nulo(df[c]).sum()) for c in df.columns if not str(c).startswith("_revisar_calidad")}
+    celdas = max(filas_df * len(nulos_por_col), 1)
+    completitud_global = (1 - sum(nulos_por_col.values()) / celdas) * 100
+    duplicadas = int(df.duplicated().sum())
     clasif = diccionario.get(COLUMNA_CLASIFICACION, pd.Series("", index=diccionario.index)).fillna("")
 
     def campos(etiqueta: str) -> pd.DataFrame:
         return diccionario[clasif == etiqueta]
-
-    def descripcion(fila) -> str:
-        return str(fila["Descripción"]).strip() or _PENDIENTE
-
-    doc.add_heading("2.2 Llaves de unión", level=2)
-    llaves = campos(CLASIFICACION_LLAVE)
 
     def fila_de(campo: str):
         f = diccionario[diccionario["Campo"] == campo]
@@ -653,86 +714,183 @@ def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, resumen:
             return ""
         con_dato = df[campo][~es_nulo(df[campo])]
         if len(con_dato) == 0:
-            return "Sin datos"
+            return "sin datos"
         distintos = int(con_dato.nunique())
-        return ("Única por registro" if distintos == len(con_dato)
-                else f"Se repite ({distintos:,} distintos en {len(con_dato):,} filas)")
+        return ("única por registro" if distintos == len(con_dato)
+                else f"se repite ({_n(distintos)} valores distintos en {_n(len(con_dato))} filas)")
 
-    def observacion(campo: str, completitud) -> str:
-        notas = []
-        if pd.notna(completitud) and completitud < 100:
-            notas.append("Con vacíos: esas filas no cruzan con otras tablas")
-        if unicidad(campo).startswith("Se repite"):
-            notas.append("Un mismo valor aparece en varias filas")
-        return ". ".join(notas) if notas else "Apta como llave"
+    def descripcion(fila) -> str:
+        return _frase(fila["Descripción"]) or "Pendiente de describir en el diccionario."
 
-    def tabla_identificadores(filas_dic: pd.DataFrame) -> None:
-        _tabla_word(doc, ["Identificador", "Qué identifica", "Unicidad", "Completitud", "Observación"],
-                    [[r["Campo"], descripcion(r), unicidad(r["Campo"]), f"{r['Completitud %']}%",
-                      observacion(r["Campo"], r["Completitud %"])] for _, r in filas_dic.iterrows()],
-                    [3.2, 4.0, 3.4, 2.1, 3.8])
-
-    if cruces:
-        doc.add_paragraph("Campos con los que se unieron las fuentes. Cada fila es un cruce.")
-        filas = []
-        for c in cruces:
-            d = fila_de(c["col_a"])
-            compl = d["Completitud %"] if d is not None else float("nan")
-            filas.append([f"{c['tabla_a']}\n{c['col_a']}", f"{c['tabla_b']}\n{c['col_b']}",
-                          _nombre_cruce(c.get("cruce")),
-                          f"{compl}%" if pd.notna(compl) else "",
-                          unicidad(c["col_a"])])
-        _tabla_word(doc, ["Tabla A (llave)", "Tabla B (llave)", "Tipo de cruce", "Completitud",
-                          "Unicidad en la tabla maestra"], filas, [3.6, 3.6, 3.4, 2.2, 3.7])
-        columnas_union = {c["col_a"] for c in cruces} | {c["col_b"] for c in cruces}
-        otros = llaves[~llaves["Campo"].isin(columnas_union)]
-        if len(otros):
-            doc.add_paragraph("Otros identificadores de la tabla:")
-            tabla_identificadores(otros)
-    elif len(llaves):
-        doc.add_paragraph("Campos que identifican cada registro. En esta tabla no se unieron fuentes, "
-                          "así que no hay llaves de cruce: estos son sus identificadores.")
-        tabla_identificadores(llaves)
-    else:
-        doc.add_paragraph("No se marcaron llaves.")
-
-    doc.add_heading("2.3 Indicadores clave (KPIs)", level=2)
+    llaves = campos(CLASIFICACION_LLAVE)
     kpis = campos(CLASIFICACION_KPI)
-    if len(kpis):
-        _tabla_word(doc, ["KPI", "Qué mide", "Por qué importa para el negocio"],
-                    [[r["Campo"], descripcion(r), str(r["Justificación de negocio"]).strip() or _PENDIENTE]
-                     for _, r in kpis.iterrows()], [3.8, 6.2, 6.5])
-    else:
-        doc.add_paragraph("Todavía no se han marcado KPIs. Márquelos con «KPI» en la columna "
-                          f"«{COLUMNA_CLASIFICACION}» del diccionario y vuelva a generar este documento.")
-
-    doc.add_heading("2.4 Variables calculadas o transformadas", level=2)
     transformadas = campos(CLASIFICACION_TRANSFORMADA)
-    if len(transformadas):
-        _tabla_word(doc, ["Variable", "Qué significa", "Qué se hizo con ella"],
-                    [[r["Campo"], descripcion(r), r["Tratamiento de nulos"]]
-                     for _, r in transformadas.iterrows()], [3.8, 6.2, 6.5])
+
+    # ---- 1. Propósito y alcance
+    doc.add_heading("1 Propósito y alcance", level=1)
+    doc.add_paragraph(textos.get("proposito") or (
+        f"Este documento describe, en lenguaje de negocio, la tabla maestra «{nombre}»: de qué está "
+        "hecha, qué tan completa es y cuáles son las variables que sostienen las decisiones. No "
+        "reproduce el listado completo de campos; ese detalle está en el diccionario técnico."))
+    _parrafo_destacado(doc, "Conclusión ejecutiva.", textos.get("conclusion") or (
+        f"La tabla final reúne {_n(filas_df)} filas y {total} campos, con una completitud global de "
+        f"{_pct(round(completitud_global, 1))} y {_n(duplicadas)} filas duplicadas. Estos controles describen la "
+        "estructura y la cobertura de los datos; por sí solos no certifican la exactitud de los valores."))
+    filas_etapas = list(etapas or [])
+    if not filas_etapas:
+        if fuentes:
+            filas_etapas.append(("Fuentes", " | ".join(fuentes)))
+        filas_etapas.append(("Tabla maestra final", f"{_n(filas_df)} filas y {total} columnas"))
+    if columnas_eliminadas:
+        filas_etapas.append(("Columnas eliminadas por exceso de vacíos", ", ".join(columnas_eliminadas)))
+    _tabla_word(doc, ["Etapa", "Resultado registrado"], [list(f) for f in filas_etapas], [5.5, 11.0])
+    if textos.get("alcance"):
+        doc.add_paragraph(textos["alcance"])
+
+    # ---- 2. Arquitectura y variables críticas
+    doc.add_heading("2 Arquitectura final y variables críticas del negocio", level=1)
+    por_rol = diccionario["Rol"].value_counts()
+    composicion = ", ".join(f"{n} de tipo {rol}" for rol, n in por_rol.items())
+    arquitectura = f"La tabla maestra reúne {_n(filas_df)} registros y {total} campos ({composicion})."
+    if fuentes:
+        arquitectura += " Se construyó a partir de: " + "; ".join(fuentes) + "."
+    doc.add_paragraph(arquitectura)
+    if cruces:
+        doc.add_paragraph("Las fuentes se unieron así:")
+        for c in cruces:
+            doc.add_paragraph(f"{c['tabla_a']} ({c['col_a']}) con {c['tabla_b']} ({c['col_b']}); "
+                              f"cruce {_nombre_cruce(c.get('cruce'))}.", style="List Bullet")
+    unidad = textos.get("unidad_analisis")
+    if not unidad and len(llaves):
+        primera = str(llaves.iloc[0]["Campo"])
+        if unicidad(primera) == "única por registro":
+            unidad = f"Una fila por {primera}."
+    if unidad:
+        _parrafo_destacado(doc, "Unidad de análisis.", unidad)
+
+    filas_vars = []
+    for _, r in llaves.iterrows():
+        campo = r["Campo"]
+        une = [c for c in (cruces or []) if campo in (c["col_a"], c["col_b"])]
+        partes = ["Llave."]
+        if une:
+            partes.append(f"Une {une[0]['tabla_a']} con {une[0]['tabla_b']}.")
+        partes += [descripcion(r), f"{_pct(r['Completitud %'])} con dato; {unicidad(campo)}."]
+        filas_vars.append([campo, " ".join(partes)])
+    for _, r in kpis.iterrows():
+        filas_vars.append([r["Campo"], " ".join(x for x in (
+            "KPI.", descripcion(r), _frase(r["Justificación de negocio"])) if x)])
+    for _, r in transformadas.iterrows():
+        filas_vars.append([r["Campo"], " ".join(x for x in (
+            "Variable transformada.", descripcion(r), _frase(r["Tratamiento de nulos"])) if x)])
+    if filas_vars:
+        _tabla_word(doc, ["Variable o llave", "Significado y función ejecutiva"], filas_vars, [4.5, 12.0])
     else:
-        doc.add_paragraph("No se marcaron variables transformadas.")
+        doc.add_paragraph(f"Todavía no se han marcado variables críticas. Márquelas (KPI, variable transformada "
+                          f"o llave) en la columna «{COLUMNA_CLASIFICACION}» del diccionario y vuelva a "
+                          "generar este documento.")
+    if not len(kpis) and filas_vars:
+        doc.add_paragraph(f"No se han marcado KPIs; márquelos en la columna «{COLUMNA_CLASIFICACION}».")
 
-    cruce = doc.add_paragraph(f"El detalle técnico exhaustivo de los {total} campos estructurales "
-                              "se encuentra en el archivo adjunto '")
-    _hipervinculo(cruce, nombre_tecnico, nombre_tecnico)
-    cruce.add_run("'.")
+    referencia = doc.add_paragraph()
+    referencia.add_run("Referencia técnica. ").bold = True
+    referencia.add_run(f"El detalle técnico exhaustivo de los {total} campos estructurales se encuentra "
+                       "en el archivo adjunto “")
+    _hipervinculo(referencia, nombre_tecnico, nombre_tecnico)
+    referencia.add_run("”.")
 
-    # ---- 3. Calidad
-    doc.add_heading("3. Calidad de los datos y pendientes", level=1)
+    # ---- 3. Preparación y resultados
+    doc.add_heading("3 Preparación de datos y resultados del proceso", level=1)
+    if textos.get("preparacion"):
+        for bloque in textos["preparacion"].split("\n\n"):
+            doc.add_paragraph(bloque.strip())
+    tratados = [(r["Campo"], r["Tratamiento de nulos"]) for _, r in diccionario.iterrows()
+                if str(r["Tratamiento de nulos"]).startswith(_TRATAMIENTOS_QUE_TRANSFORMAN)]
+    if tratados:
+        ejemplos = "; ".join(f"{c} ({t[:1].lower() + t[1:]})" for c, t in tratados[:6])
+        mas = f" y {len(tratados) - 6} más" if len(tratados) > 6 else ""
+        _parrafo_con_etiqueta(doc, "Tratamiento de vacíos.",
+                              f"Se aplicó una regla a {len(tratados)} {'campo' if len(tratados) == 1 else 'campos'}: {ejemplos}{mas}.")
+    if columnas_eliminadas:
+        doc.add_paragraph("Se descartaron por exceso de vacíos: " + ", ".join(columnas_eliminadas) + ".")
+
+    controles = [("Tamaño de la base final", f"{_n(filas_df)} filas y {total} columnas",
+                  "Estructura de la tabla maestra entregada.")]
+    for _, r in llaves.head(6).iterrows():
+        campo = r["Campo"]
+        unica = unicidad(campo)
+        if r["Completitud %"] < 100:
+            lectura = "Las filas sin valor no cruzan con otras tablas."
+        elif unica == "única por registro":
+            lectura = "Identifica cada registro sin repetirse."
+        else:
+            lectura = "Se repite: relación de uno a muchos; no sirve como identificador único."
+        controles.append((f"Llave {campo}", f"{_pct(r['Completitud %'])} con dato; {unica}", lectura))
+    controles.append(("Filas duplicadas", _n(duplicadas),
+                      "Sin duplicados completos." if not duplicadas else "Revisar y depurar los duplicados."))
+    controles.append(("Completitud global", _pct(round(completitud_global, 1)),
+                      "Proporción de celdas con dato en toda la tabla."))
+    controles += list(controles_extra or [])
+    _tabla_word(doc, ["Control registrado", "Resultado", "Lectura ejecutiva"],
+                [list(c) for c in controles], [4.2, 5.4, 6.9])
+
+    con_nulos = sorted(((c, n) for c, n in nulos_por_col.items() if n), key=lambda x: -x[1])
+    if con_nulos:
+        lista = ", ".join(f"{_n(n)} de {c}" for c, n in con_nulos[:4])
+        entre = "entre otros, " if len(con_nulos) > 4 else ""
+        _parrafo_con_etiqueta(doc, "Faltantes que permanecen.",
+                              f"La tabla conserva, {entre}{lista} valores faltantes. Por ello, la base no debe "
+                              "describirse como completamente libre de nulos.")
+    else:
+        _parrafo_con_etiqueta(doc, "Faltantes que permanecen.", "La tabla no tiene valores faltantes.")
+
+    # ---- 4. Condiciones para su uso
+    doc.add_heading("4 Indicadores y condiciones para su uso", level=1)
+    if len(kpis):
+        doc.add_paragraph("Indicadores marcados: " + ", ".join(kpis["Campo"]) + ". Cada uno debe calcularse con "
+                          "una definición y un período documentados antes de usarse para decidir.")
+    pendientes = []
     sin_desc = int((diccionario["Descripción"].fillna("").astype(str).str.strip() == "").sum())
-    doc.add_paragraph(
-        f"Campos todavía sin descripción: {sin_desc} de {total}."
-        if sin_desc else "Todos los campos cuentan con descripción.", style="List Bullet")
-    incompletos = diccionario[diccionario["Completitud %"].fillna(100) < 95]
-    if len(incompletos):
-        doc.add_paragraph("Campos con menos de 95% de completitud: " + ", ".join(
-            f"{r['Campo']} ({r['Completitud %']}%)" for _, r in incompletos.iterrows()) + ".",
-            style="List Bullet")
+    if sin_desc:
+        pendientes.append(("Descripciones", f"{sin_desc} de {total} campos no tienen descripción. "
+                           "Completarla en el diccionario antes de entregar."))
+    if not len(kpis):
+        pendientes.append(("KPIs", "No se marcaron indicadores clave. Definirlos y marcarlos para que el "
+                           "documento los explique."))
+    texto_tipo = [str(r["Campo"]) for i, (_, r) in enumerate(diccionario.iterrows())
+                  if r["Tipo de dato"] in ("Entero", "Decimal", "Fecha")
+                  and not (pd.api.types.is_numeric_dtype(df.iloc[:, i]) or
+                           pd.api.types.is_datetime64_any_dtype(df.iloc[:, i]))]
+    if texto_tipo:
+        pendientes.append(("Tipos de datos", "Estos campos son números o fechas guardados como texto: "
+                           + ", ".join(texto_tipo[:8]) + (" y otros" if len(texto_tipo) > 8 else "")
+                           + ". Convertirlos antes de sumar, promediar u ordenar."))
+    bajos = diccionario[diccionario["Completitud %"].fillna(100) < 95]
+    if len(bajos):
+        pendientes.append(("Completitud", "Campos con menos de 95 % de datos: " + ", ".join(
+            f"{r['Campo']} ({_pct(r['Completitud %'])})" for _, r in bajos.head(8).iterrows())
+            + ". Confirmar si la ausencia es esperada o un error."))
+    if duplicadas:
+        pendientes.append(("Duplicados", f"{_n(duplicadas)} filas están duplicadas. Depurarlas para no contar "
+                           "dos veces el mismo registro."))
+    pendientes += list(pendientes_extra or [])
+    if pendientes:
+        _tabla_word(doc, ["Aspecto pendiente", "Implicación y acción necesaria"],
+                    [list(p) for p in pendientes], [4.5, 12.0])
     else:
-        doc.add_paragraph("Ningún campo tiene menos de 95% de completitud.", style="List Bullet")
+        doc.add_paragraph("No se detectaron aspectos pendientes.")
+
+    # ---- 5. Recomendación y fuentes
+    doc.add_heading("5 Recomendación para la siguiente fase", level=1)
+    doc.add_paragraph(textos.get("recomendacion") or (
+        "Resolver primero los aspectos señalados en la sección 4, completar las descripciones y marcar los "
+        "indicadores clave; después calcularlos con la definición y el período acordados y acompañarlos del "
+        "número de registros que los sustentan."))
+    fuentes_doc = textos.get("fuentes_documentales") or "; ".join(
+        list(fuentes or []) + [f"{nombre_tecnico} (diccionario técnico)"])
+    p_fuentes = doc.add_paragraph()
+    p_fuentes.add_run("Fuentes documentales: ").bold = True
+    p_fuentes.add_run(_frase(fuentes_doc))
 
     buffer = io.BytesIO()
     doc.save(buffer)
