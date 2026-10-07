@@ -2,6 +2,8 @@
 Carga de datos desde distintas fuentes: CSV, Excel y SQL.
 """
 from __future__ import annotations
+import datetime
+import io
 import re
 import pandas as pd
 
@@ -194,6 +196,149 @@ def load_excel_hojas(path, hojas=None, detectar_encabezado: bool = True, **kwarg
     if not isinstance(crudos, dict):
         crudos = {hojas: crudos}
     return {nombre: _procesar_hoja_cruda(df) for nombre, df in crudos.items()}
+
+
+# -----------------------------------------------------------------------------
+# Lectura de archivos subidos (CSV o Excel) para las secciones de limpieza
+# guiada y merge. Aceptan una ruta o un archivo subido de Streamlit.
+# -----------------------------------------------------------------------------
+
+def _como_buffer(origen):
+    """Devuelve algo que pandas pueda leer varias veces: un BytesIO para
+    archivos subidos, o la misma ruta si es un texto."""
+    if hasattr(origen, "getvalue"):  # archivo subido de Streamlit
+        return io.BytesIO(origen.getvalue())
+    if hasattr(origen, "read") and hasattr(origen, "seek"):  # otro objeto tipo archivo
+        origen.seek(0)
+        return origen
+    return origen  # ruta
+
+
+def _nombre_de(origen, nombre=None) -> str:
+    if nombre:
+        return str(nombre)
+    return str(getattr(origen, "name", origen))
+
+
+def es_archivo_excel(nombre: str) -> bool:
+    return str(nombre).lower().endswith((".xlsx", ".xlsm", ".xls"))
+
+
+def es_archivo_csv(nombre: str) -> bool:
+    return str(nombre).lower().endswith((".csv", ".txt"))
+
+
+def listar_hojas(origen) -> list:
+    """Nombres de las hojas de un libro Excel, en el orden del libro.
+    Para un CSV no hay hojas, asi que devuelve una lista vacia."""
+    nombre = _nombre_de(origen)
+    if not es_archivo_excel(nombre):
+        return []
+    with pd.ExcelFile(_como_buffer(origen)) as libro:
+        return list(libro.sheet_names)
+
+
+def _valor_a_texto(v) -> str:
+    """Un valor de celda como texto. Vacio/nulo -> ''; 10115.0 -> '10115'
+    (el .0 lo mete Excel); fechas sin hora -> 'aaaa-mm-dd'."""
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return ""
+    if isinstance(v, datetime.datetime):  # incluye pd.Timestamp
+        sin_hora = (v.hour, v.minute, v.second, v.microsecond) == (0, 0, 0, 0)
+        return v.strftime("%Y-%m-%d" if sin_hora else "%Y-%m-%d %H:%M:%S")
+    if isinstance(v, datetime.date):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def tabla_a_texto(df: pd.DataFrame) -> pd.DataFrame:
+    """Convierte TODAS las columnas a texto y deja los nulos como ''. Es el
+    equivalente a leer un CSV con dtype=str y keep_default_na=False: se ve
+    el archivo tal cual esta, sin que pandas adivine tipos ni nulos."""
+    salida = df.copy()
+    for col in salida.columns:
+        serie = salida[col]
+        if pd.api.types.is_datetime64_any_dtype(serie):
+            con_valor = serie.dropna()
+            solo_fecha = bool((con_valor.dt.normalize() == con_valor).all())
+            serie = serie.dt.strftime("%Y-%m-%d" if solo_fecha else "%Y-%m-%d %H:%M:%S")
+        salida[col] = serie.map(_valor_a_texto)
+    return salida
+
+
+def leer_tabla_subida(origen, nombre=None, hoja=None, como_texto: bool = True,
+                      detectar_encabezado: bool = True) -> pd.DataFrame:
+    """Lee un CSV o una hoja de un Excel como DataFrame.
+
+    - CSV: prueba utf-8 (con o sin BOM) y luego latin-1; detecta solo el
+      separador (coma, punto y coma, tabulador o barra vertical).
+    - Excel: lee la hoja `hoja` (si el libro tiene una sola, no hace falta).
+      Con `detectar_encabezado` se saltan titulos al inicio y notas al
+      final de la hoja (ver load_excel).
+    - `como_texto=True`: todo queda como texto y los nulos como '' (ver
+      tabla_a_texto), lo recomendado para diagnosticar y limpiar.
+    """
+    nombre = _nombre_de(origen, nombre)
+
+    if es_archivo_excel(nombre):
+        hojas = listar_hojas(origen)
+        if hoja is None:
+            if len(hojas) != 1:
+                raise ValueError("El libro tiene varias hojas: indique cual leer.")
+            hoja = hojas[0]
+        df = load_excel(_como_buffer(origen), sheet_name=hoja,
+                        detectar_encabezado=detectar_encabezado)
+        return tabla_a_texto(df) if como_texto else df
+
+    # CSV: se decodifica el texto y se detecta el separador mirando el encabezado
+    texto = _leer_texto_csv(origen)
+    opciones = {"sep": _detectar_separador(texto)}
+    if como_texto:
+        opciones.update(dtype=str, keep_default_na=False)
+    try:
+        return pd.read_csv(io.StringIO(texto), **opciones)
+    except Exception as exc:
+        raise ValueError(f"No se pudo leer el CSV: {exc}") from exc
+
+
+def _leer_texto_csv(origen) -> str:
+    """Contenido del CSV como texto: prueba utf-8 (con o sin BOM) y, si no
+    se puede, latin-1 (que nunca falla)."""
+    buffer = _como_buffer(origen)
+    if isinstance(buffer, str):
+        with open(buffer, "rb") as archivo:
+            crudo = archivo.read()
+    else:
+        crudo = buffer.read()
+    try:
+        return crudo.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return crudo.decode("latin-1")
+
+
+def _detectar_separador(texto: str) -> str:
+    """Separador del CSV: el que mas se repite en la primera linea con
+    contenido (coma, punto y coma, tabulador o barra vertical). Si ninguno
+    aparece (una sola columna), usa coma."""
+    primera = next((linea for linea in texto.splitlines() if linea.strip()), "")
+    conteos = {sep: primera.count(sep) for sep in (",", ";", "\t", "|")}
+    mejor = max(conteos, key=conteos.get)
+    return mejor if conteos[mejor] > 0 else ","
+
+
+def tabla_a_bytes(df: pd.DataFrame, formato: str = "csv", nombre_hoja: str = "Datos") -> bytes:
+    """El DataFrame como bytes listos para descargar, en 'csv' (utf-8 con BOM,
+    para que Excel abra bien los acentos) o 'xlsx'."""
+    if formato == "csv":
+        return df.to_csv(index=False).encode("utf-8-sig")
+    if formato == "xlsx":
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as escritor:
+            df.to_excel(escritor, index=False, sheet_name=str(nombre_hoja)[:31] or "Datos")
+        return buffer.getvalue()
+    raise ValueError(f"Formato no soportado: {formato}")
 
 
 def load_sql(connection_string: str, query: str = None, table_name: str = None) -> pd.DataFrame:
