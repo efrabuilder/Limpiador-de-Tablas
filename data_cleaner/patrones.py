@@ -167,6 +167,22 @@ def es_columna_id(col) -> bool:
     return False
 
 
+def es_columna_coordenada(col) -> bool:
+    """True si el nombre de la columna es una latitud, longitud o coordenada
+    (por token completo: "lat" calza con "lat_cliente" pero no con "plato")."""
+    return coincide_patron(col, PATRONES_COORDENADAS)
+
+
+def tipo_coordenada(col) -> Optional[str]:
+    """'latitud' o 'longitud' segun el nombre de la columna; None si no es
+    ninguna de las dos (ej. "coordenadas" a secas no dice cual es)."""
+    if coincide_patron(col, PATRONES_LATITUD):
+        return "latitud"
+    if coincide_patron(col, PATRONES_LONGITUD):
+        return "longitud"
+    return None
+
+
 # -----------------------------------------------------------------------------
 # Identificadores alfanumericos/numericos que NO son telefono aunque su
 # CONTENIDO tenga una cantidad de digitos parecida (7-15) a un numero de
@@ -210,11 +226,30 @@ PATRONES_IDENTIFICADORES_NO_TELEFONO: dict[str, Tuple[str, ...]] = {
     ),
 }
 
-# Version "aplanada" (todos los rubros juntos) para usar directo como
-# `excluir_por_nombre` en detectar_columnas().
-PATRONES_NO_TELEFONO: Tuple[str, ...] = tuple(
+# Version "aplanada" de los identificadores (todos los rubros juntos). Se usa
+# para excluir columnas del chequeo de atipicos (IQR / Z-score).
+PATRONES_IDENTIFICADORES_SERIE: Tuple[str, ...] = tuple(
     p for patrones in PATRONES_IDENTIFICADORES_NO_TELEFONO.values() for p in patrones
 )
+
+# -----------------------------------------------------------------------------
+# Latitud / longitud. Son numeros con muchos decimales (ej. "-84.0907246") o
+# enteros sin separador decimal (ej. "840907246"): al quitarles todo lo que no
+# es digito quedan 7-15 digitos y la deteccion de telefono por CONTENIDO los
+# confundia con celulares invalidos. Se reconocen por nombre y se excluyen de
+# la deteccion de telefono. A proposito NO se excluyen del chequeo de atipicos
+# (IQR), asi que esa parte sigue funcionando como antes.
+# -----------------------------------------------------------------------------
+PATRONES_LATITUD: Tuple[str, ...] = ("latitud", "latitude", "lat")
+PATRONES_LONGITUD: Tuple[str, ...] = ("longitud", "longitude", "lon", "lng", "long")
+PATRONES_COORDENADAS: Tuple[str, ...] = (
+    PATRONES_LATITUD + PATRONES_LONGITUD
+    + ("coordenada", "coordenadas", "coord", "coords", "gps")
+)
+
+# Todo lo que NO debe confundirse con telefono (identificadores + coordenadas).
+# Se usa directo como `excluir_por_nombre` en detectar_columnas().
+PATRONES_NO_TELEFONO: Tuple[str, ...] = PATRONES_IDENTIFICADORES_SERIE + PATRONES_COORDENADAS
 
 # -----------------------------------------------------------------------------
 # Columnas que son la POSICION/orden de una fila dentro de un grupo (ej. el
@@ -496,6 +531,14 @@ def parece_telefono(serie: pd.Series, umbral: float = 0.7, min_d=7, max_d=15) ->
     # digitos -- se confundia con un celular valido de Costa Rica).
     con_decimal = m.str.contains(r'^\s*-?[\d.,]*\d[.,]\d{1,2}\s*$', regex=True)
     m = m[~con_decimal]
+    if len(m) == 0:
+        return False
+    # Se descartan coordenadas decimales (ej. "-84.0907246", "9.93281"):
+    # negativas con 3+ decimales, o positivas con 5+ decimales. Un telefono
+    # nunca empieza con "-" ni lleva tantos decimales.
+    con_coordenada = m.str.contains(
+        r'^\s*-\d{1,3}[.,]\d{3,}\s*$|^\s*\d{1,3}[.,]\d{5,}\s*$', regex=True)
+    m = m[~con_coordenada]
     if len(m) == 0:
         return False
     solo_digitos = m.str.replace(r"\D", "", regex=True)
@@ -857,7 +900,7 @@ def columnas_identificador_serie_por_nombre(df: pd.DataFrame) -> List[str]:
     que la necesita."""
     cols_id = [c for c in df.columns if es_columna_id(c)]
     cols_serie = [c for c in df.columns if c not in cols_id
-                  and (coincide_patron(c, PATRONES_NO_TELEFONO)
+                  and (coincide_patron(c, PATRONES_IDENTIFICADORES_SERIE)
                        or coincide_patron(c, PATRONES_POSICION_SECUENCIAL))]
     cols_tel = detectar_columnas(df, PATRONES_TELEFONO, parece_telefono, excluir=cols_id,
                                   excluir_por_nombre=PATRONES_NO_TELEFONO)
