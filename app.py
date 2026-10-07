@@ -314,6 +314,21 @@ def _pagina_modelo_datos() -> None:
         )
 
 
+def _reset_estado() -> None:
+    for key in ("df", "resultado", "nombre_fuente", "df_limpio", "registro", "tablas_reporte",
+                "config_aplicada", "valores_fijos_aplicados", "correcciones_individuales_aplicadas"):
+        st.session_state.pop(key, None)
+
+
+def _enviar_a_limpieza_clasica(df, nombre) -> None:
+    """Callback de las secciones nuevas: deja la tabla lista en la limpieza
+    clásica y cambia de modo (corre antes de dibujar la pantalla)."""
+    _reset_estado()
+    st.session_state.df = df
+    st.session_state.nombre_fuente = f"desde_seccion_nueva::{nombre}"
+    st.session_state["modo_app"] = "🧹 Limpieza de una tabla"
+
+
 with st.sidebar:
     st.header("Modo")
     MODO_APP = st.radio(
@@ -325,11 +340,11 @@ with st.sidebar:
     st.divider()
 
 if MODO_APP == "🩺 Limpieza guiada (nulos)":
-    pagina_limpieza_guiada()
+    pagina_limpieza_guiada(_enviar_a_limpieza_clasica)
     st.stop()
 
 if MODO_APP == "🔗 Merge (unir dos tablas)":
-    pagina_merge()
+    pagina_merge(_enviar_a_limpieza_clasica)
     st.stop()
 
 if MODO_APP == "🗂️ Modelo de datos (estrella / copo de nieve)":
@@ -340,12 +355,6 @@ if MODO_APP == "🗂️ Modelo de datos (estrella / copo de nieve)":
 # --------------------------------------------------------------------------
 # Estado de sesión
 # --------------------------------------------------------------------------
-
-def _reset_estado() -> None:
-    for key in ("df", "resultado", "nombre_fuente", "df_limpio", "registro", "tablas_reporte",
-                "config_aplicada", "valores_fijos_aplicados", "correcciones_individuales_aplicadas"):
-        st.session_state.pop(key, None)
-
 
 if "df" not in st.session_state:
     _reset_estado()
