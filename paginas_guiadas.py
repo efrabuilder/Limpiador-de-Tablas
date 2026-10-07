@@ -218,7 +218,7 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
     pendientes_extra += [("Advertencia del cruce", str(av)) for av in (advertencias or [])]
 
     st.markdown("**Descargar el diccionario en el formato que necesite**")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.caption("**Técnico (Excel)** · una fila por campo, con tipos nativos y límites lógicos, más "
                    "resumen y leyenda. Para ingenieros, catálogos de datos y Power BI.")
@@ -240,7 +240,13 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
                                file_name=f"documento_alcance_{_nombre_base(nombre)}.docx",
                                mime=MIME_DOCX, key=f"{prefijo}_dic_descarga_docx",
                                use_container_width=True)
-    st.caption(f"Entregue los dos juntos y en la misma carpeta: el documento de alcance enlaza a "
+    with c3:
+        st.caption("**Completo (Excel)** · resumen y diccionario con encabezados en español, para "
+                   "revisar y completar las descripciones.")
+        st.download_button("⬇️ Diccionario de datos (Excel)", DD.diccionario_a_excel(editado, resumen),
+                           file_name=f"diccionario_{_nombre_base(nombre)}.xlsx", mime=MIME_XLSX,
+                           key=f"{prefijo}_dic_descarga", use_container_width=True)
+    st.caption(f"Para entregar, use los dos primeros juntos y en la misma carpeta: el documento de alcance enlaza a "
                f"«{DD.NOMBRE_TECNICO}».")
 
 
