@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 
 import pandas as pd
 import streamlit as st
@@ -128,7 +129,8 @@ def _cargar_tabla(prefijo: str, titulo: str, extras: dict = None):
 
 
 def _nombre_base(nombre: str) -> str:
-    return os.path.splitext(os.path.basename(nombre))[0] or "tabla"
+    base = os.path.splitext(os.path.basename(str(nombre)))[0]
+    return re.sub(r"[^\w\-]+", "_", base).strip("_") or "tabla"  # sin espacios ni símbolos
 
 
 def _botones_descarga(df: pd.DataFrame, base: str, script: str, prefijo: str) -> None:
@@ -150,7 +152,7 @@ def _boton_enviar_a_clasica(df: pd.DataFrame, nombre: str, al_enviar, prefijo: s
               help="Cambia al modo «Limpieza de una tabla» con esta tabla ya cargada.")
 
 
-def _seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reglas=None,
+def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reglas=None,
                          origenes=None, fuentes=None, eliminadas=None) -> None:
     """Diccionario de datos de la tabla maestra: se completan la descripción y la
     justificación de cada campo y se descarga en Excel (hojas Resumen y Diccionario)."""
@@ -360,7 +362,7 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     reglas_aplicadas = resultado.get("reglas") or []
     eliminadas = [r["columna"] for r in reglas_aplicadas
                   if r["regla"] == "eliminar_columna" and r.get("nulos")]
-    _seccion_diccionario(resultado["df"], "lg", base_nombre, reglas_aplicadas,
+    seccion_diccionario(resultado["df"], "lg", base_nombre, reglas_aplicadas,
                          fuentes=[resultado["nombre"]], eliminadas=eliminadas)
 
 
@@ -556,5 +558,5 @@ def pagina_merge(al_enviar_a_clasica=None) -> None:
 
     origenes = {c: ("Auditoría del merge" if c == "_merge" else
                     "Tabla A" if c in df_a.columns else "Tabla B") for c in resultado["df"].columns}
-    _seccion_diccionario(resultado["df"], "m", "tabla_maestra", origenes=origenes,
+    seccion_diccionario(resultado["df"], "m", "tabla_maestra", origenes=origenes,
                          fuentes=[f"A: {meta_a['nombre']}", f"B: {meta_b['nombre']}"])
