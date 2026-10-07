@@ -20,6 +20,7 @@ import os
 import pandas as pd
 import streamlit as st
 
+from data_cleaner import diccionario_datos as DD
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
 from data_cleaner.loaders import leer_tabla_subida, listar_hojas, tabla_a_bytes, es_archivo_excel
@@ -140,11 +141,49 @@ def _botones_descarga(df: pd.DataFrame, base: str, script: str, prefijo: str) ->
                        mime="text/x-python", key=f"{prefijo}_dl_py")
 
 
+def _boton_enviar_a_clasica(df: pd.DataFrame, nombre: str, al_enviar, prefijo: str) -> None:
+    """Boton que deja la tabla en la limpieza clásica (sin descargar y subir)."""
+    if al_enviar is None:
+        return
+    st.button("➡️ Enviar a limpieza clásica", on_click=al_enviar, args=(df, nombre),
+              key=f"{prefijo}_enviar_clasica",
+              help="Cambia al modo «Limpieza de una tabla» con esta tabla ya cargada.")
+
+
+def _seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reglas=None,
+                         origenes=None, fuentes=None, eliminadas=None) -> None:
+    """Diccionario de datos de la tabla maestra: se completan la descripción y la
+    justificación de cada campo y se descarga en Excel (hojas Resumen y Diccionario)."""
+    st.subheader("📘 Diccionario de datos de la tabla maestra")
+    st.caption("Tipo, completitud, valores únicos y rango salen de los datos. La descripción y la "
+               "justificación de negocio las escribe usted: es lo que más le sirve a quien decide.")
+    nombre = st.text_input("Nombre de la tabla maestra", value=nombre_defecto, key=f"{prefijo}_dic_nombre")
+    base = DD.construir_diccionario(df, reglas, origenes)
+    fijas = [c for c in base.columns if c not in DD.COLUMNAS_EDITABLES]
+    editado = st.data_editor(
+        base, hide_index=True, disabled=fijas,
+        key=f"{prefijo}_dic_{hash((nombre_defecto, tuple(df.columns), len(df)))}",
+        column_config={
+            "Descripción": st.column_config.TextColumn("Descripción", width="large"),
+            "Justificación de negocio": st.column_config.TextColumn("Justificación de negocio",
+                                                                    width="large"),
+        },
+    )
+    sin_descripcion = int((editado["Descripción"].fillna("").astype(str).str.strip() == "").sum())
+    if sin_descripcion:
+        st.warning(f"{sin_descripcion} de {len(editado)} campos todavía no tienen descripción "
+                   "(quedan resaltados en amarillo en el Excel).")
+    resumen = DD.resumen_tabla(df, nombre, editado, fuentes, eliminadas)
+    st.download_button("⬇️ Diccionario de datos (Excel)", DD.diccionario_a_excel(editado, resumen),
+                       file_name=f"diccionario_{_nombre_base(nombre)}.xlsx", mime=MIME_XLSX,
+                       key=f"{prefijo}_dic_descarga")
+
+
 # --------------------------------------------------------------------------
 # Limpieza guiada (nulos)
 # --------------------------------------------------------------------------
 
-def pagina_limpieza_guiada() -> None:
+def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     st.title("🩺 Limpieza guiada (nulos)")
     st.caption(
         "Paso a paso: diagnóstico de nulos, estandarización y una regla por columna. "
@@ -280,7 +319,7 @@ def pagina_limpieza_guiada() -> None:
             st.session_state["lg_resultado"] = {
                 "df": df_final, "antes": df, "clave": clave, "tokens": tokens,
                 "pasos": pasos_globales + pasos_reglas, "nombre": meta["nombre"],
-                "hoja": meta["hoja"],
+                "hoja": meta["hoja"], "reglas": reglas,
             }
             st.session_state["lg_version"] = st.session_state.get("lg_version", 0) + 1
             st.session_state["df_limpieza_guiada"] = (df_final, f"{_nombre_base(meta['nombre'])}_limpio.csv")
@@ -313,8 +352,16 @@ def pagina_limpieza_guiada() -> None:
 
     script = LG.generar_script_limpieza(resultado["pasos"], resultado["tokens"],
                                         resultado["nombre"], resultado["hoja"])
-    _botones_descarga(resultado["df"], f"{_nombre_base(resultado['nombre'])}_limpio", script, "lg")
-    st.caption("Esta tabla ya está disponible como Tabla A en la sección «Merge».")
+    base_nombre = f"{_nombre_base(resultado['nombre'])}_limpio"
+    _botones_descarga(resultado["df"], base_nombre, script, "lg")
+    _boton_enviar_a_clasica(resultado["df"], f"{base_nombre}.csv", al_enviar_a_clasica, "lg")
+    st.caption("Esta tabla también está disponible como Tabla A en la sección «Merge».")
+
+    reglas_aplicadas = resultado.get("reglas") or []
+    eliminadas = [r["columna"] for r in reglas_aplicadas
+                  if r["regla"] == "eliminar_columna" and r.get("nulos")]
+    _seccion_diccionario(resultado["df"], "lg", base_nombre, reglas_aplicadas,
+                         fuentes=[resultado["nombre"]], eliminadas=eliminadas)
 
 
 # --------------------------------------------------------------------------
@@ -329,7 +376,7 @@ def _usar_resultado_como_a() -> None:
         st.session_state["ma_origen"] = "Usar el resultado del merge anterior"
 
 
-def pagina_merge() -> None:
+def pagina_merge(al_enviar_a_clasica=None) -> None:
     st.title("🔗 Merge (unir dos tablas)")
     st.caption(
         "A es la tabla que manda y B la que la enriquece. Se revisan las llaves antes de unir y "
@@ -503,5 +550,11 @@ def pagina_merge() -> None:
 
     script = MT.generar_script_merge(rellenos=resultado["rellenos"], **resultado["params"])
     _botones_descarga(resultado["df"], "resultado_merge", script, "m")
+    _boton_enviar_a_clasica(resultado["df"], "resultado_merge.csv", al_enviar_a_clasica, "m")
     st.button("Usar este resultado como Tabla A de otro merge", on_click=_usar_resultado_como_a,
               key="m_encadenar")
+
+    origenes = {c: ("Auditoría del merge" if c == "_merge" else
+                    "Tabla A" if c in df_a.columns else "Tabla B") for c in resultado["df"].columns}
+    _seccion_diccionario(resultado["df"], "m", "tabla_maestra", origenes=origenes,
+                         fuentes=[f"A: {meta_a['nombre']}", f"B: {meta_b['nombre']}"])
