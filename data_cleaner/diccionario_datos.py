@@ -13,14 +13,16 @@ Columnas del diccionario:
     Valores únicos, Rango o ejemplos, Tratamiento de nulos,
     Justificación de negocio  (+ Origen si se sabe de qué tabla viene)
 
-Se exporta en tres formatos:
-    - Diccionario técnico (CSV, «diccionario_datos.csv»): una fila por campo, con tipo
+Se exporta en dos documentos:
+    - Diccionario técnico (Excel, «diccionario_datos.xlsx»): una fila por campo, con tipo
       nativo (int64, float64, datetime64[ns]...), límites lógicos y metadatos legibles
       por máquina. Sirve para catalogadores de datos y para importar a Power BI.
     - Documento de alcance / diccionario ejecutivo (Word): resumen para quien decide.
       Explica la arquitectura final y solo las variables críticas (KPIs, variables
-      transformadas y llaves de unión), y remite al CSV para el detalle de los campos.
-    - Excel con dos hojas (Resumen y Diccionario), para revisar y completar.
+      transformadas y llaves de unión), y remite al Excel técnico para el detalle de los campos.
+
+También queda la función diccionario_a_excel (hojas Resumen y Diccionario con encabezados
+en español), por si se necesita esa versión.
 """
 from __future__ import annotations
 
@@ -50,7 +52,7 @@ CLASIFICACIONES = (CLASIFICACION_KPI, CLASIFICACION_TRANSFORMADA, CLASIFICACION_
 
 COLUMNAS_EDITABLES = ("Descripción", "Justificación de negocio", COLUMNA_CLASIFICACION)
 
-NOMBRE_CSV_TECNICO = "diccionario_datos.csv"
+NOMBRE_TECNICO = "diccionario_datos.xlsx"
 
 # Descripciones que se pueden adelantar sin adivinar: el rol las deja claras.
 _DESCRIPCION_POR_ROL = {
@@ -196,8 +198,8 @@ _TRATAMIENTOS_QUE_TRANSFORMAN = ("Rellenados", "Celdas vacías convertidas", "Se
 
 def _clasificacion_inicial(col, rol: str, tratamiento: str, llaves) -> str:
     """Clasificación ejecutiva sugerida. Los KPIs no se adivinan: los marca la persona."""
-    if str(col).startswith("_revisar_calidad") or col == "_merge":
-        return ""
+    if str(col).startswith("_revisar_calidad") or col == "_merge" or str(col).endswith("_original"):
+        return ""  # marcas y copias de respaldo: no son variables de negocio
     es_llave = (col in llaves) if llaves is not None else rol == "id"
     if es_llave:
         return CLASIFICACION_LLAVE
@@ -342,7 +344,7 @@ def diccionario_a_excel(diccionario: pd.DataFrame, resumen: pd.DataFrame) -> byt
 
 
 # --------------------------------------------------------------------------
-# Diccionario técnico (CSV, legible por máquina)
+# Diccionario técnico (Excel, legible por máquina)
 # --------------------------------------------------------------------------
 
 _TIPO_SUGERIDO = {
@@ -350,16 +352,39 @@ _TIPO_SUGERIDO = {
     "Categoría": "category", "Texto": "string", "Texto (código)": "string", "Vacío": "string",
 }
 
-COLUMNAS_CSV_TECNICO = (
+COLUMNAS_TECNICO = (
     "orden", "nombre_campo", "descripcion", "tipo_dato_nativo", "tipo_dato_sugerido",
     "tipo_semantico", "rol", "es_llave", "acepta_nulos", "nulos", "completitud_pct",
     "valores_unicos", "valor_minimo", "valor_maximo", "longitud_maxima", "ejemplos",
     "origen", "tratamiento_nulos", "justificacion_negocio", "clasificacion_ejecutiva",
 )
 
+_LEYENDA = {
+    "orden": "Posición del campo en la tabla.",
+    "nombre_campo": "Nombre exacto de la columna.",
+    "descripcion": "Qué representa el campo, escrito por quien conoce el negocio.",
+    "tipo_dato_nativo": "Tipo real con el que está guardada la columna (dtype de pandas).",
+    "tipo_dato_sugerido": "Tipo recomendado para el modelo (Int64 = entero que admite vacíos).",
+    "tipo_semantico": "Tipo en palabras de negocio, según el contenido.",
+    "rol": "Qué papel cumple: identificador / llave, fecha, número, texto, etc.",
+    "es_llave": "Sí si el campo está clasificado como llave o identificador.",
+    "acepta_nulos": "Sí si hay al menos un vacío en el campo.",
+    "nulos": "Cantidad de celdas vacías.",
+    "completitud_pct": "Porcentaje de filas con dato.",
+    "valores_unicos": "Cantidad de valores distintos.",
+    "valor_minimo": "Límite lógico inferior (números y fechas).",
+    "valor_maximo": "Límite lógico superior (números y fechas).",
+    "longitud_maxima": "Largo máximo del texto (campos de texto).",
+    "ejemplos": "Rango, categorías o ejemplos de valores.",
+    "origen": "Tabla de la que viene el campo (si se unieron tablas).",
+    "tratamiento_nulos": "Qué se hizo con los vacíos del campo.",
+    "justificacion_negocio": "Por qué el campo importa para el negocio.",
+    "clasificacion_ejecutiva": "KPI, variable transformada o llave (la que explica el documento de alcance).",
+}
+
 
 def _numero_crudo(valor) -> str:
-    """Número sin separadores de miles, para que el CSV se lea igual en cualquier herramienta."""
+    """Número sin separadores de miles, para que se lea igual en cualquier herramienta."""
     valor = float(valor)
     return str(int(valor)) if valor.is_integer() else str(round(valor, 6))
 
@@ -389,15 +414,10 @@ def _limites(serie: pd.Series, tipo: str, tokens=TOKENS_NULOS_BASE):
     return "", "", str(int(con_dato.astype(str).str.len().max()))
 
 
-def diccionario_tecnico_csv(df: pd.DataFrame, diccionario: pd.DataFrame,
-                            tokens=TOKENS_NULOS_BASE) -> bytes:
-    """CSV del diccionario técnico (UTF-8 con BOM, para que Excel y Power BI lean bien los
-    acentos). Una fila por campo, con nombres de columna en minúsculas y sin espacios:
-    tipo nativo (dtype real de la tabla), tipo sugerido para el modelo (int64, float64,
-    datetime64[ns], bool, category, string), límites lógicos (mínimo, máximo, longitud
-    máxima), completitud y las descripciones escritas en el diccionario.
-    Se puede cargar en un catálogo de datos o importar a Power BI para poner las
-    descripciones en los campos."""
+def tabla_tecnica(df: pd.DataFrame, diccionario: pd.DataFrame, tokens=TOKENS_NULOS_BASE) -> pd.DataFrame:
+    """Tabla del diccionario técnico: una fila por campo, con nombres de columna en minúsculas
+    y sin espacios; tipo nativo (dtype real), tipo sugerido para el modelo, límites lógicos
+    (mínimo, máximo, longitud máxima), completitud y las descripciones del diccionario."""
     filas = []
     tiene_origen = "Origen" in diccionario.columns
     for i, col in enumerate(df.columns):
@@ -411,6 +431,7 @@ def diccionario_tecnico_csv(df: pd.DataFrame, diccionario: pd.DataFrame,
         if sugerido == "int64" and nulos:
             sugerido = "Int64"  # entero que admite vacíos
         marca = str(col).startswith("_revisar_calidad")
+        clasif = d.get(COLUMNA_CLASIFICACION, "")
         filas.append({
             "orden": int(d["N°"]),
             "nombre_campo": col,
@@ -419,7 +440,7 @@ def diccionario_tecnico_csv(df: pd.DataFrame, diccionario: pd.DataFrame,
             "tipo_dato_sugerido": sugerido,
             "tipo_semantico": tipo,
             "rol": d["Rol"],
-            "es_llave": "Sí" if d.get(COLUMNA_CLASIFICACION, "") == CLASIFICACION_LLAVE else "No",
+            "es_llave": "Sí" if clasif == CLASIFICACION_LLAVE else "No",
             "acepta_nulos": "No aplica" if marca else ("Sí" if nulos else "No"),
             "nulos": nulos,
             "completitud_pct": "" if marca else d["Completitud %"],
@@ -431,10 +452,59 @@ def diccionario_tecnico_csv(df: pd.DataFrame, diccionario: pd.DataFrame,
             "origen": d["Origen"] if tiene_origen else "",
             "tratamiento_nulos": d["Tratamiento de nulos"],
             "justificacion_negocio": d["Justificación de negocio"],
-            "clasificacion_ejecutiva": d.get(COLUMNA_CLASIFICACION, ""),
+            "clasificacion_ejecutiva": clasif,
         })
-    salida = pd.DataFrame(filas, columns=list(COLUMNAS_CSV_TECNICO)).fillna("")
-    return salida.to_csv(index=False).encode("utf-8-sig")
+    return pd.DataFrame(filas, columns=list(COLUMNAS_TECNICO)).fillna("")
+
+
+def diccionario_tecnico_excel(df: pd.DataFrame, diccionario: pd.DataFrame, resumen: pd.DataFrame,
+                              tokens=TOKENS_NULOS_BASE) -> bytes:
+    """Excel del diccionario técnico («diccionario_datos.xlsx») con tres hojas:
+    «Diccionario técnico» (una fila por campo), «Resumen» (datos generales de la tabla) y
+    «Leyenda» (qué significa cada columna). Encabezado fijo, filtros y las descripciones
+    pendientes resaltadas en amarillo. Se puede importar a Power BI o a un catálogo de datos."""
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    encabezado = PatternFill("solid", fgColor="1F3864")
+    pendiente = PatternFill("solid", fgColor="FFF2CC")
+    borde = Border(*(Side(style="thin", color="BFBFBF"),) * 4)
+    anchos = {"orden": 7, "nombre_campo": 26, "descripcion": 40, "tipo_dato_nativo": 16,
+              "tipo_dato_sugerido": 18, "tipo_semantico": 15, "rol": 20, "es_llave": 10,
+              "acepta_nulos": 12, "nulos": 9, "completitud_pct": 14, "valores_unicos": 14,
+              "valor_minimo": 16, "valor_maximo": 16, "longitud_maxima": 14, "ejemplos": 38,
+              "origen": 20, "tratamiento_nulos": 34, "justificacion_negocio": 44,
+              "clasificacion_ejecutiva": 22, "Dato": 32, "Valor": 70, "columna": 26, "significado": 80}
+
+    def dar_formato(hoja, pendientes=()):
+        nombres = [c.value for c in hoja[1]]
+        for celda in hoja[1]:
+            celda.fill, celda.border = encabezado, borde
+            celda.font = Font(bold=True, color="FFFFFF")
+            celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for idx, nombre in enumerate(nombres, 1):
+            hoja.column_dimensions[hoja.cell(row=1, column=idx).column_letter].width = anchos.get(nombre, 16)
+        for fila in hoja.iter_rows(min_row=2):
+            for celda in fila:
+                celda.border = borde
+                celda.alignment = Alignment(vertical="top", wrap_text=True)
+                if nombres[celda.column - 1] in pendientes and not str(celda.value or "").strip():
+                    celda.fill = pendiente
+        hoja.freeze_panes = "A2"
+
+    tecnica = tabla_tecnica(df, diccionario, tokens)
+    leyenda = pd.DataFrame({"columna": list(COLUMNAS_TECNICO),
+                            "significado": [_LEYENDA[c] for c in COLUMNAS_TECNICO]})
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as escritor:
+        tecnica.to_excel(escritor, sheet_name="Diccionario técnico", index=False)
+        resumen.to_excel(escritor, sheet_name="Resumen", index=False)
+        leyenda.to_excel(escritor, sheet_name="Leyenda", index=False)
+        hoja = escritor.sheets["Diccionario técnico"]
+        dar_formato(hoja, pendientes=("descripcion",))
+        hoja.auto_filter.ref = hoja.dimensions
+        dar_formato(escritor.sheets["Resumen"])
+        dar_formato(escritor.sheets["Leyenda"])
+    return buffer.getvalue()
 
 
 # --------------------------------------------------------------------------
@@ -442,6 +512,16 @@ def diccionario_tecnico_csv(df: pd.DataFrame, diccionario: pd.DataFrame,
 # --------------------------------------------------------------------------
 
 _PENDIENTE = "(pendiente de describir)"
+
+
+_NOMBRES_CRUCE = {
+    "left": "izquierdo (conserva todo A)", "inner": "interno (solo coincidencias)",
+    "right": "derecho (conserva todo B)", "outer": "completo (conserva todo)",
+}
+
+
+def _nombre_cruce(how) -> str:
+    return _NOMBRES_CRUCE.get(str(how), str(how or ""))
 
 
 def _hipervinculo(parrafo, texto: str, destino: str) -> None:
@@ -504,14 +584,16 @@ def _tabla_word(doc, encabezados: List[str], filas: List[List[str]], anchos_cm: 
 
 def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, resumen: pd.DataFrame,
                            nombre: str, fuentes: Optional[List[str]] = None,
-                           uniones: Optional[List[str]] = None,
+                           cruces: Optional[List[Dict]] = None,
                            columnas_eliminadas: Optional[List[str]] = None,
-                           nombre_csv: str = NOMBRE_CSV_TECNICO) -> bytes:
+                           nombre_tecnico: str = NOMBRE_TECNICO) -> bytes:
     """Documento de alcance (diccionario ejecutivo) en Word, para quien decide.
 
     No copia la tabla completa de campos: la Sección 2 resume la arquitectura final y
     explica solo las variables críticas (KPIs, variables calculadas o transformadas y
-    llaves de unión), y remite al CSV técnico para el detalle de cada campo.
+    llaves de unión), y remite al Excel técnico para el detalle de cada campo.
+    `cruces`: lista de uniones hechas, [{tabla_a, col_a, tabla_b, col_b, cruce}]; con ella la
+    sección 2.2 muestra las llaves de unión reales. Sin ella lista los identificadores.
     Requiere python-docx."""
     from docx import Document
     from docx.shared import Pt
@@ -543,10 +625,11 @@ def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, resumen:
     if fuentes:
         texto += " Se construyó a partir de: " + "; ".join(fuentes) + "."
     doc.add_paragraph(texto)
-    if uniones:
+    if cruces:
         doc.add_paragraph("Cómo se unieron las fuentes:")
-        for union in uniones:
-            doc.add_paragraph(union, style="List Bullet")
+        for c in cruces:
+            doc.add_paragraph(f"{c['tabla_a']} ({c['col_a']}) con {c['tabla_b']} ({c['col_b']}); "
+                              f"cruce {_nombre_cruce(c.get('cruce'))}", style="List Bullet")
     if columnas_eliminadas:
         doc.add_paragraph("Se descartaron por exceso de datos faltantes: " + ", ".join(columnas_eliminadas) + ".")
 
@@ -560,11 +643,56 @@ def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, resumen:
 
     doc.add_heading("2.2 Llaves de unión", level=2)
     llaves = campos(CLASIFICACION_LLAVE)
-    if len(llaves):
-        doc.add_paragraph("Campos que identifican cada registro o que permiten cruzar las fuentes.")
-        _tabla_word(doc, ["Llave", "Qué identifica", "Completitud"],
-                    [[r["Campo"], descripcion(r), f"{r['Completitud %']}%"] for _, r in llaves.iterrows()],
-                    [4.0, 9.5, 3.0])
+
+    def fila_de(campo: str):
+        f = diccionario[diccionario["Campo"] == campo]
+        return f.iloc[0] if len(f) else None
+
+    def unicidad(campo: str) -> str:
+        if campo not in df.columns:
+            return ""
+        con_dato = df[campo][~es_nulo(df[campo])]
+        if len(con_dato) == 0:
+            return "Sin datos"
+        distintos = int(con_dato.nunique())
+        return ("Única por registro" if distintos == len(con_dato)
+                else f"Se repite ({distintos:,} distintos en {len(con_dato):,} filas)")
+
+    def observacion(campo: str, completitud) -> str:
+        notas = []
+        if pd.notna(completitud) and completitud < 100:
+            notas.append("Con vacíos: esas filas no cruzan con otras tablas")
+        if unicidad(campo).startswith("Se repite"):
+            notas.append("Un mismo valor aparece en varias filas")
+        return ". ".join(notas) if notas else "Apta como llave"
+
+    def tabla_identificadores(filas_dic: pd.DataFrame) -> None:
+        _tabla_word(doc, ["Identificador", "Qué identifica", "Unicidad", "Completitud", "Observación"],
+                    [[r["Campo"], descripcion(r), unicidad(r["Campo"]), f"{r['Completitud %']}%",
+                      observacion(r["Campo"], r["Completitud %"])] for _, r in filas_dic.iterrows()],
+                    [3.2, 4.0, 3.4, 2.1, 3.8])
+
+    if cruces:
+        doc.add_paragraph("Campos con los que se unieron las fuentes. Cada fila es un cruce.")
+        filas = []
+        for c in cruces:
+            d = fila_de(c["col_a"])
+            compl = d["Completitud %"] if d is not None else float("nan")
+            filas.append([f"{c['tabla_a']}\n{c['col_a']}", f"{c['tabla_b']}\n{c['col_b']}",
+                          _nombre_cruce(c.get("cruce")),
+                          f"{compl}%" if pd.notna(compl) else "",
+                          unicidad(c["col_a"])])
+        _tabla_word(doc, ["Tabla A (llave)", "Tabla B (llave)", "Tipo de cruce", "Completitud",
+                          "Unicidad en la tabla maestra"], filas, [3.6, 3.6, 3.4, 2.2, 3.7])
+        columnas_union = {c["col_a"] for c in cruces} | {c["col_b"] for c in cruces}
+        otros = llaves[~llaves["Campo"].isin(columnas_union)]
+        if len(otros):
+            doc.add_paragraph("Otros identificadores de la tabla:")
+            tabla_identificadores(otros)
+    elif len(llaves):
+        doc.add_paragraph("Campos que identifican cada registro. En esta tabla no se unieron fuentes, "
+                          "así que no hay llaves de cruce: estos son sus identificadores.")
+        tabla_identificadores(llaves)
     else:
         doc.add_paragraph("No se marcaron llaves.")
 
@@ -589,7 +717,7 @@ def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, resumen:
 
     cruce = doc.add_paragraph(f"El detalle técnico exhaustivo de los {total} campos estructurales "
                               "se encuentra en el archivo adjunto '")
-    _hipervinculo(cruce, nombre_csv, nombre_csv)
+    _hipervinculo(cruce, nombre_tecnico, nombre_tecnico)
     cruce.add_run("'.")
 
     # ---- 3. Calidad
