@@ -155,11 +155,11 @@ def _boton_enviar_a_clasica(df: pd.DataFrame, nombre: str, al_enviar, prefijo: s
 
 def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reglas=None,
                          origenes=None, fuentes=None, eliminadas=None, llaves=None,
-                         uniones=None) -> None:
+                         cruces=None) -> None:
     """Diccionario de datos de la tabla maestra. Se completan la descripción, la justificación
     y la clasificación ejecutiva de cada campo, y se descargan los dos documentos:
-    el diccionario técnico (CSV, para ingenieros y Power BI) y el documento de alcance
-    (Word, para quien decide). También queda disponible el Excel con Resumen y Diccionario."""
+    el diccionario técnico (Excel, para ingenieros y Power BI) y el documento de alcance
+    (Word, para quien decide)."""
     st.subheader("📘 Diccionario de datos de la tabla maestra")
     st.caption("Tipo, completitud, valores únicos y rango salen de los datos. La descripción, la "
                "justificación de negocio y la clasificación ejecutiva las escribe usted: es lo que "
@@ -189,18 +189,19 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
     resumen = DD.resumen_tabla(df, nombre, editado, fuentes, eliminadas)
 
     st.markdown("**Descargar el diccionario en el formato que necesite**")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
-        st.caption("**Técnico (CSV)** · una fila por campo, con tipos nativos y límites lógicos. "
-                   "Para ingenieros, catálogos de datos y Power BI.")
-        st.download_button("⬇️ Diccionario técnico (CSV)", DD.diccionario_tecnico_csv(df, editado),
-                           file_name=DD.NOMBRE_CSV_TECNICO, mime="text/csv",
-                           key=f"{prefijo}_dic_descarga_csv", use_container_width=True)
+        st.caption("**Técnico (Excel)** · una fila por campo, con tipos nativos y límites lógicos, más "
+                   "resumen y leyenda. Para ingenieros, catálogos de datos y Power BI.")
+        st.download_button("⬇️ Diccionario técnico (Excel)",
+                           DD.diccionario_tecnico_excel(df, editado, resumen),
+                           file_name=DD.NOMBRE_TECNICO, mime=MIME_XLSX,
+                           key=f"{prefijo}_dic_descarga_tecnico", use_container_width=True)
     with c2:
-        st.caption("**Ejecutivo (Word)** · documento de alcance: arquitectura final y solo las "
-                   "variables críticas. Remite al CSV para el detalle.")
+        st.caption("**Ejecutivo (Word)** · documento de alcance: arquitectura final, llaves de unión y "
+                   "solo las variables críticas. Remite al Excel técnico para el detalle.")
         try:
-            documento = DD.documento_alcance_docx(df, editado, resumen, nombre, fuentes, uniones, eliminadas)
+            documento = DD.documento_alcance_docx(df, editado, resumen, nombre, fuentes, cruces, eliminadas)
         except ImportError:
             st.info("Para generar el documento de alcance instale python-docx: `pip install python-docx`.")
         else:
@@ -208,13 +209,8 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
                                file_name=f"documento_alcance_{_nombre_base(nombre)}.docx",
                                mime=MIME_DOCX, key=f"{prefijo}_dic_descarga_docx",
                                use_container_width=True)
-    with c3:
-        st.caption("**Excel** · resumen y diccionario completos en un solo libro, para revisar y completar.")
-        st.download_button("⬇️ Diccionario de datos (Excel)", DD.diccionario_a_excel(editado, resumen),
-                           file_name=f"diccionario_{_nombre_base(nombre)}.xlsx", mime=MIME_XLSX,
-                           key=f"{prefijo}_dic_descarga", use_container_width=True)
-    st.caption(f"Entregue los dos primeros juntos y en la misma carpeta: el documento de alcance "
-               f"enlaza a «{DD.NOMBRE_CSV_TECNICO}».")
+    st.caption(f"Entregue los dos juntos y en la misma carpeta: el documento de alcance enlaza a "
+               f"«{DD.NOMBRE_TECNICO}».")
 
 
 # --------------------------------------------------------------------------
@@ -597,8 +593,8 @@ def pagina_merge(al_enviar_a_clasica=None) -> None:
     prm = resultado["params"]
     llaves_union = list(prm["claves_a"]) + [c for c in prm["claves_b"]
                                             if c not in prm["claves_a"] and c in resultado["df"].columns]
-    uniones = [f"{meta_a['nombre']} ({ca}) con {meta_b['nombre']} ({cb}), cruce «{prm['how']}»"
-               for ca, cb in zip(prm["claves_a"], prm["claves_b"])]
+    cruces = [{"tabla_a": meta_a["nombre"], "col_a": ca, "tabla_b": meta_b["nombre"], "col_b": cb,
+               "cruce": prm["how"]} for ca, cb in zip(prm["claves_a"], prm["claves_b"])]
     seccion_diccionario(resultado["df"], "m", "tabla_maestra", origenes=origenes,
                          fuentes=[f"A: {meta_a['nombre']}", f"B: {meta_b['nombre']}"],
-                         llaves=llaves_union, uniones=uniones)
+                         llaves=llaves_union, cruces=cruces)
