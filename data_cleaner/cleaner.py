@@ -36,6 +36,7 @@ from .analyzer import Issue, detectar_atipicos_iqr, _es_valor_vacio, _serie_no_v
 from .patrones import (
     formato_fecha_python, FORMATO_FECHA_POR_DEFECTO,
     rango_plausible_fijo, es_columna_no_negativa, a_numero_tolerante,
+    techo_probable_conteo_acotado,
 )
 
 ACCIONES_VALIDAS = {
@@ -168,6 +169,13 @@ def _limites_para_limitar(df: pd.DataFrame, columna: str):
         lim_sup = min(lim_sup, maximo) if not pd.isna(lim_sup) else maximo
     elif es_columna_no_negativa(columna):
         lim_inf = max(lim_inf, 0) if not pd.isna(lim_inf) else 0
+        # Techo inferido del propio dato (escala acotada 1-5 / 1-10), igual
+        # que analyzer.py (lo detecta) y exportador.py / exportador_m.py (lo
+        # aplican en los scripts exportados): sin esto, 'limitar' dejaba el
+        # valor tal cual aunque el analizador lo hubiera marcado como atipico.
+        techo = techo_probable_conteo_acotado(serie)
+        if techo is not None:
+            lim_sup = min(lim_sup, techo) if not pd.isna(lim_sup) else techo
 
     no_nulos = serie.dropna()
     es_entera = len(no_nulos) > 0 and bool((no_nulos % 1 == 0).all())
