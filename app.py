@@ -26,7 +26,8 @@ from data_cleaner import (
     exportar,
 )
 from data_cleaner.loaders import load_excel, load_excel_hojas
-from paginas_guiadas import pagina_limpieza_guiada, pagina_merge  # secciones nuevas
+from paginas_guiadas import pagina_limpieza_guiada, pagina_merge, seccion_diccionario  # secciones nuevas
+from data_cleaner.diccionario_datos import reglas_desde_registro
 from data_cleaner.cleaner import ACCIONES_VALIDAS  # noqa: F401 (referencia)
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
@@ -825,6 +826,18 @@ if st.session_state.get("df_limpio") is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+
+    # ----------------------------------------------------------------------
+    # Diccionario de datos de la tabla limpia (para presentar a quien decide)
+    # ----------------------------------------------------------------------
+    st.divider()
+    _fuente = st.session_state.nombre_fuente.split("::")
+    _nombre_tabla = _fuente[0] if _fuente[0].lower().endswith((".csv", ".xlsx", ".xls")) else _fuente[-1]
+    seccion_diccionario(
+        df_limpio, "cl", f"{_nombre_tabla.rsplit('.', 1)[0]}_limpio",
+        reglas=reglas_desde_registro(st.session_state.registro),
+        fuentes=[st.session_state.nombre_fuente],
+    )
 
     # ----------------------------------------------------------------------
     # Exportar datos limpios de vuelta a una base de datos SQL (adicional a
