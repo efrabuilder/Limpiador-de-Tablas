@@ -26,6 +26,7 @@ from data_cleaner import (
     exportar,
 )
 from data_cleaner.loaders import load_excel, load_excel_hojas
+from paginas_guiadas import pagina_limpieza_guiada, pagina_merge  # secciones nuevas
 from data_cleaner.cleaner import ACCIONES_VALIDAS  # noqa: F401 (referencia)
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
@@ -317,10 +318,19 @@ with st.sidebar:
     st.header("Modo")
     MODO_APP = st.radio(
         "¿Qué quiere hacer?",
-        ["🧹 Limpieza de una tabla", "🗂️ Modelo de datos (estrella / copo de nieve)"],
+        ["🧹 Limpieza de una tabla", "🩺 Limpieza guiada (nulos)", "🔗 Merge (unir dos tablas)",
+         "🗂️ Modelo de datos (estrella / copo de nieve)"],
         index=0, key="modo_app",
     )
     st.divider()
+
+if MODO_APP == "🩺 Limpieza guiada (nulos)":
+    pagina_limpieza_guiada()
+    st.stop()
+
+if MODO_APP == "🔗 Merge (unir dos tablas)":
+    pagina_merge()
+    st.stop()
 
 if MODO_APP == "🗂️ Modelo de datos (estrella / copo de nieve)":
     _pagina_modelo_datos()
