@@ -126,10 +126,10 @@ def elegir_config_interactiva(resultado) -> tuple[dict, dict, dict]:
                 if issue.tipo == tipo and issue.columna
             })
             for col in columnas_afectadas:
-                if col in valores_fijos:
+                if (tipo, col) in valores_fijos:
                     continue
                 valor = preguntar(f"  Valor fijo de reemplazo para la columna '{col}':")
-                valores_fijos[col] = valor
+                valores_fijos[(tipo, col)] = valor
 
         elif accion == "normalizar_formato_fecha":
             columnas_afectadas = sorted({
