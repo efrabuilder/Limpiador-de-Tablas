@@ -7,8 +7,11 @@ permite elegir qué hacer con cada tipo de problema, genera un reporte
 detallado y exporta el archivo limpio.
 
 Uso:
-    python main.py                 -> modo interactivo (recomendado)
+    python main.py                 -> modo interactivo (recomendado); pregunta qué hacer:
+                                      limpieza clásica, limpieza guiada de nulos,
+                                      merge (unir dos tablas) o diccionario de datos
     python main.py --demo          -> corre con datos de ejemplo, sin preguntas
+    python main.py --modo guiada   -> salta el menú (clasica | guiada | merge | diccionario)
 """
 from __future__ import annotations
 import os
@@ -20,7 +23,17 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, imprimir_resumen_consola, exportar,
 )
+from data_cleaner import flujos_guiados as FG
+from data_cleaner import limpieza_guiada as LG
+from data_cleaner import merge_tablas as MT
 from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES, FORMATO_FECHA_POR_DEFECTO
+
+MODOS = {
+    "clasica": "Limpieza de una tabla (detecta y corrige problemas de calidad)",
+    "guiada": "Limpieza guiada de nulos (diagnóstico + una regla por columna)",
+    "merge": "Merge (unir dos tablas con revisión de llaves)",
+    "diccionario": "Diccionario de datos de una tabla",
+}
 
 OPCIONES_ACCION = {
     "faltante": ["reemplazar_media", "reemplazar_mediana", "reemplazar_moda",
@@ -148,14 +161,164 @@ def elegir_config_interactiva(resultado) -> tuple[dict, dict, dict]:
     return config, valores_fijos, formatos_fecha
 
 
+# =============================================================================
+# Flujos guiados: limpieza guiada de nulos, merge y diccionario de datos
+# =============================================================================
+
+def _imprimir_rutas(rutas: dict) -> None:
+    print("\n✅ Proceso completado.")
+    for tipo, ruta in rutas.items():
+        print(f"   {tipo:<12} {ruta}")
+
+
+def _pedir_tabla(etiqueta: str, ruta_inicial: str = None) -> tuple[pd.DataFrame, str, str]:
+    """Pide un CSV/Excel (y la hoja si el libro tiene varias). Devuelve (df, ruta, hoja)."""
+    ruta = ruta_inicial or preguntar(f"Ruta del archivo CSV/Excel de {etiqueta}:")
+    hojas = FG.hojas_de_archivo(ruta)
+    hoja = preguntar("Hoja a usar:", hojas, defecto=hojas[0]) if len(hojas) > 1 else None
+    df = FG.leer_tabla_guiada(ruta, hoja=hoja)
+    print(f"{etiqueta}: {len(df)} filas x {len(df.columns)} columnas.")
+    return df, ruta, hoja
+
+
+def _lista_o_none(texto: str):
+    """Enter = elegir automáticamente (None); '-' = ninguna ([])."""
+    if not texto:
+        return None
+    if texto.strip() == "-":
+        return []
+    return [c.strip() for c in texto.split(",") if c.strip()]
+
+
+def _pedir_formato_salida() -> str:
+    return preguntar("\n¿En qué formato desea la tabla resultante?", ["csv", "xlsx", "ambos"], defecto="csv")
+
+
+def flujo_limpieza_guiada(args) -> None:
+    df, ruta, hoja = _pedir_tabla("la tabla", args.input)
+
+    print("\nTextos que cuentan como nulo además de la celda vacía "
+          f"(opciones: {', '.join(LG.TOKENS_NULOS_EXTRA)}).")
+    extra_txt = preguntar("Escriba los textos separados por coma (Enter = nan,none,null; '-' = ninguno):", defecto="")
+    config = FG.configurar_limpieza_guiada(df, tokens_extra=_lista_o_none(extra_txt))
+    print("\n--- Diagnóstico de nulos y vacíos ---")
+    print(LG.diagnostico_nulos(df, config["tokens"]).to_string())
+
+    print("\n--- Estandarización sugerida ---")
+    print(f"  Columnas de texto : {config['texto']['columnas'] if config['texto'] else []}")
+    print(f"  A número          : {config['numericas']}")
+    print(f"  Latitud / longitud: {config['latitud']} / {config['longitud']}")
+    if preguntar("¿Aceptar estas sugerencias?", ["si", "no"], defecto="si") == "no":
+        print("Enter = sugerencia · '-' = ninguna · coma-separadas.")
+        config = FG.configurar_limpieza_guiada(
+            df, tokens_extra=_lista_o_none(extra_txt),
+            columnas_texto=_lista_o_none(preguntar("Columnas de texto:", defecto="")),
+            numericas=_lista_o_none(preguntar("Columnas a convertir a número:", defecto="")),
+            latitud=preguntar("Columna de latitud:", defecto=None) or None,
+            longitud=preguntar("Columna de longitud:", defecto=None) or None)
+
+    df_base, _ = LG.ejecutar_pasos_globales(df, config)
+    print("\n--- Regla de nulos por columna (sugerida) ---")
+    print(LG.tabla_de_reglas(df_base, config["tokens"]).to_string(index=False))
+    print(f"Reglas: {', '.join(LG.REGLAS_NULOS)}")
+    ajustes_txt = []
+    if preguntar("¿Aceptar las reglas sugeridas?", ["si", "no"], defecto="si") == "no":
+        print("Escriba una regla por línea: columna=regla[:parametro] (ej. email=valor_fijo:Sin correo, "
+              "monto=mediana_por_grupo:zona). Enter vacío para terminar.")
+        while True:
+            linea = input("  > ").strip()
+            if not linea:
+                break
+            ajustes_txt.append(linea)
+
+    resultado = FG.ejecutar_limpieza_guiada(
+        df, config, FG.parsear_ajustes_reglas(ajustes_txt), nombre_archivo=ruta, hoja=hoja)
+    aud = resultado.auditoria
+    print("\n--- Auditoría final ---")
+    print(f"  Filas: {aud['filas_antes']} → {aud['filas_despues']} · "
+          f"Celdas nulas: {aud['nulos_antes']} → {aud['nulos_despues']} · Duplicados: {aud['duplicados_despues']}")
+    if len(aud["nulos_restantes"]):
+        print("  Nulos que quedan:\n" + aud["nulos_restantes"].to_string())
+    _imprimir_rutas(FG.guardar_limpieza_guiada(resultado, args.outdir, _pedir_formato_salida()))
+
+
+def flujo_merge(args) -> None:
+    df_a, ruta_a, hoja_a = _pedir_tabla("la tabla A (la que manda)", args.input)
+    df_b, ruta_b, hoja_b = _pedir_tabla("la tabla B (la que enriquece)")
+
+    sugerencias = MT.sugerir_llaves(df_a, df_b)
+    if len(sugerencias):
+        print("\nPares de columnas que podrían ser la llave:\n" + sugerencias.to_string(index=False))
+    claves_a = _lista_o_none(preguntar("Columna(s) llave de A, coma-separadas (Enter = la sugerida):", defecto=""))
+    claves_b = _lista_o_none(preguntar("Columna(s) llave de B, en el mismo orden (Enter = la sugerida):", defecto=""))
+    modo = preguntar("Cómo comparar las llaves:", list(MT.MODOS_LLAVE), defecto="texto")
+    ancho = int(preguntar("Rellenar con ceros a la izquierda hasta (0 = no):", defecto="0")) if modo == "codigo" else 0
+
+    _, _, d = FG.diagnosticar_llaves(df_a, df_b, claves_a, claves_b, modo, ancho)
+    print(f"\n--- Revisión de las llaves ---\n  Filas de A con pareja en B: {d['semaforo']} {d['pct_filas_con_pareja']}%"
+          f"\n  Llaves repetidas en A / B: {d['repetidas_a']} / {d['repetidas_b']}"
+          f"\n  Filas sin llave en A / B: {d['nulos_a']} / {d['nulos_b']}"
+          f"\n  Relación entre las tablas: {d['cardinalidad']}")
+    if d["repetidas_b"]:
+        print("  ⚠ B repite llaves: se dejará una fila por llave (función 'first') para no multiplicar filas de A.")
+
+    union = preguntar("¿Qué tabla manda?", [f"{k} — {v}" for k, v in MT.TIPOS_UNION.items()],
+                      defecto=f"left — {MT.TIPOS_UNION['left']}").split(" — ")[0]
+    prefijo = preguntar("Prefijo para las columnas de B (Enter = ninguno):", defecto="")
+
+    resultado = FG.ejecutar_merge(
+        df_a, df_b, ruta_a, ruta_b, claves_a, claves_b, how=union, modo=modo, ancho=ancho,
+        prefijo_b=prefijo, hoja_a=hoja_a, hoja_b=hoja_b)
+    aud = resultado.auditoria
+    print(f"\n--- Resultado ---\n  Filas de A: {aud['filas_a']} · Filas de B: {aud['filas_b']} · "
+          f"Filas del resultado: {len(resultado.df)} ({len(resultado.df) - aud['filas_a']:+d} vs A)")
+    print(f"  A con pareja: {aud['semaforo']} {aud['pct_filas_con_pareja']}%")
+    for aviso in aud["advertencias"]:
+        print(f"  ⚠ {aviso}")
+    _imprimir_rutas(FG.guardar_merge(resultado, args.outdir, formato=_pedir_formato_salida()))
+
+
+def flujo_diccionario(args) -> None:
+    df, ruta, _ = _pedir_tabla("la tabla", args.input)
+    nombre = preguntar("Nombre de la tabla maestra:", defecto=FG.nombre_base(ruta))
+    _, _, excel = FG.generar_diccionario(df, nombre, fuentes=[ruta])
+    os.makedirs(args.outdir, exist_ok=True)
+    destino = os.path.join(args.outdir, f"diccionario_{FG.nombre_base(nombre)}.xlsx")
+    with open(destino, "wb") as archivo:
+        archivo.write(excel)
+    _imprimir_rutas({"diccionario": destino})
+
+
+FLUJOS_GUIADOS = {"guiada": flujo_limpieza_guiada, "merge": flujo_merge, "diccionario": flujo_diccionario}
+
+
+def correr_flujo_guiado(modo: str, args) -> None:
+    """Corre un flujo guiado. Los errores de validación (columna inexistente,
+    regla inválida...) salen como mensaje corto en vez de traza."""
+    try:
+        FLUJOS_GUIADOS[modo](args)
+    except ValueError as exc:
+        print(f"\n❌ {exc}")
+        sys.exit(2)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Limpiador de tablas con detección de atípicos.")
     parser.add_argument("--demo", action="store_true", help="Ejecuta con datos de ejemplo, sin preguntas.")
     parser.add_argument("--input", help="Ruta del archivo de entrada (csv/xlsx).")
     parser.add_argument("--outdir", default="salida", help="Carpeta de salida.")
+    parser.add_argument("--modo", choices=list(MODOS), default=None,
+                        help="Qué hacer, sin pasar por el menú: " + ", ".join(MODOS) + ".")
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
+
+    modo = "clasica" if args.demo else (args.modo or preguntar(
+        "¿Qué desea hacer?", [f"{k} — {v}" for k, v in MODOS.items()],
+        defecto=f"clasica — {MODOS['clasica']}").split(" — ")[0])
+    if modo != "clasica":
+        correr_flujo_guiado(modo, args)
+        return
 
     if args.demo:
         ruta = args.input or "ejemplo_datos.csv"
