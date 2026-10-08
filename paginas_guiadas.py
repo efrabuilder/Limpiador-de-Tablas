@@ -268,13 +268,25 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
 
     # ---- 2. Diagnostico
     st.subheader("2. Diagnóstico de nulos y vacíos")
+    base_texto = [t for t in LG.TOKENS_NULOS_BASE if t]
     extra = st.multiselect(
         "Además de las celdas vacías, contar como nulo estos textos",
-        ["nan", "none", "null"] + list(LG.TOKENS_NULOS_EXTRA),
-        default=["nan", "none", "null"], key=f"lg_tokens_{clave}",
-        help="«na» o «-» pueden ser datos reales, por eso no se cuentan salvo que los elija.")
+        base_texto + list(LG.TOKENS_NULOS_EXTRA),
+        default=base_texto, key=f"lg_tokens_{clave}",
+        help="«na», «-» o «unknown» pueden ser datos reales, por eso no se cuentan salvo que los elija.")
     tokens = ("",) + tuple(extra)
+    sospechosos = LG.detectar_textos_tipo_nulo(df, tokens)
+    if len(sospechosos):
+        st.info("Hay textos que podrían significar «sin dato» y todavía **no** cuentan como nulo. "
+                "Si lo son, agréguelos en la lista de arriba:")
+        st.dataframe(sospechosos, hide_index=True)
     diag = LG.diagnostico_nulos(df, tokens)
+    palabra = (st.text_input(
+        "Palabra para los nulos válidos", value=LG.TEXTO_NO_INDICA, key=f"lg_palabra_{clave}",
+        help="Un nulo es válido cuando no es un error: no hubo reclamo, no se vendió por broker, no dio "
+             "su correo... Todos esos nulos se rellenan con esta misma palabra (en las reglas de la tabla "
+             "y en el cierre sin vacíos). Los nulos que son un error se eliminan con «eliminar fila».")
+        .strip() or LG.TEXTO_NO_INDICA)
     m1, m2, m3 = st.columns(3)
     m1.metric("Columnas con nulos", int((diag["total"] > 0).sum()))
     m2.metric("Celdas nulas", int(diag["total"].sum()))
@@ -338,6 +350,22 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
                 d = r4.number_input("Longitud máxima", value=180.0, key=f"lg_lon_max_{sufijo}")
                 rango_lon = (c, d)
 
+    st.markdown("**Fechas en un solo formato**")
+    cols_fechas = st.multiselect(
+        "Columnas de fecha", list(df_ren.columns), default=[c for c in cols_fecha if c in df_ren.columns],
+        key=f"lg_cols_fecha_{sufijo}",
+        help="Entiende 2025-01-31, 31/01/2025, 31-1-2025, Jan 31 2025... Las que empiezan por el año se "
+             "leen siempre año-mes-día. Lo que no se pueda leer queda nulo y se avisa.")
+    formato_fecha, dia_primero = "%Y-%m-%d", True
+    if cols_fechas:
+        f1, f2 = st.columns(2)
+        etiqueta = f1.selectbox("Formato de salida", list(LG.FORMATOS_FECHA), key=f"lg_fmt_fecha_{sufijo}")
+        formato_fecha = LG.FORMATOS_FECHA[etiqueta]
+        dia_primero = f2.checkbox("Las fechas con barras vienen como día/mes/año", value=True,
+                                  key=f"lg_dia_primero_{sufijo}",
+                                  help="Para «05/01/2025»: marcado = 5 de enero; sin marcar = 1 de mayo. "
+                                       "Si el día es mayor a 12 (ej. 31/01/2025) no hay duda.")
+
     config = {
         "tokens": tokens, "nombres_snake": snake, "vacios_a_nan": vacios,
         "texto": {"columnas": cols_texto, "minusculas": minus, "espacios": espacios,
@@ -345,12 +373,49 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
         "numericas": cols_num,
         "latitud": None if lat == ninguna else lat, "longitud": None if lon == ninguna else lon,
         "rango_latitud": rango_lat, "rango_longitud": rango_lon,
+        "fechas": {"columnas": cols_fechas, "formato": formato_fecha,
+                   "dia_primero": dia_primero} if cols_fechas else None,
     }
     try:
-        df_base, pasos_globales = LG.ejecutar_pasos_globales(df, config)
+        df_pre, pasos_globales = LG.ejecutar_pasos_globales(df, config)
     except Exception as exc:
         st.error(f"No se pudo aplicar la estandarización: {exc}")
         return
+
+    # ---- unir valores que significan lo mismo
+    st.markdown("**Unir valores que significan lo mismo**")
+    st.caption("Por ejemplo en género: «m», «male» y «masculino» → «M»; «f» y «female» → «F»; «si» y «yes» → «Sí». "
+               "Se propone solo donde se reconoce; la columna «unificar_a» se puede editar (vacía = no cambiar).")
+    sugeridas_eq = LG.sugerir_equivalencias(df_pre, None, palabra, tokens)
+    opciones_eq = [c for c in df_pre.columns if not pd.api.types.is_numeric_dtype(df_pre[c])
+                   and not pd.api.types.is_datetime64_any_dtype(df_pre[c])]
+    cols_eq = st.multiselect(
+        "Columnas a revisar", opciones_eq,
+        default=[c for c in dict.fromkeys(sugeridas_eq["columna"]) if c in opciones_eq],
+        key=f"lg_eq_cols_{sufijo}", help="Solo se listan las que tienen entre 2 y 30 valores distintos.")
+    tabla_eq = LG.sugerir_equivalencias(df_pre, cols_eq, palabra, tokens) if cols_eq else sugeridas_eq.iloc[0:0]
+    equivalencias = []
+    if len(tabla_eq):
+        editada_eq = st.data_editor(
+            tabla_eq, hide_index=True, disabled=["columna", "valor", "filas"],
+            key=f"lg_eq_{hash((clave, sufijo, tuple(cols_eq), palabra, tokens))}", use_container_width=True,
+            column_config={"unificar_a": st.column_config.TextColumn(
+                "unificar_a", help="Valor final. Vacío = dejar como está.")})
+        equivalencias = editada_eq.fillna("").to_dict("records")
+    elif cols_eq:
+        st.caption("Las columnas elegidas no tienen entre 2 y 30 valores distintos.")
+    else:
+        st.caption("No se encontraron valores equivalentes para unir. Puede elegir columnas a mano arriba.")
+    try:
+        df_base, paso_eq = LG.paso_unificar(df_pre, equivalencias)
+    except Exception as exc:
+        st.error(f"No se pudieron unir los valores: {exc}")
+        return
+    if paso_eq:
+        pasos_globales.append(paso_eq)
+    for paso in pasos_globales:
+        if paso.advertencia:
+            st.warning(f"{paso.titulo}: {paso.advertencia}")
     with st.expander(f"Qué hizo la estandarización ({len(pasos_globales)} pasos) y vista previa"):
         for paso in pasos_globales:
             st.markdown(f"**{paso.titulo}**")
@@ -359,31 +424,62 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
 
     # ---- 4. Reglas de nulos
     st.subheader("4. Regla de nulos por columna")
-    st.caption("La regla sugerida sale del tipo de columna (llaves y coordenadas: eliminar fila; "
-               "números: mediana; texto: valor fijo; fechas: dejar). Puede cambiarla en la tabla.")
+    st.caption("La regla sugerida sale del tipo de columna: llaves con pocos vacíos y coordenadas, eliminar "
+               f"fila (nulo no válido); números, mediana; texto, correos, teléfonos, fechas y llaves con muchos "
+               f"vacíos, «{palabra}» (nulo válido). Puede cambiarla en la tabla.")
     with st.expander("¿Qué hace cada regla?"):
         for clave_regla, texto in LG.REGLAS_NULOS.items():
             st.markdown(f"- `{clave_regla}`: {texto}")
-    tabla = LG.tabla_de_reglas(df_base, tokens)
+    tabla = LG.tabla_de_reglas(df_base, tokens, palabra)
     claves_columnas = "|".join(df_base.columns)
     editada = st.data_editor(
-        tabla, hide_index=True, key=f"lg_reglas_{hash((clave, claves_columnas, tokens))}",
+        tabla, hide_index=True, key=f"lg_reglas_{hash((clave, claves_columnas, tokens, palabra))}",
         disabled=["columna", "rol", "nulos", "%", "semaforo"],
         column_config={
             "regla": st.column_config.SelectboxColumn("regla", options=list(LG.REGLAS_NULOS),
                                                       required=True),
-            "valor": st.column_config.TextColumn("valor", help="Para «valor_fijo»"),
+            "valor": st.column_config.TextColumn(
+                "valor", help="Para «valor_fijo» y «no_indica» (vacío = la palabra de los nulos válidos)"),
             "grupo": st.column_config.SelectboxColumn(
                 "grupo", options=[""] + list(df_base.columns),
                 help="Solo para «mediana_por_grupo»"),
         },
     )
 
+    st.markdown("**Asegurar que no queden vacíos**")
+    asegurar = st.checkbox(
+        f"Después de las reglas, rellenar con «{palabra}» todos los nulos válidos que sobren", value=True,
+        key=f"lg_asegurar_{clave}",
+        help="Texto, correos, teléfonos, códigos y fechas quedan con la misma palabra. Los números no pueden "
+             "llevar una palabra sin volverse texto: elija abajo qué hacer con ellos. Quite la marca "
+             "si prefiere dejar vacíos a propósito.")
+    numeros_cierre, fechas_cierre = "mediana", True
+    if asegurar:
+        z1, z2 = st.columns(2)
+        numeros_cierre = z1.selectbox(
+            "Números que sigan vacíos", ["mediana", "cero", "palabra"],
+            format_func={"mediana": "Rellenar con la mediana", "cero": "Rellenar con 0",
+                         "palabra": f"Rellenar con «{palabra}» (la columna pasa a texto)"}.get,
+            key=f"lg_cierre_num_{clave}")
+        fechas_cierre = z2.checkbox("Incluir las fechas (ya están como texto en un solo formato)", value=True,
+                                    key=f"lg_cierre_fechas_{clave}")
+
     # ---- 5. Aplicar
     if st.button("Aplicar limpieza", type="primary", key="lg_aplicar"):
         reglas = editada.fillna("").to_dict("records")
+        for r in reglas:  # «no_indica» sin valor = la palabra elegida, para que el diccionario la muestre
+            if r["regla"] == "no_indica" and not str(r["valor"]).strip():
+                r["valor"] = palabra
         try:
             df_final, pasos_reglas = LG.ejecutar_reglas(df_base, reglas, tokens)
+            if asegurar:
+                df_final, paso_cierre = LG.paso_asegurar_sin_vacios(
+                    df_final, tokens, numeros_cierre, fechas_cierre, palabra)
+                pasos_reglas.append(paso_cierre)
+                por_columna = {r["columna"]: r for r in reglas}
+                for r in paso_cierre.reglas or []:  # el diccionario debe decir lo que se hizo
+                    por_columna[r["columna"]] = {**por_columna.get(r["columna"], {}), **r}
+                reglas = list(por_columna.values())
         except ValueError as exc:
             st.error(str(exc))
         else:
@@ -413,6 +509,9 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
         st.dataframe(aud["nulos_restantes"].reset_index())
     else:
         st.success("Sin nulos restantes.")
+    for paso in resultado["pasos"]:
+        if paso.advertencia:
+            st.warning(f"{paso.titulo}: {paso.advertencia}")
     with st.expander("Pasos aplicados"):
         for paso in resultado["pasos"]:
             st.markdown(f"**{paso.titulo}**")
