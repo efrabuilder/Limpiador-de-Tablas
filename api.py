@@ -13,13 +13,21 @@ Endpoints:
     POST /analizar   -> sube un archivo, devuelve el resumen de hallazgos (JSON)
     POST /limpiar     -> sube un archivo + configuración, devuelve datos_limpios y reporte
     GET  /descargar/{id}/{tipo}  -> descarga los archivos generados por /limpiar
+
+Limpieza guiada de nulos, merge y diccionario de datos:
+    POST /limpieza-guiada/diagnostico -> diagnóstico de nulos y reglas sugeridas por columna
+    POST /limpieza-guiada             -> limpia (pasos globales + una regla por columna)
+    POST /merge/diagnostico           -> sugiere y revisa las llaves de dos tablas
+    POST /merge                       -> une A con B y audita el resultado
+    POST /diccionario                 -> devuelve el diccionario de datos (Excel)
+    GET  /descargar-guiado/{id}/{tipo} -> datos | script | diccionario de /limpieza-guiada o /merge
 """
 from __future__ import annotations
 
 import io
 import json
 import uuid
-from typing import Optional
+from typing import Callable, Optional
 
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -33,8 +41,11 @@ from data_cleaner import (
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
+from data_cleaner import flujos_guiados as FG
+from data_cleaner import limpieza_guiada as LG
+from data_cleaner import merge_tablas as MT
 from data_cleaner.exportador_m import generar_editor_m_puro
-from data_cleaner.loaders import load_excel, load_table, load_excel_hojas
+from data_cleaner.loaders import load_excel, load_table, load_excel_hojas, leer_tabla_subida, tabla_a_bytes
 from data_cleaner.exporters import exportar_sql
 from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo, generar_script_crear_base_datos
 from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES, formato_fecha_python, formato_fecha_m
@@ -765,3 +776,264 @@ def modelo_sql_crear_base_datos_endpoint(body: CrearBaseDatosIn):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"script": script}
+
+
+# =============================================================================
+# Limpieza guiada, merge y diccionario de datos
+# =============================================================================
+
+MEDIA_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# Resultados de /limpieza-guiada y /merge, para descargarlos por separado.
+_RESULTADOS_GUIADOS: dict[str, dict] = {}
+
+
+def _o_400(funcion: Callable, *args, **kwargs):
+    """Llama a `funcion` y convierte los errores de validación (columna que no
+    existe, regla inválida, hoja sin indicar...) en un 400 con el mensaje."""
+    try:
+        return funcion(*args, **kwargs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _a_json(valor):
+    """Convierte numpy / DataFrames a tipos que FastAPI sabe serializar."""
+    def convertir(objeto):
+        if isinstance(objeto, pd.DataFrame):
+            return objeto.to_dict("records")
+        if hasattr(objeto, "item"):
+            return objeto.item()
+        return str(objeto)
+
+    def sin_nan(objeto):
+        if isinstance(objeto, float) and (objeto != objeto or objeto in (float("inf"), float("-inf"))):
+            return None
+        if isinstance(objeto, dict):
+            return {k: sin_nan(v) for k, v in objeto.items()}
+        if isinstance(objeto, list):
+            return [sin_nan(v) for v in objeto]
+        return objeto
+
+    return sin_nan(json.loads(json.dumps(valor, default=convertir)))
+
+
+def _leer_upload_guiado(archivo: UploadFile, hoja: Optional[str] = None) -> pd.DataFrame:
+    """Lee el CSV / Excel subido como lo hace la app web (todo como texto)."""
+    buffer = io.BytesIO(archivo.file.read())
+    buffer.name = archivo.filename or ""
+    return _o_400(leer_tabla_subida, buffer, nombre=buffer.name, hoja=hoja or None)
+
+
+def _lista_o_none(valor: Optional[str]) -> Optional[list[str]]:
+    """None = elegir automáticamente; cadena vacía = ninguna."""
+    if valor is None:
+        return None
+    return [c.strip() for c in valor.split(",") if c.strip()]
+
+
+def _rango(valor: Optional[str], nombre: str) -> Optional[tuple]:
+    if not valor:
+        return None
+    partes = valor.split(",")
+    if len(partes) != 2:
+        raise HTTPException(status_code=400, detail=f"{nombre} debe ser 'minimo,maximo'.")
+    return (float(partes[0]), float(partes[1]))
+
+
+def _json_dict(texto: str, nombre: str) -> dict:
+    if not texto.strip():
+        return {}
+    datos = _o_400(json.loads, texto) if texto.strip().startswith("{") else None
+    if not isinstance(datos, dict):
+        raise HTTPException(status_code=400, detail=f"{nombre} debe ser un objeto JSON, ej. {{\"col\": \"valor\"}}.")
+    return datos
+
+
+def _guardar_guiado(tipo: str, base: str, df: pd.DataFrame, script: str, diccionario_excel: bytes) -> str:
+    resultado_id = str(uuid.uuid4())
+    _RESULTADOS_GUIADOS[resultado_id] = {
+        "tipo": tipo, "base": base, "df": df, "script": script, "diccionario": diccionario_excel}
+    return resultado_id
+
+
+@app.post("/limpieza-guiada/diagnostico")
+def limpieza_guiada_diagnostico_endpoint(
+    archivo: UploadFile = File(...),
+    hoja: Optional[str] = Form(None, description="Hoja del libro Excel (si tiene varias)."),
+    tokens_extra: Optional[str] = Form(None, description="Textos que cuentan como nulo, coma-separados. "
+                                       "Por defecto: nan,none,null."),
+    nombres_snake: bool = Form(True),
+):
+    """Diagnóstico de nulos por columna y las reglas que sugiere la app para cada una."""
+    df = _leer_upload_guiado(archivo, hoja)
+    config = _o_400(FG.configurar_limpieza_guiada, df, tokens_extra=_lista_o_none(tokens_extra),
+                    nombres_snake=nombres_snake)
+    df_base, _ = _o_400(LG.ejecutar_pasos_globales, df, config)
+    return _a_json({
+        "filas": len(df), "columnas": len(df.columns),
+        "diagnostico": LG.diagnostico_nulos(df, config["tokens"]).reset_index(),
+        "reglas_sugeridas": FG.reglas_sugeridas(df_base, config["tokens"]),
+        "reglas_disponibles": LG.REGLAS_NULOS,
+    })
+
+
+@app.post("/limpieza-guiada")
+def limpieza_guiada_endpoint(
+    archivo: UploadFile = File(...),
+    hoja: Optional[str] = Form(None),
+    formato: str = Form("csv", description="csv | xlsx (formato de la tabla al descargar)."),
+    tokens_extra: Optional[str] = Form(None, description="Coma-separados. Por defecto: nan,none,null."),
+    nombres_snake: bool = Form(True),
+    vacios_a_nan: bool = Form(True),
+    estandarizar_texto: bool = Form(True),
+    columnas_texto: Optional[str] = Form(None, description="Coma-separadas. Sin enviar = automático; vacío = ninguna."),
+    minusculas: bool = Form(True),
+    espacios: bool = Form(True),
+    comillas: bool = Form(True),
+    numericas: Optional[str] = Form(None, description="Coma-separadas. Sin enviar = automático; vacío = ninguna."),
+    latitud: Optional[str] = Form(None, description="Sin enviar = automática; vacío = ninguna."),
+    longitud: Optional[str] = Form(None, description="Sin enviar = automática; vacío = ninguna."),
+    rango_latitud: Optional[str] = Form(None, description="minimo,maximo esperado."),
+    rango_longitud: Optional[str] = Form(None, description="minimo,maximo esperado."),
+    reglas: str = Form("", description='JSON {"columna": "regla[:parametro]"}. Ej: '
+                       '{"email": "valor_fijo:Sin correo", "monto": "mediana_por_grupo:zona"}. '
+                       "Sin esto se usa la regla sugerida de cada columna."),
+):
+    """Limpieza guiada de nulos: estandariza y aplica una regla de nulos por columna.
+    Devuelve la auditoría y un id para bajar la tabla, el script y el diccionario con
+    GET /descargar-guiado/{id}/{tipo}."""
+    if formato not in ("csv", "xlsx"):
+        raise HTTPException(status_code=400, detail="formato debe ser 'csv' o 'xlsx'.")
+    df = _leer_upload_guiado(archivo, hoja)
+    nombre = archivo.filename or "tabla.csv"
+    config = _o_400(
+        FG.configurar_limpieza_guiada, df, tokens_extra=_lista_o_none(tokens_extra),
+        nombres_snake=nombres_snake, vacios_a_nan=vacios_a_nan, estandarizar_texto=estandarizar_texto,
+        columnas_texto=_lista_o_none(columnas_texto), minusculas=minusculas, espacios=espacios,
+        comillas=comillas, numericas=_lista_o_none(numericas), latitud=latitud, longitud=longitud,
+        rango_latitud=_rango(rango_latitud, "rango_latitud"), rango_longitud=_rango(rango_longitud, "rango_longitud"))
+    ajustes = _o_400(FG.parsear_ajustes_reglas,
+                     [f"{k}={v}" for k, v in _json_dict(reglas, "reglas").items()])
+    resultado = _o_400(FG.ejecutar_limpieza_guiada, df, config, ajustes, nombre_archivo=nombre, hoja=hoja)
+
+    base = f"{FG.nombre_base(nombre)}_limpio"
+    eliminadas = [r["columna"] for r in resultado.reglas if r["regla"] == "eliminar_columna" and r.get("nulos")]
+    _, _, excel = FG.generar_diccionario(resultado.df, base, resultado.reglas,
+                                         fuentes=[nombre], eliminadas=eliminadas)
+    resultado_id = _guardar_guiado("limpieza", base, resultado.df, resultado.script, excel)
+    _RESULTADOS_GUIADOS[resultado_id]["formato"] = formato
+    return _a_json({
+        "id": resultado_id,
+        "auditoria": FG.auditoria_a_dict(resultado.auditoria),
+        "pasos": FG.resumen_pasos(resultado.pasos),
+        "reglas_aplicadas": resultado.reglas,
+    })
+
+
+@app.post("/merge/diagnostico")
+def merge_diagnostico_endpoint(
+    archivo_a: UploadFile = File(..., description="Tabla A (la que manda)."),
+    archivo_b: UploadFile = File(..., description="Tabla B (la que enriquece)."),
+    hoja_a: Optional[str] = Form(None),
+    hoja_b: Optional[str] = Form(None),
+    llave_a: Optional[str] = Form(None, description="Columnas llave de A, coma-separadas. Sin enviar = sugerida."),
+    llave_b: Optional[str] = Form(None, description="Columnas llave de B, en el mismo orden."),
+    modo_llave: str = Form("texto", description="texto | codigo | sin_cambios"),
+    ancho: int = Form(0),
+):
+    """Sugiere las columnas llave y revisa cuántas filas de A encuentran pareja en B."""
+    df_a, df_b = _leer_upload_guiado(archivo_a, hoja_a), _leer_upload_guiado(archivo_b, hoja_b)
+    claves_a, claves_b, diagnostico = _o_400(
+        FG.diagnosticar_llaves, df_a, df_b, _lista_o_none(llave_a), _lista_o_none(llave_b), modo_llave, ancho)
+    return _a_json({
+        "llaves_sugeridas": MT.sugerir_llaves(df_a, df_b),
+        "llaves_usadas": {"a": claves_a, "b": claves_b},
+        "diagnostico": FG.diagnostico_a_dict(diagnostico),
+    })
+
+
+@app.post("/merge")
+def merge_endpoint(
+    archivo_a: UploadFile = File(..., description="Tabla A (la que manda)."),
+    archivo_b: UploadFile = File(..., description="Tabla B (la que enriquece)."),
+    hoja_a: Optional[str] = Form(None),
+    hoja_b: Optional[str] = Form(None),
+    llave_a: Optional[str] = Form(None, description="Coma-separadas. Sin enviar = sugerida."),
+    llave_b: Optional[str] = Form(None, description="Coma-separadas, en el mismo orden que A."),
+    union: str = Form("left", description="left | inner | right | outer"),
+    validar: str = Form("auto", description="auto | vacio | many_to_one | one_to_one | one_to_many | many_to_many"),
+    modo_llave: str = Form("texto", description="texto | codigo | sin_cambios"),
+    ancho: int = Form(0),
+    prefijo_b: str = Form(""),
+    prefijo_todas: bool = Form(False, description="Aplicar el prefijo a todas las columnas de B."),
+    sufijo_b: str = Form("_b"),
+    colapsar_b: bool = Form(True, description="Dejar una fila por llave en B si B repite llaves."),
+    agregaciones: str = Form("", description='JSON {"columna": "first|sum|mean|median|max|min|count|nunique"}.'),
+    rellenos: str = Form("", description='JSON {"destino": "respaldo"} (Plan B).'),
+    conservar_indicador: bool = Form(False),
+    formato: str = Form("csv", description="csv | xlsx (formato de la tabla al descargar)."),
+):
+    """Une A con B, revisa las llaves y audita el resultado. Devuelve la auditoría y un
+    id para bajar la tabla, el script y el diccionario con GET /descargar-guiado/{id}/{tipo}."""
+    if formato not in ("csv", "xlsx"):
+        raise HTTPException(status_code=400, detail="formato debe ser 'csv' o 'xlsx'.")
+    df_a, df_b = _leer_upload_guiado(archivo_a, hoja_a), _leer_upload_guiado(archivo_b, hoja_b)
+    resultado = _o_400(
+        FG.ejecutar_merge, df_a, df_b, archivo_a.filename or "tabla_a.csv", archivo_b.filename or "tabla_b.csv",
+        _lista_o_none(llave_a), _lista_o_none(llave_b), how=union,
+        validate="" if validar == "vacio" else validar, modo=modo_llave, ancho=ancho,
+        prefijo_b=prefijo_b, solo_repetidas=not prefijo_todas, colapsar_b=colapsar_b,
+        agregaciones=_json_dict(agregaciones, "agregaciones") or None, sufijo_b=sufijo_b,
+        conservar_indicador=conservar_indicador, rellenos=list(_json_dict(rellenos, "rellenos").items()),
+        hoja_a=hoja_a, hoja_b=hoja_b)
+    _, _, excel = FG.generar_diccionario(
+        resultado.df, "tabla_maestra", origenes=FG.origenes_de_columnas(resultado),
+        fuentes=[resultado.params["nombre_a"], resultado.params["nombre_b"]])
+    resultado_id = _guardar_guiado("merge", "resultado_merge", resultado.df, resultado.script, excel)
+    _RESULTADOS_GUIADOS[resultado_id]["formato"] = formato
+    return _a_json({
+        "id": resultado_id, "filas": len(resultado.df), "columnas": list(resultado.df.columns),
+        "auditoria": resultado.auditoria, "diagnostico": FG.diagnostico_a_dict(resultado.diagnostico),
+        "rellenos_aplicados": resultado.rellenos,
+    })
+
+
+@app.post("/diccionario")
+def diccionario_endpoint(
+    archivo: UploadFile = File(...),
+    hoja: Optional[str] = Form(None),
+    nombre: Optional[str] = Form(None, description="Nombre de la tabla maestra (por defecto, el del archivo)."),
+):
+    """Diccionario de datos en Excel: tipo, completitud y rango salen de los datos; la
+    descripción y la justificación quedan en blanco para completarlas."""
+    df = _leer_upload_guiado(archivo, hoja)
+    tabla = nombre or FG.nombre_base(archivo.filename or "tabla")
+    _, _, excel = FG.generar_diccionario(df, tabla, fuentes=[archivo.filename or tabla])
+    return StreamingResponse(
+        io.BytesIO(excel), media_type=MEDIA_XLSX,
+        headers={"Content-Disposition": f'attachment; filename="diccionario_{FG.nombre_base(tabla)}.xlsx"'})
+
+
+@app.get("/descargar-guiado/{resultado_id}/{tipo}")
+def descargar_guiado_endpoint(resultado_id: str, tipo: str, formato: Optional[str] = None):
+    """Baja lo generado por /limpieza-guiada o /merge. tipo: datos | script | diccionario.
+    Para 'datos', formato = csv | xlsx (por defecto el elegido al crear el resultado)."""
+    if resultado_id not in _RESULTADOS_GUIADOS:
+        raise HTTPException(status_code=404, detail="No existe ese resultado (o ya expiró).")
+    if tipo not in ("datos", "script", "diccionario"):
+        raise HTTPException(status_code=400, detail="tipo debe ser 'datos', 'script' o 'diccionario'.")
+    datos = _RESULTADOS_GUIADOS[resultado_id]
+    base = datos["base"]
+    if tipo == "script":
+        return StreamingResponse(io.BytesIO(datos["script"].encode("utf-8")), media_type="text/x-python",
+                                 headers={"Content-Disposition": f'attachment; filename="{base}_script.py"'})
+    if tipo == "diccionario":
+        return StreamingResponse(io.BytesIO(datos["diccionario"]), media_type=MEDIA_XLSX,
+                                 headers={"Content-Disposition": f'attachment; filename="diccionario_{base}.xlsx"'})
+    formato = formato or datos.get("formato", "csv")
+    if formato not in ("csv", "xlsx"):
+        raise HTTPException(status_code=400, detail="formato debe ser 'csv' o 'xlsx'.")
+    media = "text/csv" if formato == "csv" else MEDIA_XLSX
+    return StreamingResponse(io.BytesIO(tabla_a_bytes(datos["df"], formato)), media_type=media,
+                             headers={"Content-Disposition": f'attachment; filename="{base}.{formato}"'})
