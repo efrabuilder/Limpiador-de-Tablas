@@ -576,9 +576,10 @@ def generar_diccionario(df: pd.DataFrame, nombre: str, reglas: Optional[List[Dic
                         llaves: Optional[Sequence[str]] = None
                         ) -> Tuple[pd.DataFrame, pd.DataFrame, bytes]:
     """(diccionario, resumen, excel). Tipo, completitud y rangos salen de los
-    datos; la descripcion, la justificacion y la clasificacion ejecutiva (KPI,
-    variable transformada o llave) quedan para completarlas (las celdas vacias
-    salen resaltadas en el Excel). `llaves`: columnas usadas para unir tablas;
+    datos; la descripcion se redacta sola (nombre, tipo, origen y tratamiento) y se puede
+    reescribir; la justificacion y la clasificacion ejecutiva (KPI, variable
+    transformada o llave) quedan para completarlas (las celdas vacias salen
+    resaltadas en el Excel). `llaves`: columnas usadas para unir tablas;
     sin ellas se toman como llaves las de rol identificador."""
     diccionario = DD.construir_diccionario(df, reglas, origenes, llaves=llaves)
     resumen = DD.resumen_tabla(df, nombre, diccionario, fuentes, eliminadas)
