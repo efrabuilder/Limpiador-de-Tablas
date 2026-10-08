@@ -11,15 +11,19 @@ orden del notebook LimpiezadeDatos.ipynb:
     4. Estandarizar texto (minusculas, sin espacios de mas, sin comillas)
     5. Convertir columnas numericas (coma decimal, simbolos de moneda)
     6. Parsear coordenadas (latitud / longitud)
-    7. Regla de nulos por columna (rellenar, mediana, eliminar fila...)
-    8. Auditoria final (antes / despues)
+    7. Fechas en un solo formato (AAAA-MM-DD por defecto)
+    8. Unir valores que significan lo mismo (M / male -> M, f / female -> F...)
+    9. Regla de nulos por columna (rellenar, mediana, eliminar fila...)
+   10. Asegurar que no queden vacios: los nulos validos se rellenan con una sola
+       palabra elegida («No indica» por defecto); numeros con mediana, 0 o la palabra
+   11. Auditoria final (antes / despues)
 
 Reusa los patrones de patrones.py para reconocer el rol de cada columna
 (id, email, telefono, fecha, coordenada, numerica, texto) y sugerir una
 regla de nulos para cada una.
 
 Las funciones auxiliares (es_nulo, a_numero, parsear_coordenada,
-nombres_snake, limpiar_texto, aplicar_regla) no dependen del resto del
+nombres_snake, limpiar_texto, unificar_fechas, aplicar_regla, rellenar_restantes) no dependen del resto del
 paquete a proposito: generar_script_limpieza() las copia tal cual dentro
 del script que entrega, asi el script hace exactamente lo mismo que la app.
 """
@@ -27,7 +31,8 @@ from __future__ import annotations
 
 import inspect
 import re
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -44,14 +49,40 @@ from .patrones import (
     tipo_coordenada,
 )
 
-# Textos que cuentan como "nulo" ademas de la celda realmente vacia. Los de
-# la lista extra son opcionales porque "na" o "-" podrian ser datos reales.
-TOKENS_NULOS_BASE = ("", "nan", "none", "null")
-TOKENS_NULOS_EXTRA = ("n/a", "na", "-", "--", "s/d", "sin dato")
+# Textos que cuentan como "nulo" ademas de la celda realmente vacia. "n/a"
+# (no aplica / no disponible) ya viene incluido: casi nunca es un dato real. Los
+# de la lista extra son opcionales porque "na", "-" o "unknown" podrian ser datos
+# reales; la app avisa si los encuentra en la tabla.
+TOKENS_NULOS_BASE = ("", "nan", "none", "null", "n/a")
+TOKENS_NULOS_EXTRA = ("na", "-", "--", "s/d", "sin dato", "unknown", "desconocido",
+                      "not available", "no disponible")
+
+# Valores que significan lo mismo, para proponer su union (destino -> variantes, ya sin
+# tildes ni mayusculas). Un grupo solo se propone si cubre casi toda la columna.
+SINONIMOS = {
+    "genero": {
+        "M": ("m", "male", "masculino", "hombre", "man", "h"),
+        "F": ("f", "female", "femenino", "mujer", "woman"),
+        "Other": ("other", "o", "otro", "divers", "diverse", "non binary", "nonbinary",
+                  "no binario"),
+    },
+    "si_no": {
+        "Sí": ("si", "yes", "y", "true", "verdadero", "s"),
+        "No": ("no", "n", "false", "falso"),
+    },
+}
+# Textos que dentro de una de esas columnas quieren decir «sin dato».
+TEXTOS_SIN_DATO = ("no indica", "sin dato", "desconocido", "unknown", "prefiero no decir",
+                   "prefiero no indicar", "not available", "no disponible", "na", "n a")
+
+# Texto con el que se rellenan los nulos validos (los que no son un error: no hay
+# reclamo, no hubo encuesta, la venta fue directa...).
+TEXTO_NO_INDICA = "No indica"
 
 # Reglas de nulos que se pueden aplicar a una columna.
 REGLAS_NULOS = {
     "dejar": "Dejar como está",
+    "no_indica": "Rellenar con «No indica» (nulo válido)",
     "valor_fijo": "Rellenar con un valor fijo",
     "cero": "Rellenar con 0",
     "mediana": "Rellenar con la mediana",
@@ -185,15 +216,44 @@ def limpiar_texto(serie, minusculas=True, espacios=True, comillas=True):
     return s.astype(object).where(~nulos, np.nan)
 
 
+def unificar_fechas(serie, formato="%Y-%m-%d", dia_primero=True):
+    """Pasa una columna de fechas escritas de varias maneras (2025-01-31, 31/01/2025,
+    31-1-2025, Jan 31 2025...) a un solo formato de texto, `formato` (por defecto
+    AAAA-MM-DD). Las que empiezan por el anio se leen siempre como anio-mes-dia; las demas
+    como dia/mes/anio si `dia_primero`, o mes/dia/anio si no. Lo que no se pueda leer
+    como fecha queda como nulo."""
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        fechas = serie
+    else:
+        texto = serie.astype("string").str.strip()
+        anio_primero = texto.str.match(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", na=False)
+        fechas = pd.to_datetime(texto.where(~anio_primero), errors="coerce",
+                                dayfirst=dia_primero, format="mixed")
+        fechas = fechas.fillna(pd.to_datetime(texto.where(anio_primero), errors="coerce",
+                                              dayfirst=False, format="mixed"))
+    return fechas.dt.strftime(formato).astype(object).where(fechas.notna(), np.nan)
+
+
+def decimales_de(serie, maximo=6):
+    """Cuantos decimales usan los datos de la serie (de 0 a `maximo`). Sirve para
+    redondear lo que se calcula (media, mediana) y no dejar ruido como 9.942499999999999."""
+    datos = serie.dropna()
+    for d in range(maximo + 1):
+        if (datos.round(d) == datos).all():
+            return d
+    return maximo
+
+
 def aplicar_regla(df, columna, regla, valor="", grupo="", tokens=TOKENS_NULOS_BASE):
     """Aplica una regla de nulos a una columna. Devuelve (df_nuevo, info).
     Los nulos son los de es_nulo(): NaN, vacios y los `tokens`.
 
-    Reglas: dejar, valor_fijo, cero, mediana, media, moda,
-    mediana_por_grupo (usa la columna `grupo`), eliminar_fila,
-    eliminar_columna. Para mediana/media la columna debe ser numerica; si
-    hay valores que no se pueden leer como numero, avisa en vez de
-    perderlos en silencio."""
+    Reglas: dejar, no_indica (rellena con `valor`, o con «No indica» si no se da),
+    valor_fijo, cero, mediana, media, moda, mediana_por_grupo (usa la columna
+    `grupo`), eliminar_fila, eliminar_columna. Para mediana/media la columna debe
+    ser numerica; si hay valores que no se pueden leer como numero, avisa en vez
+    de perderlos en silencio. Lo que se calcula (media, mediana) se redondea a los
+    decimales de los datos (minimo 2, maximo 6) para no dejar ruido decimal."""
     df = df.copy()
     mascara = es_nulo(df[columna], tokens)
     n_nulos = int(mascara.sum())
@@ -214,9 +274,11 @@ def aplicar_regla(df, columna, regla, valor="", grupo="", tokens=TOKENS_NULOS_BA
         info["mensaje"] = f"{columna}: {n_nulos} filas eliminadas"
         return df, info
 
-    if regla in ("valor_fijo", "cero", "moda"):
+    if regla in ("valor_fijo", "no_indica", "cero", "moda"):
         if regla == "cero":
             relleno = 0
+        elif regla == "no_indica":
+            relleno = valor if str(valor).strip() else "No indica"
         elif regla == "moda":
             frecuentes = df.loc[~mascara, columna].mode()
             if len(frecuentes) == 0:
@@ -250,16 +312,17 @@ def aplicar_regla(df, columna, regla, valor="", grupo="", tokens=TOKENS_NULOS_BA
             )
         if numeros.notna().sum() == 0:
             raise ValueError(f"'{columna}' no tiene ningun numero para calcular la {regla}.")
+        decimales = min(max(decimales_de(numeros), 2), 6)  # sin ruido tipo 9.942499999999999
         if regla == "media":
-            completa = numeros.fillna(numeros.mean())
+            completa = numeros.fillna(round(float(numeros.mean()), decimales))
         elif regla == "mediana":
-            completa = numeros.fillna(numeros.median())
+            completa = numeros.fillna(round(float(numeros.median()), decimales))
         else:
             if grupo not in df.columns:
                 raise ValueError("Elija una columna de grupo valida para la mediana por grupo.")
             por_grupo = numeros.groupby(df[grupo], dropna=False).transform(
-                lambda s: s.fillna(s.median()))
-            completa = por_grupo.fillna(numeros.median())  # grupos sin datos: mediana global
+                lambda s: s.fillna(round(float(s.median()), decimales)))
+            completa = por_grupo.fillna(round(float(numeros.median()), decimales))  # grupos sin datos: mediana global
         if (completa % 1 == 0).all() and completa.abs().max() < 2 ** 53:  # todo entero: sin decimales
             completa = completa.astype("int64")
         df[columna] = completa
@@ -270,9 +333,32 @@ def aplicar_regla(df, columna, regla, valor="", grupo="", tokens=TOKENS_NULOS_BA
     raise ValueError(f"Regla desconocida: {regla}")
 
 
+def rellenar_restantes(df, columnas_texto, columnas_numericas, numeros="mediana",
+                       texto="No indica", tokens=TOKENS_NULOS_BASE):
+    """Cierre sin vacios: rellena los nulos que sobren. Las columnas de texto
+    con `texto` («No indica») y las numericas con la mediana, con 0
+    (numeros='cero') o tambien con `texto` (numeros='palabra': la columna pasa a
+    texto). Si una columna numerica no se puede resolver como numero, se rellena
+    con `texto`."""
+    for col in columnas_texto:
+        if col in df.columns:
+            df, _ = aplicar_regla(df, col, "no_indica", valor=texto, tokens=tokens)
+    for col in columnas_numericas:
+        if col in df.columns:
+            if numeros == "palabra":
+                df, _ = aplicar_regla(df, col, "no_indica", valor=texto, tokens=tokens)
+                continue
+            try:
+                df, _ = aplicar_regla(df, col, "cero" if numeros == "cero" else "mediana",
+                                      tokens=tokens)
+            except ValueError:
+                df, _ = aplicar_regla(df, col, "no_indica", valor=texto, tokens=tokens)
+    return df
+
+
 # Orden en que se copian al script generado (cada una puede usar las anteriores).
 _FUNCIONES_SCRIPT = (es_nulo, a_numero, parsear_coordenada, nombres_snake,
-                     limpiar_texto, aplicar_regla)
+                     limpiar_texto, unificar_fechas, decimales_de, aplicar_regla, rellenar_restantes)
 
 
 # =============================================================================
@@ -341,17 +427,17 @@ def sugerir_regla(rol: str, pct_nulos: float) -> Tuple[str, str]:
         return "dejar", ""
     if pct_nulos >= 100:
         return "eliminar_columna", ""
+    if rol == "id" and pct_nulos >= 5:
+        # Muchos vacios en un codigo: casi seguro es un nulo valido (sin reclamo,
+        # sin broker...), no un error. Borrar tantas filas seria un desastre.
+        return "no_indica", ""
     if rol in ("id", "coordenada"):
         return "eliminar_fila", ""  # sin llave o sin ubicacion la fila no sirve
     if rol == "numerica":
         return "mediana", ""
-    if rol == "email":
-        return "valor_fijo", "Sin correo"
-    if rol == "telefono":
-        return "valor_fijo", "Sin teléfono"
-    if rol == "fecha":
-        return "dejar", ""  # una fecha vacia suele ser un dato real (aun no ocurre)
-    return "valor_fijo", "Sin dato"
+    # correo, telefono, fecha y texto: el nulo suele ser valido (no dio el dato, aun no
+    # ocurre...), asi que se rellena con la palabra elegida («No indica» por defecto).
+    return "no_indica", ""  # nulo valido en texto: «No indica»
 
 
 def diagnostico_nulos(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE) -> pd.DataFrame:
@@ -380,15 +466,19 @@ def diagnostico_nulos(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE) -> pd.DataFram
     return tabla.sort_values("total", ascending=False, kind="stable")
 
 
-def tabla_de_reglas(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE) -> pd.DataFrame:
+def tabla_de_reglas(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE,
+                    palabra: str = TEXTO_NO_INDICA) -> pd.DataFrame:
     """Tabla editable de reglas: una fila por columna con su rol, sus nulos
-    y la regla sugerida (columnas regla / valor / grupo editables)."""
+    y la regla sugerida (columnas regla / valor / grupo editables). En las
+    reglas «no_indica» el valor sugerido es `palabra`."""
     diag = diagnostico_nulos(df, tokens)
     filas = []
     for col in df.columns:
         rol_clave = _ROL_POR_TEXTO[diag.loc[col, "rol"]]
         pct = float(diag.loc[col, "porcentaje"])
         regla, valor = sugerir_regla(rol_clave, pct)
+        if regla == "no_indica":
+            valor = palabra
         filas.append({
             "columna": col,
             "rol": diag.loc[col, "rol"],
@@ -410,15 +500,35 @@ def contar_coordenadas_fuera_de_rango(serie: pd.Series, tipo: str, minimo=None,
     limite = 180 if tipo == "longitud" else 90
     minimo = -limite if minimo is None else minimo
     maximo = limite if maximo is None else maximo
+    return int(serie.map(lambda v: _fuera_de_rango(v, minimo, maximo)).sum())
 
-    def fuera(v):
-        try:
-            numero = float(str(v).strip().replace(",", "."))
-        except ValueError:
-            return False
-        return bool(np.isfinite(numero) and not (minimo <= numero <= maximo))
 
-    return int(serie.map(fuera).sum())
+def _fuera_de_rango(v, minimo, maximo) -> bool:
+    try:
+        numero = float(str(v).strip().replace(",", "."))
+    except ValueError:
+        return False
+    return bool(np.isfinite(numero) and not (minimo <= numero <= maximo))
+
+
+def detectar_textos_tipo_nulo(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE,
+                              candidatos=TOKENS_NULOS_EXTRA) -> pd.DataFrame:
+    """Textos que suelen significar «sin dato» (unknown, -, na...), que estan en la
+    tabla y todavia NO cuentan como nulo. Una fila por texto: cuantas celdas y en
+    que columnas. Sirve para avisar antes de que pasen como datos validos."""
+    buscados = [t for t in candidatos if t not in tokens]
+    cuentas, columnas = {}, {}
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_datetime64_any_dtype(df[col]):
+            continue
+        texto = df[col].dropna().astype("string").str.strip().str.lower()
+        for valor, n in texto[texto.isin(buscados)].value_counts().items():
+            cuentas[valor] = cuentas.get(valor, 0) + int(n)
+            columnas.setdefault(valor, []).append(f"{col} ({int(n)})")
+    filas = [{"texto": t, "celdas": n, "columnas": ", ".join(columnas[t][:5])
+              + (" …" if len(columnas[t]) > 5 else "")} for t, n in cuentas.items()]
+    return pd.DataFrame(filas, columns=["texto", "celdas", "columnas"]).sort_values(
+        "celdas", ascending=False, ignore_index=True)
 
 
 # =============================================================================
@@ -432,6 +542,8 @@ class Paso:
     titulo: str
     detalle: str
     codigo: str
+    advertencia: str = ""  # aviso para mostrar destacado (algo que conviene revisar)
+    reglas: Optional[List[Dict]] = field(default=None)  # reglas aplicadas (para el diccionario)
 
 
 def columnas_texto_sugeridas(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE) -> List[str]:
@@ -519,7 +631,7 @@ def paso_coordenadas(df: pd.DataFrame, col_latitud: Optional[str] = None,
     punto decimal. `rango_latitud` / `rango_longitud` son (minimo, maximo)
     opcionales con el rango esperado de los datos."""
     df = df.copy()
-    lineas, codigo = [], []
+    lineas, codigo, avisos = [], [], []
     for col, tipo, rango in ((col_latitud, "latitud", rango_latitud),
                              (col_longitud, "longitud", rango_longitud)):
         if not col:
@@ -528,8 +640,16 @@ def paso_coordenadas(df: pd.DataFrame, col_latitud: Optional[str] = None,
         minimo, maximo = rango if rango else (-limite, limite)
         tenian_dato = int(df[col].notna().sum())
         fuera = contar_coordenadas_fuera_de_rango(df[col], tipo, minimo, maximo)
+        originales = df[col].copy()
         df[col] = df[col].map(lambda v, t=tipo, a=minimo, b=maximo: parsear_coordenada(v, t, a, b))
         nulos_nuevos = tenian_dato - int(df[col].notna().sum())
+        reescaladas = originales.map(lambda v: _fuera_de_rango(v, minimo, maximo)) & df[col].notna()
+        if reescaladas.any():
+            ejemplos = ", ".join(f"{o} → {n:g}" for o, n in
+                                 zip(originales[reescaladas].head(3), df.loc[reescaladas, col].head(3)))
+            avisos.append(f"«{col}»: {int(reescaladas.sum())} valores fuera de rango se corrigieron "
+                          f"dividiéndolos entre 10 hasta entrar en el rango ({ejemplos}). Es lo esperado "
+                          f"si venían sin punto decimal; si no, revise esos valores.")
         minimo_real, maximo_real = df[col].min(), df[col].max()
         valores = (f"mín {minimo_real:.4f} / máx {maximo_real:.4f}"
                    if pd.notna(minimo_real) else "sin valores")
@@ -537,7 +657,8 @@ def paso_coordenadas(df: pd.DataFrame, col_latitud: Optional[str] = None,
                       f"{nulos_nuevos} no se pudieron arreglar y quedaron nulos; {valores}")
         codigo.append(f'df["{col}"] = df["{col}"].map('
                       f'lambda v: parsear_coordenada(v, "{tipo}", {minimo!r}, {maximo!r}))')
-    return df, Paso("Parsear coordenadas", "\n".join(lineas), "\n".join(codigo))
+    return df, Paso("Parsear coordenadas", "\n".join(lineas), "\n".join(codigo),
+                    advertencia="\n".join(avisos))
 
 
 def paso_regla(df: pd.DataFrame, columna: str, regla: str, valor: str = "", grupo: str = "",
@@ -550,6 +671,163 @@ def paso_regla(df: pd.DataFrame, columna: str, regla: str, valor: str = "", grup
     return df_nuevo, Paso(f"Nulos de «{columna}»: {REGLAS_NULOS[regla]}", info["mensaje"], codigo)
 
 
+FORMATOS_FECHA = {
+    "AAAA-MM-DD  (2025-12-31)": "%Y-%m-%d",
+    "DD/MM/AAAA  (31/12/2025)": "%d/%m/%Y",
+    "MM/DD/AAAA  (12/31/2025)": "%m/%d/%Y",
+    "DD-MM-AAAA  (31-12-2025)": "%d-%m-%Y",
+}
+
+
+def paso_fechas(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-%m-%d",
+                dia_primero: bool = True, tokens=TOKENS_NULOS_BASE) -> Tuple[pd.DataFrame, Paso]:
+    """Deja las columnas de fecha en un solo formato (texto). Cuenta cuantas maneras
+    de escribirlas habia y avisa de las que no se pudieron leer (quedan nulas)."""
+    df = df.copy()
+    lineas, codigo, avisos = [], [], []
+    for col in columnas:
+        con_dato = ~es_nulo(df[col], tokens)
+        texto = df.loc[con_dato, col].astype(str)
+        formas = texto.str.replace(r"\d", "9", regex=True).str.replace(r"[A-Za-z]+", "a", regex=True)
+        nuevo = unificar_fechas(df[col].where(con_dato), formato, dia_primero)
+        ilegibles = con_dato & nuevo.isna()
+        df[col] = nuevo
+        lineas.append(f"{col}: {formas.nunique()} formas de escribir la fecha → un solo formato "
+                      f"({formato}); {int(ilegibles.sum())} no se pudieron leer")
+        if ilegibles.any():
+            ejemplos = ", ".join(repr(v) for v in texto[ilegibles[con_dato]].unique()[:3])
+            avisos.append(f"«{col}»: {int(ilegibles.sum())} valores no se pudieron leer como fecha y "
+                          f"quedaron nulos (ej. {ejemplos}).")
+        codigo.append(f'df["{col}"] = unificar_fechas(df["{col}"].where(~es_nulo(df["{col}"], TOKENS_NULOS)), '
+                      f'{formato!r}, {dia_primero!r})')
+    return df, Paso("Fechas en un solo formato", "\n".join(lineas), "\n".join(codigo),
+                    advertencia="\n".join(avisos))
+
+
+def _clave_texto(valor) -> str:
+    """Texto sin tildes, minusculas y sin signos: 'N/A' -> 'n a', 'München' -> 'munchen'."""
+    s = unicodedata.normalize("NFKD", str(valor)).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+def _destinos_sugeridos(conteo: pd.Series, palabra: str) -> Dict[str, str]:
+    destinos: Dict[str, str] = {}
+    claves = {v: _clave_texto(v) for v in conteo.index}
+    total = max(int(conteo.sum()), 1)
+    for grupo in SINONIMOS.values():  # 1) grupos conocidos (genero, si/no)
+        por_clave = {k: destino for destino, ks in grupo.items() for k in ks}
+        miembros = {v: por_clave[c] for v, c in claves.items() if c in por_clave}
+        sin_dato = [v for v, c in claves.items() if c in TEXTOS_SIN_DATO and v not in miembros]
+        cubiertos = sum(int(conteo[v]) for v in list(miembros) + sin_dato)
+        if len(miembros) >= 2 and cubiertos >= 0.8 * total:
+            destinos.update(miembros)
+            destinos.update({v: palabra for v in sin_dato})
+            break
+    por_clave: Dict[str, List[str]] = {}  # 2) lo que solo cambia en tildes, signos o espacios
+    for v in conteo.index:
+        if v not in destinos:
+            por_clave.setdefault(claves[v], []).append(v)
+    for variantes in por_clave.values():
+        if len(variantes) > 1:
+            principal = max(variantes, key=lambda x: int(conteo[x]))
+            destinos.update({v: principal for v in variantes if v != principal})
+    return destinos
+
+
+def sugerir_equivalencias(df: pd.DataFrame, columnas: Optional[List[str]] = None,
+                          palabra: str = TEXTO_NO_INDICA, tokens=TOKENS_NULOS_BASE,
+                          max_valores: int = 30) -> pd.DataFrame:
+    """Tabla (columna, valor, filas, unificar_a) para unir valores que significan lo
+    mismo: M / male / masculino -> M, si / yes -> Sí, 'München' / 'Munchen'... Sin
+    `columnas` revisa todas las de texto con 2 a `max_valores` valores distintos y
+    deja solo las que tienen algo que unir. `unificar_a` vacio = no cambiar."""
+    filas = []
+    for col in (columnas if columnas is not None else df.columns):
+        serie = df[col]
+        if pd.api.types.is_numeric_dtype(serie) or pd.api.types.is_datetime64_any_dtype(serie):
+            continue
+        conteo = serie[~es_nulo(serie, tokens)].astype(str).value_counts()
+        if not 2 <= len(conteo) <= max_valores:
+            continue
+        destinos = _destinos_sugeridos(conteo, palabra)
+        if columnas is None and not destinos:
+            continue
+        for valor, n in conteo.items():
+            destino = destinos.get(valor, "")
+            filas.append({"columna": col, "valor": valor, "filas": int(n),
+                          "unificar_a": "" if destino == valor else destino})
+    return pd.DataFrame(filas, columns=["columna", "valor", "filas", "unificar_a"])
+
+
+def paso_unificar(df: pd.DataFrame, equivalencias: List[Dict]) -> Tuple[pd.DataFrame, Optional[Paso]]:
+    """Aplica la union de valores: [{columna, valor, unificar_a}]. Los que tienen
+    `unificar_a` vacio (o igual al valor) no cambian. Devuelve (df, None) si no hay nada."""
+    df = df.copy()
+    mapeos: Dict[str, Dict[str, str]] = {}
+    for e in equivalencias:
+        destino, valor = str(e.get("unificar_a") or "").strip(), str(e["valor"])
+        if destino and destino != valor and e["columna"] in df.columns:
+            mapeos.setdefault(e["columna"], {})[valor] = destino
+    if not mapeos:
+        return df, None
+    lineas = []
+    for col, mapeo in mapeos.items():
+        cambiadas = int(df[col].isin(list(mapeo)).sum())
+        df[col] = df[col].replace(mapeo)
+        pares = "; ".join(f"«{a}» → «{b}»" for a, b in list(mapeo.items())[:8])
+        lineas.append(f"{col}: {cambiadas} celdas unificadas ({pares}"
+                      f"{' …' if len(mapeo) > 8 else ''})")
+    codigo = (f"MAPEOS = {mapeos!r}\n"
+              "for col, mapeo in MAPEOS.items():\n"
+              "    df[col] = df[col].replace(mapeo)")
+    return df, Paso("Unir valores equivalentes", "\n".join(lineas), codigo)
+
+
+def paso_asegurar_sin_vacios(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE, numeros: str = "mediana",
+                             incluir_fechas: bool = True,
+                             texto: str = TEXTO_NO_INDICA) -> Tuple[pd.DataFrame, Paso]:
+    """Cierre sin vacios: despues de las reglas, rellena lo que sobre. Los nulos
+    validos (texto, correos, telefonos, codigos y fechas) quedan con la misma palabra
+    `texto` («No indica» por defecto). Numeros: mediana, 0 (numeros='cero') o la
+    palabra (numeros='palabra', la columna pasa a texto). Con incluir_fechas=False las
+    fechas se dejan vacias. Avisa de lo que no pudo rellenar."""
+    cols_fecha = columnas_fecha_por_nombre(df)
+    textos, numericas, omitidas, nulos = [], [], [], {}
+    for col in df.columns:
+        n = int(es_nulo(df[col], tokens).sum())
+        if not n:
+            continue
+        nulos[col] = n
+        rol = rol_columna(df, col, cols_fecha, tokens)
+        if rol == "fecha" and not incluir_fechas:
+            omitidas.append(col)
+        elif rol == "numerica":
+            numericas.append(col)
+        else:
+            textos.append(col)
+    df_nuevo = rellenar_restantes(df, textos, numericas, numeros, texto, tokens)
+    reglas = [{"columna": c, "regla": "no_indica", "valor": texto, "grupo": "", "nulos": nulos[c]}
+              for c in textos]
+    for c in numericas:
+        convertida = numeros != "palabra" and (
+            pd.api.types.is_numeric_dtype(df_nuevo[c]) or
+            a_numero(df_nuevo[c]).notna().sum() == df_nuevo[c].notna().sum())
+        reglas.append({"columna": c, "regla": ("cero" if numeros == "cero" else "mediana")
+                       if convertida else "no_indica", "valor": "" if convertida else texto,
+                       "grupo": "", "nulos": nulos[c]})
+    if nulos:
+        detalle = (f"{sum(nulos[c] for c in textos)} celdas de {len(textos)} columnas de texto → «{texto}»; "
+                   f"{sum(nulos[c] for c in numericas)} celdas de {len(numericas)} columnas numéricas → "
+                   f"{ {'cero': '0', 'palabra': '«' + texto + '»'}.get(numeros, 'mediana') }.")
+    else:
+        detalle = "No quedaba ningún vacío."
+    advertencia = ("Quedan vacías estas fechas (un texto las rompería como fecha): "
+                   + ", ".join(f"{c} ({nulos[c]})" for c in omitidas)) if omitidas else ""
+    codigo = (f"df = rellenar_restantes(df, {textos!r}, {numericas!r}, numeros={numeros!r}, "
+              f"texto={texto!r}, tokens=TOKENS_NULOS)")
+    return df_nuevo, Paso("Asegurar que no queden vacíos", detalle, codigo, advertencia, reglas)
+
+
 def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFrame, List[Paso]]:
     """Corre los pasos que afectan a toda la tabla, en el orden del
     notebook: nombres, vacios a NaN, texto, numericas, coordenadas.
@@ -557,7 +835,8 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
       tokens, nombres_snake (bool), vacios_a_nan (bool),
       texto (dict con columnas, minusculas, espacios, comillas),
       numericas (lista), latitud (col), longitud (col),
-      rango_latitud / rango_longitud ((minimo, maximo), opcionales).
+      rango_latitud / rango_longitud ((minimo, maximo), opcionales),
+      fechas (dict con columnas, formato, dia_primero).
     Los nombres de columna del config son los de DESPUES de renombrar."""
     tokens = tuple(config.get("tokens", TOKENS_NULOS_BASE))
     pasos: List[Paso] = []
@@ -583,6 +862,12 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
     if lat or lon:
         df, paso = paso_coordenadas(df, lat, lon, config.get("rango_latitud"),
                                     config.get("rango_longitud"))
+        pasos.append(paso)
+    fechas = config.get("fechas")
+    if fechas and fechas.get("columnas"):
+        df, paso = paso_fechas(df, [c for c in fechas["columnas"] if c in df.columns],
+                               fechas.get("formato", "%Y-%m-%d"), fechas.get("dia_primero", True),
+                               tokens)
         pasos.append(paso)
     return df, pasos
 
