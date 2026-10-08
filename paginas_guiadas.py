@@ -218,9 +218,10 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
     el diccionario técnico (Excel, para ingenieros y Power BI) y el documento de alcance
     (Word, para quien decide)."""
     st.subheader("📘 Diccionario de datos de la tabla maestra")
-    st.caption("Tipo, completitud, valores únicos y rango salen de los datos. La descripción, la "
-               "justificación de negocio y la clasificación ejecutiva las escribe usted: es lo que "
-               "más le sirve a quien decide.")
+    st.caption("Tipo, completitud, valores únicos y rango salen de los datos, y la descripción se "
+               "redacta sola a partir del nombre, el tipo y el tratamiento de cada campo (revísela y "
+               "corríjala si hace falta). La justificación de negocio y la clasificación ejecutiva las "
+               "escribe usted: es lo que más le sirve a quien decide.")
     nombre = st.text_input("Nombre de la tabla maestra", value=nombre_defecto, key=f"{prefijo}_dic_nombre")
     firma = _firma(df)
     base = _diccionario_cacheado(df, firma, reglas, origenes, llaves).copy()
