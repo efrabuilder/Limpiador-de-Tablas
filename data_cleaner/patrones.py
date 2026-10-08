@@ -718,19 +718,49 @@ def detectar_columnas(
 
 
 
+def _contenido_parece_fecha(serie: pd.Series, minimo: float = 0.3) -> bool:
+    """Confirma con los valores una columna que solo parece fecha por una palabra «débil»
+    del nombre (pago, cobro, entrega...). Cuenta como fecha si es de tipo fecha, o si al menos
+    `minimo` de sus valores (sin contar «Pendiente»/«No aplica») se leen como fecha. Una columna
+    numérica nunca lo es; una sin datos se deja por nombre (no hay nada que contradiga)."""
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        return True
+    if pd.api.types.is_numeric_dtype(serie) or pd.api.types.is_bool_dtype(serie):
+        return False
+    muestra = serie.dropna().astype(str).str.strip()
+    muestra = muestra[muestra != ""].head(200)
+    if muestra.empty:
+        return True
+    pendientes = muestra.map(es_valor_fecha_pendiente)
+    resto = muestra[~pendientes]
+    if resto.empty:  # solo «Pendiente»/«No aplica»: nada que contradiga el nombre
+        return True
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:  # format="mixed": cada valor se lee por separado (pandas 2+); formatos distintos no se pierden
+            leidas = int(pd.to_datetime(resto, errors="coerce", dayfirst=True, format="mixed").notna().sum())
+        except (TypeError, ValueError):
+            leidas = int(pd.to_datetime(resto, errors="coerce", dayfirst=True).notna().sum())
+    return leidas / len(resto) >= minimo  # «Pendiente» solo no basta: el resto debe verse como fecha
+
+
 def columnas_fecha_por_nombre(df: pd.DataFrame) -> List[str]:
-    """Nivel 1 de deteccion de columnas de fecha por nombre, con una
-    salvedad respecto a columnas_por_patron(df, PATRONES_FECHA): las
-    palabras "debiles" (ver PATRONES_FECHA_DEBIL) solo cuentan si la
-    columna no es ademas un identificador (folio, codigo, clave...) --
-    evita marcar "folio_pago" o "codigo_cobro" como columna de fecha.
-    Las palabras "fuertes" (fecha, date, dob...) siempre cuentan."""
+    """Nivel 1 de deteccion de columnas de fecha por nombre, con dos salvedades respecto a
+    columnas_por_patron(df, PATRONES_FECHA): las palabras \"debiles\" (ver PATRONES_FECHA_DEBIL)
+    solo cuentan si la columna no es ademas un identificador (folio, codigo, clave...) y, ademas,
+    si sus valores parecen fechas (evita marcar \"metodo_pago\" o \"monto_pago\" como fecha por
+    contener \"pago\"). Las palabras \"fuertes\" (fecha, date, dob...) siempre cuentan."""
     cols = []
     for c in df.columns:
         if coincide_patron(c, PATRONES_FECHA_FUERTE):
             cols.append(c)
         elif coincide_patron(c, PATRONES_FECHA_DEBIL) and not es_columna_id(c):
-            cols.append(c)
+            try:
+                if _contenido_parece_fecha(df[c]):
+                    cols.append(c)
+            except Exception:
+                cols.append(c)  # si no se pudo revisar el contenido, se mantiene el criterio por nombre
     return cols
 
 
