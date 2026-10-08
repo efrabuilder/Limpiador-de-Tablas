@@ -248,7 +248,8 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
             tratamiento = "No aplica (columna de marca)"
         es_llave = (col in llaves) if llaves is not None else rol == "id"
         descripcion = describir_campo(col, rol, tipo, tratamiento,
-                                      (origenes or {}).get(col, ""), es_llave=es_llave)
+                                      (origenes or {}).get(col, ""), es_llave=es_llave,
+                                      serie=serie)  # el contenido ayuda cuando el nombre no dice nada
         if rol == "coordenada" and tipo_coordenada(col):
             descripcion = f"{tipo_coordenada(col).capitalize()} en grados decimales."
         fila = {
@@ -279,7 +280,7 @@ def resumen_tabla(df: pd.DataFrame, nombre: str, diccionario: pd.DataFrame,
                   tokens=TOKENS_NULOS_BASE) -> pd.DataFrame:
     """Hoja de resumen: qué es la tabla, cuántos datos tiene y qué tan
     completa está. Devuelve dos columnas: Dato / Valor."""
-    diccionario = completar_descripciones(diccionario)  # una celda borrada se vuelve a redactar
+    diccionario = completar_descripciones(diccionario, df=df)  # una celda borrada se vuelve a redactar
     celdas = max(df.shape[0] * df.shape[1], 1)
     nulas = int(sum(es_nulo(df[c], tokens).sum() for c in df.columns))
     sin_descripcion = int((diccionario["Descripción"].fillna("").astype(str).str.strip() == "").sum())
@@ -421,7 +422,7 @@ def tabla_tecnica(df: pd.DataFrame, diccionario: pd.DataFrame, tokens=TOKENS_NUL
     """Tabla del diccionario técnico: una fila por campo, con nombres de columna en minúsculas
     y sin espacios; tipo nativo (dtype real), tipo sugerido para el modelo, límites lógicos
     (mínimo, máximo, longitud máxima), completitud y las descripciones del diccionario."""
-    diccionario = completar_descripciones(diccionario)  # garantiza que ningún campo salga sin descripción
+    diccionario = completar_descripciones(diccionario, df=df)  # garantiza que ningún campo salga sin descripción
     filas = []
     tiene_origen = "Origen" in diccionario.columns
     for i, col in enumerate(df.columns):
@@ -679,7 +680,7 @@ def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, nombre: 
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
 
-    diccionario = completar_descripciones(diccionario)  # ningún campo queda «pendiente de describir»
+    diccionario = completar_descripciones(diccionario, df=df)  # ningún campo queda «pendiente de describir»
     textos = {k: str(v).strip() for k, v in (textos or {}).items() if v and str(v).strip()}
     proyecto = textos.get("proyecto", "Proyecto de análisis de datos")
     total, filas_df = len(diccionario), len(df)
