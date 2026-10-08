@@ -7,6 +7,10 @@ analizarlo, elegir la acción por tipo de hallazgo y guardar el resultado.
 
 Uso:
     python desktop_app.py
+
+Ademas de la limpieza clasica, la segunda fila de botones abre las
+herramientas guiadas (desktop_guiadas.py): limpieza guiada de nulos, merge y
+diccionario de datos.
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ from data_cleaner.exportador import (
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES, FORMATOS_FECHA_DISPONIBLES, FORMATO_FECHA_POR_DEFECTO, formato_fecha_python, formato_fecha_m
+from desktop_guiadas import VentanaDiccionario, VentanaLimpiezaGuiada, VentanaMerge
 from data_cleaner.modelo_sql import (
     aplicar_modelo_sql, es_tabla_hecho, generar_script_crear_base_datos,
 )
@@ -162,6 +167,11 @@ class LimpiadorApp(tk.Tk):
         # "editar_individualmente" (ver _abrir_editor_individual).
         self.correcciones_individuales: dict[tuple, object] = {}
 
+        # Tablas que comparten las ventanas guiadas (limpieza guiada, merge y
+        # diccionario): cada una guarda aqui su ultimo resultado (df, nombre).
+        self.tabla_guiada: tuple[pd.DataFrame, str] | None = None
+        self.tabla_merge: tuple[pd.DataFrame, str] | None = None
+
         # Configuracion de telefono para analizar_tabla (ver _configurar_telefono).
         self.paises_telefono: list[str] | None = ["cr"]
         self.digitos_telefono_manual: tuple[int, int] | None = None
@@ -189,6 +199,16 @@ class LimpiadorApp(tk.Tk):
 
         ttk.Button(barra, text="📞 Teléfono...", command=self.configurar_telefono).pack(side="left", padx=(10, 0))
         ttk.Button(barra, text="🔍 Analizar", command=self.analizar_tabla).pack(side="left", padx=10)
+
+        guiadas = ttk.Frame(self, padding=(10, 0, 10, 6))
+        guiadas.pack(fill="x")
+        ttk.Label(guiadas, text="Herramientas guiadas:").pack(side="left")
+        ttk.Button(guiadas, text="🩺 Limpieza guiada de nulos...",
+                   command=lambda: VentanaLimpiezaGuiada(self)).pack(side="left", padx=(8, 0))
+        ttk.Button(guiadas, text="🔗 Merge (unir dos tablas)...",
+                   command=lambda: VentanaMerge(self)).pack(side="left", padx=(6, 0))
+        ttk.Button(guiadas, text="📘 Diccionario de datos...",
+                   command=lambda: VentanaDiccionario(self)).pack(side="left", padx=(6, 0))
 
         # --- Panel central dividido: vista previa arriba, config abajo ---
         panel = ttk.PanedWindow(self, orient="vertical")
@@ -286,6 +306,12 @@ class LimpiadorApp(tk.Tk):
         ventana.grab_set()
         self.wait_window(ventana)
         return resultado["hoja"]
+
+    def enviar_a_limpieza_clasica(self, df: pd.DataFrame, nombre: str) -> None:
+        """Deja una tabla de las ventanas guiadas cargada en la limpieza clasica."""
+        self.ruta_actual = nombre
+        self._dataframe_cargado(df, nombre)
+        self.status_var.set(f"«{nombre}» cargada desde una herramienta guiada. Presione Analizar.")
 
     def _dataframe_cargado(self, df: pd.DataFrame, etiqueta: str) -> None:
         """Pasos comunes tras cargar datos, sin importar el origen (archivo o SQL)."""
