@@ -21,7 +21,8 @@ from __future__ import annotations
 import os
 import sys
 import json
-from typing import List, Optional
+from contextlib import contextmanager
+from typing import Iterator, List, Optional
 
 import typer
 from rich.console import Console
@@ -31,6 +32,9 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, exportar,
 )
+from data_cleaner import flujos_guiados as FG
+from data_cleaner import limpieza_guiada as LG
+from data_cleaner import merge_tablas as MT
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES
 
@@ -687,6 +691,210 @@ def crear_base_datos_cmd(
         console.print(f"Script guardado en: {salida}")
     else:
         console.print(script)
+
+
+# =============================================================================
+# Limpieza guiada, merge y diccionario de datos
+# =============================================================================
+
+@contextmanager
+def _errores_de_usuario() -> Iterator[None]:
+    """Muestra los errores de validación (columna inexistente, regla inválida...)
+    como mensaje corto y sale con código 2, sin traza de Python."""
+    try:
+        yield
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+
+
+def _lista_o_none(valor: Optional[str]) -> Optional[List[str]]:
+    """None = elegir automáticamente; cadena vacía = ninguna."""
+    if valor is None:
+        return None
+    return [c.strip() for c in valor.split(",") if c.strip()]
+
+
+def _rango(valor: Optional[str], opcion: str) -> Optional[tuple]:
+    if not valor:
+        return None
+    partes = valor.split(",")
+    if len(partes) != 2:
+        console.print(f"[red]{opcion} debe ser minimo,maximo (ej. 8,12)[/red]")
+        raise typer.Exit(code=2)
+    return (float(partes[0]), float(partes[1]))
+
+
+def _imprimir_dataframe(df, titulo: str, maximo: int = 30) -> None:
+    tabla = Table(title=titulo)
+    for columna in df.columns:
+        tabla.add_column(str(columna))
+    for fila in df.head(maximo).itertuples(index=False):
+        tabla.add_row(*[str(v) for v in fila])
+    console.print(tabla)
+
+
+def _imprimir_rutas(rutas: dict) -> None:
+    console.print("\n[bold green]✅ Proceso completado.[/bold green]")
+    for tipo, ruta in rutas.items():
+        console.print(f"   {tipo:<12} {ruta}")
+
+
+@app.command("limpieza-guiada")
+def limpieza_guiada_cmd(
+    input: str = typer.Option(..., "--input", "-i", help="Archivo CSV/Excel a limpiar."),
+    hoja: Optional[str] = typer.Option(None, "--hoja", help="Hoja del libro Excel (si tiene varias)."),
+    outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
+    formato_salida: str = typer.Option("csv", "--formato-salida", help="csv, xlsx o ambos."),
+    tokens_extra: Optional[str] = typer.Option(
+        None, "--tokens-extra",
+        help="Textos que cuentan como nulo además de la celda vacía (coma-separados). "
+             "Por defecto: nan,none,null. Otros posibles: " + ", ".join(LG.TOKENS_NULOS_EXTRA)),
+    nombres_snake: bool = typer.Option(True, "--nombres-snake/--no-nombres-snake",
+                                        help="Nombres de columna en snake_case."),
+    vacios_a_nan: bool = typer.Option(True, "--vacios-a-nan/--no-vacios-a-nan",
+                                       help="Pasar los vacíos a nulos reales (NaN)."),
+    estandarizar_texto: bool = typer.Option(True, "--estandarizar-texto/--no-estandarizar-texto"),
+    columnas_texto: Optional[str] = typer.Option(
+        None, "--columnas-texto", help="Columnas de texto a estandarizar (coma-separadas). "
+        "Sin esta opción se eligen solas; '' = ninguna."),
+    minusculas: bool = typer.Option(True, "--minusculas/--no-minusculas"),
+    espacios: bool = typer.Option(True, "--espacios/--no-espacios", help="Quitar espacios repetidos."),
+    comillas: bool = typer.Option(True, "--comillas/--no-comillas", help="Quitar comillas."),
+    numericas: Optional[str] = typer.Option(
+        None, "--numericas", help="Columnas a convertir a número (coma-separadas). "
+        "Sin esta opción se eligen solas; '' = ninguna."),
+    latitud: Optional[str] = typer.Option(None, "--latitud", help="Columna de latitud ('' = ninguna)."),
+    longitud: Optional[str] = typer.Option(None, "--longitud", help="Columna de longitud ('' = ninguna)."),
+    rango_latitud: Optional[str] = typer.Option(None, "--rango-latitud", help="minimo,maximo esperado."),
+    rango_longitud: Optional[str] = typer.Option(None, "--rango-longitud", help="minimo,maximo esperado."),
+    regla: List[str] = typer.Option(
+        [], "--regla",
+        help="Regla de nulos por columna: columna=regla[:parametro]. Sin esta opción se usa la "
+             "sugerida. Reglas: " + ", ".join(LG.REGLAS_NULOS) + ". Ej. email=valor_fijo:Sin correo, "
+             "monto=mediana_por_grupo:zona. Repetible."),
+    solo_diagnostico: bool = typer.Option(
+        False, "--solo-diagnostico", help="Muestra el diagnóstico y las reglas sugeridas, sin limpiar."),
+):
+    """Limpieza guiada de nulos: diagnóstico, estandarización y una regla por
+    columna. Guarda la tabla limpia, un script de pandas que repite la limpieza
+    y el diccionario de datos."""
+    with _errores_de_usuario():
+        df = FG.leer_tabla_guiada(input, hoja=hoja)
+        console.print(f"Tabla cargada: [bold]{len(df)}[/bold] filas x [bold]{len(df.columns)}[/bold] columnas.")
+        config = FG.configurar_limpieza_guiada(
+            df, tokens_extra=_lista_o_none(tokens_extra), nombres_snake=nombres_snake,
+            vacios_a_nan=vacios_a_nan, estandarizar_texto=estandarizar_texto,
+            columnas_texto=_lista_o_none(columnas_texto), minusculas=minusculas,
+            espacios=espacios, comillas=comillas, numericas=_lista_o_none(numericas),
+            latitud=latitud, longitud=longitud, rango_latitud=_rango(rango_latitud, "--rango-latitud"),
+            rango_longitud=_rango(rango_longitud, "--rango-longitud"))
+        diagnostico = LG.diagnostico_nulos(df, config["tokens"]).reset_index()
+        _imprimir_dataframe(diagnostico, "Diagnóstico de nulos y vacíos")
+        ajustes = FG.parsear_ajustes_reglas(regla)
+
+        if solo_diagnostico:
+            df_base, _ = LG.ejecutar_pasos_globales(df, config)
+            sugeridas = LG.tabla_de_reglas(df_base, config["tokens"])
+            _imprimir_dataframe(sugeridas, "Reglas sugeridas (use --regla para cambiarlas)")
+            raise typer.Exit(code=0)
+
+        resultado = FG.ejecutar_limpieza_guiada(df, config, ajustes, nombre_archivo=input, hoja=hoja)
+        for paso in resultado.pasos:
+            console.print(f"• [bold]{paso.titulo}[/bold]: {paso.detalle}")
+        auditoria = resultado.auditoria
+        console.print(
+            f"\nFilas: {auditoria['filas_antes']} → {auditoria['filas_despues']} · "
+            f"Celdas nulas: {auditoria['nulos_antes']} → {auditoria['nulos_despues']} · "
+            f"Duplicados: {auditoria['duplicados_despues']}")
+        if len(auditoria["nulos_restantes"]):
+            _imprimir_dataframe(auditoria["nulos_restantes"].reset_index(), "Nulos que quedan")
+        _imprimir_rutas(FG.guardar_limpieza_guiada(resultado, outdir, formato_salida))
+
+
+@app.command("merge")
+def merge_cmd(
+    tabla_a: str = typer.Option(..., "--tabla-a", "-a", help="Tabla A (la que manda): CSV/Excel."),
+    tabla_b: str = typer.Option(..., "--tabla-b", "-b", help="Tabla B (la que enriquece): CSV/Excel."),
+    hoja_a: Optional[str] = typer.Option(None, "--hoja-a", help="Hoja de A si es un libro con varias."),
+    hoja_b: Optional[str] = typer.Option(None, "--hoja-b", help="Hoja de B si es un libro con varias."),
+    llave_a: Optional[str] = typer.Option(None, "--llave-a", help="Columnas llave de A (coma-separadas). "
+                                           "Sin esta opción ni --llave-b se usa la pareja sugerida."),
+    llave_b: Optional[str] = typer.Option(None, "--llave-b", help="Columnas llave de B, en el mismo orden."),
+    union: str = typer.Option("left", "--union", help="Tipo de unión: " + ", ".join(MT.TIPOS_UNION) + "."),
+    validar: str = typer.Option(
+        "auto", "--validar",
+        help="Relación esperada: auto, vacio (sin validar), " + ", ".join(k for k in MT.VALIDACIONES if k) + "."),
+    modo_llave: str = typer.Option("texto", "--modo-llave", help="Cómo comparar las llaves: " + ", ".join(MT.MODOS_LLAVE) + "."),
+    ancho: int = typer.Option(0, "--ancho", help="Con --modo-llave codigo: rellenar con ceros hasta este ancho."),
+    prefijo_b: str = typer.Option("", "--prefijo-b", help="Prefijo para las columnas de B."),
+    prefijo_todas: bool = typer.Option(False, "--prefijo-todas", help="Aplicar el prefijo a todas las de B, no solo a las repetidas."),
+    sufijo_b: str = typer.Option("_b", "--sufijo-b", help="Sufijo para columnas repetidas sin prefijo."),
+    no_colapsar_b: bool = typer.Option(False, "--no-colapsar-b", help="No dejar una fila por llave en B cuando B repite llaves."),
+    agregacion: List[str] = typer.Option([], "--agregacion", help="columna=funcion para colapsar B (" + ", ".join(MT.AGREGACIONES) + "). Repetible."),
+    relleno: List[str] = typer.Option([], "--relleno", help="Plan B: destino=respaldo (rellena los vacíos de destino con respaldo). Repetible."),
+    conservar_indicador: bool = typer.Option(False, "--conservar-indicador", help="Conservar la columna _merge."),
+    outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
+    formato_salida: str = typer.Option("csv", "--formato-salida", help="csv, xlsx o ambos."),
+    solo_diagnostico: bool = typer.Option(False, "--solo-diagnostico", help="Solo revisa las llaves, sin unir."),
+):
+    """Une dos tablas (A manda, B enriquece), revisa las llaves antes de unir y
+    audita el resultado. Guarda la tabla unida, un script de pandas y el
+    diccionario de datos de la tabla maestra."""
+    with _errores_de_usuario():
+        df_a = FG.leer_tabla_guiada(tabla_a, hoja=hoja_a)
+        df_b = FG.leer_tabla_guiada(tabla_b, hoja=hoja_b)
+        console.print(f"A: [bold]{len(df_a)}[/bold] filas · B: [bold]{len(df_b)}[/bold] filas.")
+        claves_a, claves_b = _lista_o_none(llave_a) or [], _lista_o_none(llave_b) or []
+        if not claves_a and not claves_b:
+            _imprimir_dataframe(MT.sugerir_llaves(df_a, df_b), "Llaves sugeridas")
+
+        if solo_diagnostico:
+            _, _, diagnostico = FG.diagnosticar_llaves(df_a, df_b, claves_a, claves_b, modo_llave, ancho)
+            diag = FG.diagnostico_a_dict(diagnostico)
+            ejemplos = diag.pop("ejemplos_sin_pareja")
+            for clave, valor in diag.items():
+                console.print(f"  {clave}: {valor}")
+            if ejemplos:
+                console.print(f"  llaves de A sin pareja en B: {ejemplos}")
+            raise typer.Exit(code=0)
+
+        resultado = FG.ejecutar_merge(
+            df_a, df_b, tabla_a, tabla_b, claves_a, claves_b, how=union, validate="" if validar == "vacio" else validar,
+            modo=modo_llave, ancho=ancho, prefijo_b=prefijo_b, solo_repetidas=not prefijo_todas,
+            colapsar_b=not no_colapsar_b, agregaciones=FG.parsear_pares(agregacion, "--agregacion") or None,
+            sufijo_b=sufijo_b, conservar_indicador=conservar_indicador,
+            rellenos=list(FG.parsear_pares(relleno, "--relleno").items()), hoja_a=hoja_a, hoja_b=hoja_b)
+        aud = resultado.auditoria
+        console.print(f"Filas del resultado: [bold]{len(resultado.df)}[/bold] "
+                      f"({len(resultado.df) - aud['filas_a']:+d} vs A) · "
+                      f"A con pareja: {aud['semaforo']} {aud['pct_filas_con_pareja']}%")
+        if aud["conteo_merge"]:
+            console.print("Conteo del cruce: " + " · ".join(f"{k}: {v}" for k, v in aud["conteo_merge"].items()))
+        for aviso in aud["advertencias"]:
+            console.print(f"[yellow]⚠ {aviso}[/yellow]")
+        _imprimir_rutas(FG.guardar_merge(resultado, outdir, formato=formato_salida))
+
+
+@app.command("diccionario")
+def diccionario_cmd(
+    input: str = typer.Option(..., "--input", "-i", help="Tabla (CSV/Excel) de la que armar el diccionario."),
+    hoja: Optional[str] = typer.Option(None, "--hoja", help="Hoja del libro Excel (si tiene varias)."),
+    nombre: Optional[str] = typer.Option(None, "--nombre", help="Nombre de la tabla maestra (por defecto, el del archivo)."),
+    outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
+):
+    """Diccionario de datos en Excel (hojas Resumen y Diccionario): tipo,
+    completitud, valores únicos y rango salen de los datos; la descripción y la
+    justificación de negocio quedan resaltadas para completarlas."""
+    with _errores_de_usuario():
+        df = FG.leer_tabla_guiada(input, hoja=hoja)
+        tabla = nombre or FG.nombre_base(input)
+        _, _, excel = FG.generar_diccionario(df, tabla, fuentes=[input])
+        os.makedirs(outdir, exist_ok=True)
+        ruta = os.path.join(outdir, f"diccionario_{FG.nombre_base(tabla)}.xlsx")
+        with open(ruta, "wb") as archivo:
+            archivo.write(excel)
+        _imprimir_rutas({"diccionario": ruta})
 
 
 if __name__ == "__main__":
