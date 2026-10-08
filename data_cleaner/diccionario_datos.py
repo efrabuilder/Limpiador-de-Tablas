@@ -43,6 +43,7 @@ from .limpieza_guiada import (
     rol_columna,
 )
 from .patrones import columnas_fecha_por_nombre, tipo_coordenada
+from .descripciones import completar_descripciones, describir_campo
 
 COLUMNA_CLASIFICACION = "Clasificación ejecutiva"
 CLASIFICACION_KPI = "KPI"
@@ -221,9 +222,11 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
     (útil en una tabla maestra que sale de un merge).
     `llaves`: columnas usadas para unir tablas; si no se dan, se toman como
     llaves las de rol identificador.
-    «Descripción», «Justificación de negocio» y «Clasificación ejecutiva» (KPI,
-    variable transformada o llave) quedan para completar; la clasificación se
-    adelanta solo para llaves y para campos con tratamiento de nulos aplicado."""
+    «Descripción» se redacta sola para todos los campos (nombre, rol, tipo, origen y
+    tratamiento; ver descripciones.py) y la persona puede reescribirla.
+    «Justificación de negocio» y «Clasificación ejecutiva» (KPI, variable transformada
+    o llave) quedan para completar; la clasificación se adelanta solo para llaves y
+    para campos con tratamiento de nulos aplicado."""
     por_columna = {r["columna"]: r for r in (reglas or [])}
     cols_fecha = columnas_fecha_por_nombre(df)
     total = max(len(df), 1)
@@ -233,11 +236,6 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
         nulos = int(es_nulo(serie, tokens).sum())
         rol = rol_columna(df, col, cols_fecha, tokens)
         tipo = tipo_semantico(serie, rol, tokens)
-        descripcion = _DESCRIPCION_POR_ROL.get(rol, "")
-        if rol == "coordenada":
-            lado = tipo_coordenada(col)
-            descripcion = (f"{lado.capitalize()} en grados decimales." if lado
-                           else "Coordenada geográfica en grados decimales.")
         if reglas is None:
             tratamiento = ""
         elif col in por_columna:
@@ -247,9 +245,12 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
         else:
             tratamiento = "Sin nulos" if nulos == 0 else f"Quedan {nulos} vacíos"
         if str(col).startswith("_revisar_calidad"):  # columna de marca de la limpieza clásica
-            descripcion = ("Marca interna de la limpieza: lista los hallazgos que se dejaron solo "
-                           "marcados en esa fila (vacío si no hay ninguno).")
             tratamiento = "No aplica (columna de marca)"
+        es_llave = (col in llaves) if llaves is not None else rol == "id"
+        descripcion = describir_campo(col, rol, tipo, tratamiento,
+                                      (origenes or {}).get(col, ""), es_llave=es_llave)
+        if rol == "coordenada" and tipo_coordenada(col):
+            descripcion = f"{tipo_coordenada(col).capitalize()} en grados decimales."
         fila = {
             "N°": i,
             "Campo": col,
@@ -278,6 +279,7 @@ def resumen_tabla(df: pd.DataFrame, nombre: str, diccionario: pd.DataFrame,
                   tokens=TOKENS_NULOS_BASE) -> pd.DataFrame:
     """Hoja de resumen: qué es la tabla, cuántos datos tiene y qué tan
     completa está. Devuelve dos columnas: Dato / Valor."""
+    diccionario = completar_descripciones(diccionario)  # una celda borrada se vuelve a redactar
     celdas = max(df.shape[0] * df.shape[1], 1)
     nulas = int(sum(es_nulo(df[c], tokens).sum() for c in df.columns))
     sin_descripcion = int((diccionario["Descripción"].fillna("").astype(str).str.strip() == "").sum())
@@ -419,6 +421,7 @@ def tabla_tecnica(df: pd.DataFrame, diccionario: pd.DataFrame, tokens=TOKENS_NUL
     """Tabla del diccionario técnico: una fila por campo, con nombres de columna en minúsculas
     y sin espacios; tipo nativo (dtype real), tipo sugerido para el modelo, límites lógicos
     (mínimo, máximo, longitud máxima), completitud y las descripciones del diccionario."""
+    diccionario = completar_descripciones(diccionario)  # garantiza que ningún campo salga sin descripción
     filas = []
     tiene_origen = "Origen" in diccionario.columns
     for i, col in enumerate(df.columns):
@@ -676,6 +679,7 @@ def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, nombre: 
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
 
+    diccionario = completar_descripciones(diccionario)  # ningún campo queda «pendiente de describir»
     textos = {k: str(v).strip() for k, v in (textos or {}).items() if v and str(v).strip()}
     proyecto = textos.get("proyecto", "Proyecto de análisis de datos")
     total, filas_df = len(diccionario), len(df)
