@@ -5,11 +5,13 @@ desktop_guiadas.py
 Las tres herramientas nuevas de la interfaz de escritorio (Tkinter), cada una
 en su propia ventana:
 
-    - VentanaLimpiezaGuiada: diagnostico de nulos, estandarizacion y una regla
-      por columna (ver data_cleaner/limpieza_guiada.py)
+    - VentanaLimpiezaGuiada: diagnostico de nulos, estandarizacion (con fechas
+      en un solo formato y union de valores equivalentes), una regla por
+      columna y cierre sin vacios (ver data_cleaner/limpieza_guiada.py)
     - VentanaMerge: unir dos tablas con revision de llaves y auditoria
       (ver data_cleaner/merge_tablas.py)
-    - VentanaDiccionario: diccionario de datos en Excel
+    - VentanaDiccionario: diccionario de datos en sus tres salidas: Excel basico,
+      diccionario tecnico (Excel) y documento de alcance (Word)
       (ver data_cleaner/diccionario_datos.py)
 
 La logica vive en data_cleaner/flujos_guiados.py (la misma que usan la app web,
@@ -24,12 +26,15 @@ from tkinter import ttk, filedialog, messagebox
 
 import pandas as pd
 
+from data_cleaner import diccionario_datos as DD
 from data_cleaner import flujos_guiados as FG
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
 
 TIPOS_ARCHIVO = [("Tablas (CSV / Excel)", "*.csv *.xlsx *.xlsm *.xls"), ("Todos los archivos", "*.*")]
 FORMATOS_SALIDA = ["csv", "xlsx", "ambos"]
+OPCIONES_NUMEROS = {"mediana": "números → mediana", "cero": "números → 0",
+                    "palabra": "números → la palabra (pasan a texto)"}
 
 
 # --------------------------------------------------------------------------
@@ -162,7 +167,7 @@ class _VentanaBase(tk.Toplevel):
 
 class VentanaLimpiezaGuiada(_VentanaBase):
     def __init__(self, app):
-        super().__init__(app, "Limpieza guiada de nulos", "1100x780")
+        super().__init__(app, "Limpieza guiada de nulos", "1100x820")
         self.df: pd.DataFrame | None = None
         self.nombre = ""
         self.hoja: str | None = None
@@ -186,10 +191,20 @@ class VentanaLimpiezaGuiada(_VentanaBase):
 
         marco_tokens = ttk.LabelFrame(self, text="Contar como nulo (además de la celda vacía)", padding=6)
         marco_tokens.pack(fill="x", padx=8)
+        fila_tokens = ttk.Frame(marco_tokens)
+        fila_tokens.pack(fill="x")
         self.var_tokens = {}
         for token in list(FG.TOKENS_EXTRA_DEFECTO) + list(LG.TOKENS_NULOS_EXTRA):
             self.var_tokens[token] = tk.BooleanVar(value=token in FG.TOKENS_EXTRA_DEFECTO)
-            ttk.Checkbutton(marco_tokens, text=token, variable=self.var_tokens[token]).pack(side="left", padx=4)
+            ttk.Checkbutton(fila_tokens, text=token, variable=self.var_tokens[token]).pack(side="left", padx=4)
+        fila_palabra = ttk.Frame(marco_tokens)
+        fila_palabra.pack(fill="x", pady=(6, 0))
+        ttk.Label(fila_palabra, text="Palabra para los nulos válidos").pack(side="left")
+        self.var_palabra = tk.StringVar(value=LG.TEXTO_NO_INDICA)
+        ttk.Entry(fila_palabra, textvariable=self.var_palabra, width=22).pack(side="left", padx=6)
+        ttk.Label(fila_palabra, foreground="gray",
+                  text="Los textos tipo «unknown», «-» o «not available» que aparezcan en la tabla se marcan solos.").pack(
+            side="left", padx=6)
 
         self.pestanas = ttk.Notebook(self)
         self.pestanas.pack(fill="both", expand=True, padx=8, pady=8)
@@ -229,24 +244,59 @@ class VentanaLimpiezaGuiada(_VentanaBase):
         ttk.Checkbutton(marco, text="Quitar comillas", variable=self.var_com).grid(row=2, column=3, sticky="w")
         self.var_cols_texto, self.var_cols_num = tk.StringVar(), tk.StringVar()
         self.var_lat, self.var_lon = tk.StringVar(), tk.StringVar()
+        self.var_cols_fecha = tk.StringVar()
         campos = [("Columnas de texto (coma-separadas)", self.var_cols_texto),
                   ("Columnas a convertir a número", self.var_cols_num),
-                  ("Columna de latitud", self.var_lat), ("Columna de longitud", self.var_lon)]
-        for i, (etiqueta, variable) in enumerate(campos, start=3):
-            ttk.Label(marco, text=etiqueta).grid(row=i, column=0, sticky="w", pady=(8, 0))
-            ttk.Entry(marco, textvariable=variable, width=70).grid(row=i, column=1, columnspan=3, sticky="we", pady=(8, 0))
+                  ("Columna de latitud", self.var_lat), ("Columna de longitud", self.var_lon),
+                  ("Columnas de fecha (un solo formato)", self.var_cols_fecha)]
+        fila = 3
+        for etiqueta, variable in campos:
+            ttk.Label(marco, text=etiqueta).grid(row=fila, column=0, sticky="w", pady=(8, 0))
+            ttk.Entry(marco, textvariable=variable, width=70).grid(row=fila, column=1, columnspan=3, sticky="we", pady=(8, 0))
+            fila += 1
+
+        self.var_formato_fecha = tk.StringVar(value=next(iter(LG.FORMATOS_FECHA)))
+        self.var_dia_primero = tk.BooleanVar(value=True)
+        ttk.Label(marco, text="Formato de salida de las fechas").grid(row=fila, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(marco, textvariable=self.var_formato_fecha, values=list(LG.FORMATOS_FECHA), state="readonly",
+                     width=26).grid(row=fila, column=1, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(marco, text="05/06/2025 = día/mes/año (si no hay pistas)",
+                        variable=self.var_dia_primero).grid(row=fila, column=2, columnspan=2, sticky="w", pady=(8, 0))
+        fila += 1
+
+        self.var_unir = tk.BooleanVar(value=True)
+        ttk.Checkbutton(marco, text="Unir valores que significan lo mismo (m / male / masculino → M; "
+                                    "si / yes → Sí; variantes de tildes y signos)",
+                        variable=self.var_unir).grid(row=fila, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        fila += 1
+
+        self.var_cierre = tk.BooleanVar(value=True)
+        self.var_num_cierre = tk.StringVar(value=OPCIONES_NUMEROS["mediana"])
+        self.var_fechas_cierre = tk.BooleanVar(value=True)
+        ttk.Checkbutton(marco, text="Al final, rellenar con la palabra todos los nulos válidos que sobren",
+                        variable=self.var_cierre).grid(row=fila, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Combobox(marco, textvariable=self.var_num_cierre, values=list(OPCIONES_NUMEROS.values()),
+                     state="readonly", width=32).grid(row=fila, column=2, columnspan=2, sticky="w", pady=(10, 0))
+        fila += 1
+        ttk.Checkbutton(marco, text="Incluir también las fechas (ya están como texto en un solo formato)",
+                        variable=self.var_fechas_cierre).grid(row=fila, column=0, columnspan=4, sticky="w")
+        fila += 1
+
         ttk.Label(marco, text="Vienen sugeridas según el contenido de cada columna; déjelas vacías para no aplicar el paso.",
-                  foreground="gray").grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
+                  foreground="gray").grid(row=fila, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        fila += 1
         ttk.Button(marco, text="↻ Actualizar reglas con esta estandarización",
-                   command=lambda: self._ejecutar(self._actualizar_reglas)).grid(row=8, column=0, columnspan=4,
+                   command=lambda: self._ejecutar(self._actualizar_reglas)).grid(row=fila, column=0, columnspan=4,
                                                                                   sticky="w", pady=(12, 0))
         marco.columnconfigure(1, weight=1)
 
     def _construir_reglas(self) -> None:
         marco = ttk.Frame(self.pestanas, padding=6)
         self.pestanas.add(marco, text="3. Reglas por columna")
-        ttk.Label(marco, text=f"Reglas: {', '.join(LG.REGLAS_NULOS)}. «valor» sirve para valor_fijo y «grupo» "
-                              "para mediana_por_grupo.", wraplength=980, foreground="gray").pack(anchor="w")
+        ttk.Label(marco, text=f"Reglas: {', '.join(LG.REGLAS_NULOS)}. «valor» sirve para valor_fijo y no_indica "
+                              "(vacío = la palabra de los nulos válidos) y «grupo» para mediana_por_grupo. "
+                              "Son sugerencias: puede cambiar la regla de cualquier columna.",
+                  wraplength=980, foreground="gray").pack(anchor="w")
         lienzo = tk.Canvas(marco, highlightthickness=0)
         barra = ttk.Scrollbar(marco, orient="vertical", command=lienzo.yview)
         self.marco_reglas = ttk.Frame(lienzo)
@@ -274,11 +324,28 @@ class VentanaLimpiezaGuiada(_VentanaBase):
     def _cargar(self, df: pd.DataFrame, nombre: str, hoja: str | None = None) -> None:
         self.df, self.nombre, self.hoja, self.resultado = df, nombre, hoja, None
         self.lbl_archivo.config(text=f"{os.path.basename(nombre)}  ({len(df)} filas × {len(df.columns)} cols)")
+        self._marcar_tokens_detectados(df)
         self._diagnosticar()
+
+    def _marcar_tokens_detectados(self, df: pd.DataFrame) -> None:
+        """Deja marcados los textos base y los tipo «sin dato» que hay en la tabla (unknown,
+        -, not available...), como hace la app web. Se pueden desmarcar si son datos reales."""
+        for token, variable in self.var_tokens.items():
+            variable.set(token in FG.TOKENS_EXTRA_DEFECTO)
+        for texto in LG.detectar_textos_tipo_nulo(df, FG.tokens_nulos(None))["texto"]:
+            if texto in self.var_tokens:
+                self.var_tokens[texto].set(True)
 
     # ---- pasos ----------------------------------------------------------
     def _tokens_extra(self) -> list[str]:
         return [t for t, var in self.var_tokens.items() if var.get()]
+
+    def _palabra(self) -> str:
+        return self.var_palabra.get().strip() or LG.TEXTO_NO_INDICA
+
+    def _numeros_cierre(self) -> str:
+        etiqueta = self.var_num_cierre.get()
+        return next((k for k, v in OPCIONES_NUMEROS.items() if v == etiqueta), "mediana")
 
     def _exigir_tabla(self) -> pd.DataFrame:
         if self.df is None:
@@ -293,6 +360,7 @@ class VentanaLimpiezaGuiada(_VentanaBase):
         self.var_cols_num.set(", ".join(sugerida["numericas"]))
         self.var_lat.set(sugerida["latitud"] or "")
         self.var_lon.set(sugerida["longitud"] or "")
+        self.var_cols_fecha.set(", ".join(sugerida["fechas"]["columnas"]) if sugerida["fechas"] else "")
 
     def _al_cambiar_nombres(self) -> None:
         if self.df is not None:
@@ -305,7 +373,9 @@ class VentanaLimpiezaGuiada(_VentanaBase):
             columnas_texto=_lista(self.var_cols_texto.get()), minusculas=self.var_min.get(),
             espacios=self.var_esp.get(), comillas=self.var_com.get(),
             numericas=_lista(self.var_cols_num.get()), latitud=self.var_lat.get().strip(),
-            longitud=self.var_lon.get().strip())
+            longitud=self.var_lon.get().strip(), fechas=_lista(self.var_cols_fecha.get()),
+            formato_fecha=LG.FORMATOS_FECHA[self.var_formato_fecha.get()],
+            dia_primero=self.var_dia_primero.get())
 
     def _diagnosticar(self) -> None:
         df = self._exigir_tabla()
@@ -316,18 +386,23 @@ class VentanaLimpiezaGuiada(_VentanaBase):
         self.pestanas.select(0)
 
     def _actualizar_reglas(self) -> None:
-        """Arma la fila de regla de cada columna con nulos, con la regla sugerida."""
+        """Arma la fila de regla de cada columna con nulos, con la regla sugerida
+        (sobre la tabla ya estandarizada y con los valores equivalentes unidos)."""
         self.config = self._config_actual()
+        tokens, palabra = self.config["tokens"], self._palabra()
         df_base, _ = LG.ejecutar_pasos_globales(self.df, self.config)
+        if self.var_unir.get():
+            equivalencias = LG.sugerir_equivalencias(df_base, None, palabra, tokens).to_dict("records")
+            df_base, _ = LG.paso_unificar(df_base, equivalencias)
         for widget in self.marco_reglas.winfo_children():
             widget.destroy()
         self.editores = {}
-        encabezados = ["Columna", "Nulos", "Regla", "Valor (valor_fijo)", "Grupo (mediana_por_grupo)"]
+        encabezados = ["Columna", "Nulos", "Regla", "Valor (valor_fijo / no_indica)", "Grupo (mediana_por_grupo)"]
         for j, texto in enumerate(encabezados):
             ttk.Label(self.marco_reglas, text=texto, font=("TkDefaultFont", 9, "bold")).grid(
                 row=0, column=j, sticky="w", padx=6, pady=(0, 4))
         fila = 1
-        for r in FG.reglas_sugeridas(df_base, self.config["tokens"]):
+        for r in FG.reglas_sugeridas(df_base, tokens, palabra):
             if not r["nulos"]:
                 continue
             regla, valor, grupo = tk.StringVar(value=r["regla"]), tk.StringVar(value=str(r["valor"])), tk.StringVar(value=r["grupo"] or "")
@@ -346,10 +421,13 @@ class VentanaLimpiezaGuiada(_VentanaBase):
     def _aplicar(self) -> None:
         self._exigir_tabla()
         ajustes = {col: {"regla": regla.get(),
-                         "valor": valor.get() if regla.get() == "valor_fijo" else "",
+                         "valor": valor.get() if regla.get() in ("valor_fijo", "no_indica") else "",
                          "grupo": grupo.get() if regla.get() == "mediana_por_grupo" else ""}
                    for col, (regla, valor, grupo) in self.editores.items()}
-        self.resultado = FG.ejecutar_limpieza_guiada(self.df, self._config_actual(), ajustes, self.nombre, self.hoja)
+        self.resultado = FG.ejecutar_limpieza_guiada(
+            self.df, self._config_actual(), ajustes, self.nombre, self.hoja, palabra=self._palabra(),
+            unir_equivalentes=self.var_unir.get(), asegurar_sin_vacios=self.var_cierre.get(),
+            numeros_cierre=self._numeros_cierre(), incluir_fechas_cierre=self.var_fechas_cierre.get())
         aud = self.resultado.auditoria
         lineas = [f"• {paso.titulo}: {paso.detalle}" for paso in self.resultado.pasos]
         lineas += ["", f"Filas: {aud['filas_antes']} → {aud['filas_despues']}   ·   "
@@ -358,6 +436,8 @@ class VentanaLimpiezaGuiada(_VentanaBase):
         if len(aud["nulos_restantes"]):
             lineas.append("Nulos que quedan (puede ser a propósito, por ejemplo fechas): "
                           + ", ".join(f"{c} ({int(t)})" for c, t in aud["nulos_restantes"]["total"].items()))
+        if self.resultado.avisos:
+            lineas += ["", "Conviene revisar:"] + [f"⚠ {aviso}" for aviso in self.resultado.avisos]
         _escribir_texto(self.texto_resultado, "\n".join(lineas))
         _llenar_tabla(self.tabla_resultado, self.resultado.df)
         self.pestanas.select(3)
@@ -547,9 +627,11 @@ class VentanaMerge(_VentanaBase):
 
 class VentanaDiccionario(_VentanaBase):
     def __init__(self, app):
-        super().__init__(app, "Diccionario de datos", "1000x640")
+        super().__init__(app, "Diccionario de datos", "1000x680")
         self.df: pd.DataFrame | None = None
         self.nombre = ""
+        self.diccionario: pd.DataFrame | None = None
+        self.resumen: pd.DataFrame | None = None
         self.excel: bytes | None = None
         self._construir()
 
@@ -567,11 +649,27 @@ class VentanaDiccionario(_VentanaBase):
         medio.pack(fill="x")
         ttk.Label(medio, text="Nombre de la tabla maestra").pack(side="left")
         self.var_nombre = tk.StringVar()
-        ttk.Entry(medio, textvariable=self.var_nombre, width=34).pack(side="left", padx=6)
-        ttk.Button(medio, text="📘 Generar diccionario", command=lambda: self._ejecutar(self._generar)).pack(side="left")
-        ttk.Button(medio, text="💾 Guardar Excel...", command=lambda: self._ejecutar(self._guardar)).pack(side="left", padx=8)
-        ttk.Label(self, text="Tipo, completitud, valores únicos y rango salen de los datos; la descripción y la "
-                             "justificación de negocio quedan en blanco (resaltadas en el Excel) para completarlas.",
+        ttk.Entry(medio, textvariable=self.var_nombre, width=30).pack(side="left", padx=6)
+        ttk.Label(medio, text="Proyecto").pack(side="left", padx=(10, 0))
+        self.var_proyecto = tk.StringVar()
+        ttk.Entry(medio, textvariable=self.var_proyecto, width=24).pack(side="left", padx=6)
+        ttk.Label(medio, text="Autor(a)").pack(side="left")
+        self.var_autor = tk.StringVar()
+        ttk.Entry(medio, textvariable=self.var_autor, width=18).pack(side="left", padx=6)
+        ttk.Button(medio, text="📘 Generar diccionario", command=lambda: self._ejecutar(self._generar)).pack(side="left", padx=6)
+
+        botones = ttk.Frame(self, padding=(8, 8, 8, 0))
+        botones.pack(fill="x")
+        ttk.Button(botones, text="💾 Técnico (Excel)...",
+                   command=lambda: self._ejecutar(self._guardar_tecnico)).pack(side="left")
+        ttk.Button(botones, text="💾 Documento de alcance (Word)...",
+                   command=lambda: self._ejecutar(self._guardar_alcance)).pack(side="left", padx=8)
+        ttk.Button(botones, text="💾 Excel básico...",
+                   command=lambda: self._ejecutar(self._guardar_basico)).pack(side="left")
+        ttk.Label(self, text="Tipo, completitud, valores únicos y rango salen de los datos; la descripción, la "
+                             "justificación de negocio y la clasificación ejecutiva (KPI, variable transformada o llave) "
+                             "quedan en blanco para completarlas en el Excel básico. El documento de alcance enlaza al "
+                             f"técnico: guarde los dos en la misma carpeta (el técnico se llama «{DD.NOMBRE_TECNICO}»).",
                   foreground="gray", wraplength=960).pack(anchor="w", padx=8, pady=6)
         self.tabla = _crear_tabla(self)
         self.tabla.master.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -583,25 +681,50 @@ class VentanaDiccionario(_VentanaBase):
 
     def _cargar(self, df: pd.DataFrame, nombre: str) -> None:
         self.df, self.nombre, self.excel = df, nombre, None
+        self.diccionario = self.resumen = None
         self.var_nombre.set(FG.nombre_base(nombre))
         self.lbl_archivo.config(text=f"{os.path.basename(nombre)}  ({len(df)} filas × {len(df.columns)} cols)")
         self._generar()
 
+    def _nombre_tabla(self) -> str:
+        return self.var_nombre.get().strip() or FG.nombre_base(self.nombre)
+
     def _generar(self) -> None:
         if self.df is None:
             raise ValueError("Primero abra un archivo (o use una tabla de la app).")
-        nombre = self.var_nombre.get().strip() or FG.nombre_base(self.nombre)
-        diccionario, _, self.excel = FG.generar_diccionario(self.df, nombre, fuentes=[self.nombre])
-        _llenar_tabla(self.tabla, diccionario)
+        self.diccionario, self.resumen, self.excel = FG.generar_diccionario(
+            self.df, self._nombre_tabla(), fuentes=[self.nombre])
+        _llenar_tabla(self.tabla, self.diccionario)
 
-    def _guardar(self) -> None:
+    def _asegurar_generado(self) -> None:
         if self.excel is None:
             self._generar()
+
+    def _guardar_bytes(self, contenido: bytes, extension: str, tipo: str, nombre_inicial: str) -> None:
         ruta = filedialog.asksaveasfilename(
-            parent=self, defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")],
-            initialfile=f"diccionario_{FG.nombre_base(self.var_nombre.get() or self.nombre)}.xlsx")
+            parent=self, defaultextension=extension, filetypes=[(tipo, f"*{extension}")], initialfile=nombre_inicial)
         if not ruta:
             return
         with open(ruta, "wb") as archivo:
-            archivo.write(self.excel)
-        messagebox.showinfo("Guardado", f"Diccionario guardado en:\n{ruta}", parent=self)
+            archivo.write(contenido)
+        messagebox.showinfo("Guardado", f"Archivo guardado en:\n{ruta}", parent=self)
+
+    def _guardar_basico(self) -> None:
+        self._asegurar_generado()
+        self._guardar_bytes(self.excel, ".xlsx", "Excel", f"diccionario_{FG.nombre_base(self._nombre_tabla())}.xlsx")
+
+    def _guardar_tecnico(self) -> None:
+        self._asegurar_generado()
+        contenido = FG.generar_diccionario_tecnico(self.df, self.diccionario, self.resumen)
+        self._guardar_bytes(contenido, ".xlsx", "Excel", DD.NOMBRE_TECNICO)
+
+    def _guardar_alcance(self) -> None:
+        self._asegurar_generado()
+        textos = {"proyecto": self.var_proyecto.get(), "autor": self.var_autor.get()}
+        try:
+            contenido = FG.generar_documento_alcance(
+                self.df, self.diccionario, self._nombre_tabla(), [self.nombre], textos=textos)
+        except ImportError:
+            raise ValueError("Para generar el documento de alcance instale python-docx: pip install python-docx")
+        self._guardar_bytes(contenido, ".docx", "Word",
+                            f"documento_alcance_{FG.nombre_base(self._nombre_tabla())}.docx")
