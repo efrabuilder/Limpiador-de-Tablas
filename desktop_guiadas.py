@@ -666,9 +666,9 @@ class VentanaDiccionario(_VentanaBase):
                    command=lambda: self._ejecutar(self._guardar_alcance)).pack(side="left", padx=8)
         ttk.Button(botones, text="💾 Excel básico...",
                    command=lambda: self._ejecutar(self._guardar_basico)).pack(side="left")
-        ttk.Label(self, text="Tipo, completitud, valores únicos y rango salen de los datos; la descripción, la "
-                             "justificación de negocio y la clasificación ejecutiva (KPI, variable transformada o llave) "
-                             "quedan en blanco para completarlas en el Excel básico. El documento de alcance enlaza al "
+        ttk.Label(self, text="Tipo, completitud, valores únicos y rango salen de los datos y la descripción se "
+                             "redacta sola (puede reescribirla en el Excel básico); la justificación de negocio y la "
+                             "clasificación ejecutiva (KPI, variable transformada o llave) quedan en blanco para completarlas. El documento de alcance enlaza al "
                              f"técnico: guarde los dos en la misma carpeta (el técnico se llama «{DD.NOMBRE_TECNICO}»).",
                   foreground="gray", wraplength=960).pack(anchor="w", padx=8, pady=6)
         self.tabla = _crear_tabla(self)
