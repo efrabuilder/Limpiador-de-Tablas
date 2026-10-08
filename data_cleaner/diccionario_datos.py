@@ -147,6 +147,7 @@ def describir_regla(regla: str, valor: str = "", grupo: str = "", nulos: int = 0
     cantidad = f" ({nulos} tratados)" if nulos else ""
     frases = {
         "valor_fijo": f"Rellenados con «{valor}»",
+        "no_indica": f"Rellenados con «{valor or 'No indica'}» (nulo válido)",
         "cero": "Rellenados con 0",
         "mediana": "Rellenados con la mediana",
         "media": "Rellenados con el promedio",
