@@ -218,19 +218,33 @@ def limpiar_texto(serie, minusculas=True, espacios=True, comillas=True):
 
 def unificar_fechas(serie, formato="%Y-%m-%d", dia_primero=True):
     """Pasa una columna de fechas escritas de varias maneras (2025-01-31, 31/01/2025,
-    31-1-2025, Jan 31 2025...) a un solo formato de texto, `formato` (por defecto
-    AAAA-MM-DD). Las que empiezan por el anio se leen siempre como anio-mes-dia; las demas
-    como dia/mes/anio si `dia_primero`, o mes/dia/anio si no. Lo que no se pueda leer
-    como fecha queda como nulo."""
+    01/31/2025, 31-1-2025, 31 Jan 2025...) a un solo formato de texto, `formato` (por
+    defecto AAAA-MM-DD). Las que empiezan por el anio se leen siempre anio-mes-dia. En
+    las de tipo 05/06/2025 cada valor se resuelve solo si puede (31/01/2025 es dia/mes,
+    01/31/2025 es mes/dia). Si los dos numeros son 12 o menos, se mira como se escriben
+    las demas con el mismo separador (/, - o .): si todas las seguras son dia/mes, esa es
+    la regla; si no hay pistas o hay de las dos, se usa `dia_primero`. Lo que no se pueda
+    leer como fecha queda como nulo."""
     if pd.api.types.is_datetime64_any_dtype(serie):
         fechas = serie
     else:
         texto = serie.astype("string").str.strip()
-        anio_primero = texto.str.match(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", na=False)
-        fechas = pd.to_datetime(texto.where(~anio_primero), errors="coerce",
-                                dayfirst=dia_primero, format="mixed")
-        fechas = fechas.fillna(pd.to_datetime(texto.where(anio_primero), errors="coerce",
-                                              dayfirst=False, format="mixed"))
+        partes = texto.str.extract(r"^(\d{1,2})([/.-])(\d{1,2})[/.-](\d{4})(?!\d)(.*)$")
+        numerica = partes[0].notna()
+        a, b, sep = pd.to_numeric(partes[0]), pd.to_numeric(partes[2]), partes[1]
+        hay_dia = (a > 12).groupby(sep).transform("any").fillna(False).astype(bool)
+        hay_mes = (b > 12).groupby(sep).transform("any").fillna(False).astype(bool)
+        usar_dia = (hay_dia & ~hay_mes) | (~hay_mes & ~hay_dia & dia_primero) | (hay_dia & hay_mes & dia_primero)
+        dia_antes = (a > 12) | ((b <= 12) & usar_dia)  # True: dia/mes, False: mes/dia
+        dia, mes = a.where(dia_antes, b), b.where(dia_antes, a)
+        resto = pd.to_timedelta(partes[4].str.strip().replace("", "0s"), errors="coerce").fillna(
+            pd.Timedelta(0))
+        iso = (partes[3] + "-" + mes.astype("Int64").astype("string").str.zfill(2) + "-"
+               + dia.astype("Int64").astype("string").str.zfill(2))
+        fechas = pd.to_datetime(iso, format="%Y-%m-%d", errors="coerce") + resto
+        otras = pd.to_datetime(texto.where(~numerica), errors="coerce", dayfirst=False,
+                               format="mixed")
+        fechas = fechas.where(numerica, otras)
     return fechas.dt.strftime(formato).astype(object).where(fechas.notna(), np.nan)
 
 
@@ -420,9 +434,25 @@ def rol_columna(df: pd.DataFrame, col, cols_fecha=None, tokens=TOKENS_NULOS_BASE
     return "texto"
 
 
-def sugerir_regla(rol: str, pct_nulos: float) -> Tuple[str, str]:
-    """(regla, valor) sugerida para una columna segun su rol. Es solo un
-    punto de partida: se puede cambiar en la tabla."""
+# Palabras (separadas por _ en el nombre de la columna) que delatan el tipo de numero.
+PALABRAS_ENCUESTA = ("nps", "satisfaction", "satisfaccion", "rating", "survey", "encuesta",
+                     "calificacion", "puntuacion")
+PALABRAS_ANIO = ("year", "years", "anio", "anios", "ano", "anos")
+
+
+def _palabras_nombre(columna: str) -> List[str]:
+    return [w for w in re.split(r"[^a-z0-9]+", _sin_tildes(columna)) if w]
+
+
+def _sin_tildes(texto: str) -> str:
+    return unicodedata.normalize("NFKD", str(texto)).encode("ascii", "ignore").decode().lower()
+
+
+def sugerir_regla(rol: str, pct_nulos: float, columna: str = "") -> Tuple[str, str]:
+    """(regla, valor) sugerida para una columna segun su rol y, en numeros, su nombre:
+    notas de encuesta (nps, satisfaction...) -> 0 (no respondio); anios (vehicle_year...)
+    -> «No indica» (no aplica); el resto de numeros -> mediana. Es solo un punto de
+    partida: se puede cambiar columna por columna en la tabla."""
     if pct_nulos == 0:
         return "dejar", ""
     if pct_nulos >= 100:
@@ -434,6 +464,11 @@ def sugerir_regla(rol: str, pct_nulos: float) -> Tuple[str, str]:
     if rol in ("id", "coordenada"):
         return "eliminar_fila", ""  # sin llave o sin ubicacion la fila no sirve
     if rol == "numerica":
+        palabras = _palabras_nombre(columna)
+        if any(w in PALABRAS_ENCUESTA for w in palabras):
+            return "cero", ""  # vacio = no respondio la encuesta
+        if any(w in PALABRAS_ANIO for w in palabras):
+            return "no_indica", ""  # vacio = no tiene vehiculo / inmueble / no aplica
         return "mediana", ""
     # correo, telefono, fecha y texto: el nulo suele ser valido (no dio el dato, aun no
     # ocurre...), asi que se rellena con la palabra elegida («No indica» por defecto).
@@ -476,7 +511,7 @@ def tabla_de_reglas(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE,
     for col in df.columns:
         rol_clave = _ROL_POR_TEXTO[diag.loc[col, "rol"]]
         pct = float(diag.loc[col, "porcentaje"])
-        regla, valor = sugerir_regla(rol_clave, pct)
+        regla, valor = sugerir_regla(rol_clave, pct, col)
         if regla == "no_indica":
             valor = palabra
         filas.append({
@@ -679,6 +714,21 @@ FORMATOS_FECHA = {
 }
 
 
+def contar_fechas_ambiguas(serie: pd.Series) -> Tuple[int, str]:
+    """(cuantas, ejemplo) de fechas tipo 05/06/2025 que de verdad no se pueden resolver:
+    dia y mes son 12 o menos y distintos, y con ese separador la columna trae fechas
+    seguras de las dos formas (dia/mes y mes/dia) o de ninguna."""
+    texto = serie.dropna().astype(str).str.strip()
+    partes = texto.str.extract(r"^(\d{1,2})([/.-])(\d{1,2})[/.-](\d{4})(?!\d)")
+    a, b, sep = pd.to_numeric(partes[0]), pd.to_numeric(partes[2]), partes[1]
+    hay_dia = (a > 12).groupby(sep).transform("any").fillna(False).astype(bool)
+    hay_mes = (b > 12).groupby(sep).transform("any").fillna(False).astype(bool)
+    sin_pista = ~(hay_dia ^ hay_mes)  # las dos formas o ninguna
+    mascara = (a <= 12) & (b <= 12) & (a != b) & sin_pista
+    ejemplo = texto[mascara.fillna(False)]
+    return int(mascara.sum()), (ejemplo.iloc[0] if len(ejemplo) else "")
+
+
 def paso_fechas(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-%m-%d",
                 dia_primero: bool = True, tokens=TOKENS_NULOS_BASE) -> Tuple[pd.DataFrame, Paso]:
     """Deja las columnas de fecha en un solo formato (texto). Cuenta cuantas maneras
@@ -689,17 +739,26 @@ def paso_fechas(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-%m-%d"
         con_dato = ~es_nulo(df[col], tokens)
         texto = df.loc[con_dato, col].astype(str)
         formas = texto.str.replace(r"\d", "9", regex=True).str.replace(r"[A-Za-z]+", "a", regex=True)
-        nuevo = unificar_fechas(df[col].where(con_dato), formato, dia_primero)
+        fmt = formato + " %H:%M:%S" if (texto.str.contains(r"\d:\d", regex=True).any()
+                                       and "%H" not in formato) else formato  # no perder la hora
+        ambiguas, ejemplo = contar_fechas_ambiguas(df[col].where(con_dato))
+        nuevo = unificar_fechas(df[col].where(con_dato), fmt, dia_primero)
         ilegibles = con_dato & nuevo.isna()
         df[col] = nuevo
         lineas.append(f"{col}: {formas.nunique()} formas de escribir la fecha → un solo formato "
-                      f"({formato}); {int(ilegibles.sum())} no se pudieron leer")
+                      f"({fmt}); {int(ilegibles.sum())} no se pudieron leer; "
+                      f"{ambiguas} ambiguas (día/mes o mes/día)")
+        if ambiguas:
+            avisos.append(f"«{col}»: {ambiguas} fechas como {ejemplo!r} pueden ser día/mes o mes/día y no "
+                          f"hay forma de saberlo; se leyeron como "
+                          f"{'día/mes' if dia_primero else 'mes/día'}. Las que traen un número mayor "
+                          f"a 12 sí se leyeron bien.")
         if ilegibles.any():
             ejemplos = ", ".join(repr(v) for v in texto[ilegibles[con_dato]].unique()[:3])
             avisos.append(f"«{col}»: {int(ilegibles.sum())} valores no se pudieron leer como fecha y "
                           f"quedaron nulos (ej. {ejemplos}).")
         codigo.append(f'df["{col}"] = unificar_fechas(df["{col}"].where(~es_nulo(df["{col}"], TOKENS_NULOS)), '
-                      f'{formato!r}, {dia_primero!r})')
+                      f'{fmt!r}, {dia_primero!r})')
     return df, Paso("Fechas en un solo formato", "\n".join(lineas), "\n".join(codigo),
                     advertencia="\n".join(avisos))
 
@@ -742,7 +801,7 @@ def sugerir_equivalencias(df: pd.DataFrame, columnas: Optional[List[str]] = None
     `columnas` revisa todas las de texto con 2 a `max_valores` valores distintos y
     deja solo las que tienen algo que unir. `unificar_a` vacio = no cambiar."""
     filas = []
-    for col in (columnas if columnas is not None else df.columns):
+    for col in (list(columnas) if columnas is not None else df.columns):
         serie = df[col]
         if pd.api.types.is_numeric_dtype(serie) or pd.api.types.is_datetime64_any_dtype(serie):
             continue
