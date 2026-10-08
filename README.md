@@ -95,6 +95,35 @@ según el caso de uso:
 | 📓 Notebook | `notebook_interactivo.ipynb` | Uso analítico/educativo, paso a paso con gráficos. |
 | ⌨️ CLI interactiva | `main.py` | Uso manual guiado por preguntas (ver abajo). |
 
+### Limpieza guiada de nulos, merge y diccionario de datos
+
+Además de la limpieza clásica, las **seis interfaces** incluyen tres herramientas que comparten la misma
+lógica (`data_cleaner/flujos_guiados.py`), así que dan el mismo resultado en todas:
+
+- **Limpieza guiada de nulos**: diagnóstico de nulos, estandarización (nombres, texto, números, coordenadas)
+  y una regla por columna. Guarda la tabla limpia, un script de pandas que repite la limpieza y el diccionario.
+- **Merge**: une la tabla A (la que manda) con la B (la que enriquece), revisa las llaves antes de unir y
+  audita el resultado. Guarda la tabla unida, un script de pandas y el diccionario de la tabla maestra.
+- **Diccionario de datos**: Excel con las hojas *Resumen* y *Diccionario* (tipo, completitud, rangos; la descripción
+  y la justificación de negocio quedan resaltadas para completarlas).
+
+| Interfaz | Dónde está |
+|---|---|
+| 🌐 Web | Modos «Limpieza guiada» y «Merge» en la barra lateral (el diccionario aparece al final de cada uno). |
+| 💻 Escritorio | Segunda fila de botones: *Limpieza guiada*, *Merge* y *Diccionario* (`desktop_guiadas.py`). |
+| ⌨️ CLI | `python cli.py limpieza-guiada`, `merge` y `diccionario` (`--help` en cada uno). |
+| 🔌 API | `POST /limpieza-guiada`, `/limpieza-guiada/diagnostico`, `/merge`, `/merge/diagnostico`, `/diccionario` y `GET /descargar-guiado/{id}/{tipo}`. |
+| ⌨️ `main.py` | El menú inicial pregunta qué hacer (o `--modo guiada \| merge \| diccionario`). |
+| 📓 Notebook | Secciones 6, 7 y 8. |
+
+```bash
+python cli.py limpieza-guiada --input clientes.csv --outdir salida \
+    --regla "email=valor_fijo:Sin correo" --regla "monto=mediana_por_grupo:zona"
+python cli.py merge --tabla-a clientes.csv --tabla-b segmentos.csv \
+    --llave-a id_cliente --llave-b id_cliente --union left --outdir salida
+python cli.py diccionario --input clientes.csv --outdir salida
+```
+
 ### 🌐 Interfaz web (Streamlit)
 
 ```bash
@@ -311,9 +340,15 @@ data_cleaner/
 │   ├── exporters.py     # Exporta el archivo limpio (CSV/Excel/SQL)
 │   ├── exportador.py    # Genera el reporte Excel con formato/resaltado
 │   ├── exportador_m.py  # Genera el editor de consultas M (Power Query) con los pasos de limpieza
-│   └── modelo_sql.py    # Modelo de datos estrella/copo de nieve (PK/FK + diagrama)
+│   ├── modelo_sql.py    # Modelo de datos estrella/copo de nieve (PK/FK + diagrama)
+│   ├── limpieza_guiada.py   # Diagnóstico de nulos, estandarización y reglas por columna
+│   ├── merge_tablas.py      # Merge con revisión de llaves y auditoría
+│   ├── diccionario_datos.py # Diccionario de datos (Excel)
+│   └── flujos_guiados.py    # Capa común (sin interfaz) que usan CLI, API, main.py, escritorio y notebook
 ├── app.py                       # Interfaz web (Streamlit)
 ├── desktop_app.py                # Interfaz de escritorio (Tkinter)
+├── desktop_guiadas.py            # Ventanas del escritorio: limpieza guiada, merge y diccionario
+├── paginas_guiadas.py            # Páginas de la web (Streamlit): limpieza guiada y merge
 ├── cli.py                        # CLI por flags (automatización)
 ├── api.py                        # API REST (FastAPI)
 ├── excel_a_sql.py                # Script: Excel (varias hojas) -> modelo SQL con PK/FK
