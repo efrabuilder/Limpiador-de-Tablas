@@ -34,6 +34,63 @@ MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.docu
 # Lectura de archivos (con cache para no releer en cada interaccion)
 # --------------------------------------------------------------------------
 
+def _firma(df: pd.DataFrame):
+    """Huella barata de una tabla (forma, columnas y una muestra repartida), para usar de
+    clave de caché sin recorrer los millones de celdas de una tabla grande."""
+    paso = max(len(df) // 300, 1)
+    muestra = df.iloc[::paso].astype(str)
+    return (df.shape, tuple(map(str, df.columns)),
+            int(pd.util.hash_pandas_object(muestra, index=False).sum()))
+
+
+@st.cache_data(show_spinner="Aplicando la estandarización…", max_entries=6)
+def _globales_cacheado(_df, firma, config):
+    return LG.ejecutar_pasos_globales(_df, config)
+
+
+@st.cache_data(show_spinner=False, max_entries=6)
+def _detectados_cacheado(_df, firma, tokens):
+    return LG.detectar_textos_tipo_nulo(_df, tokens)
+
+
+@st.cache_data(show_spinner=False, max_entries=6)
+def _equivalencias_cacheado(_df, firma, columnas, palabra, tokens):
+    return LG.sugerir_equivalencias(_df, columnas, palabra, tokens)
+
+
+@st.cache_data(show_spinner=False, max_entries=6)
+def _reglas_cacheado(_df, firma, tokens, palabra):
+    return LG.tabla_de_reglas(_df, tokens, palabra)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _auditoria_cacheado(_antes, firma_antes, _despues, firma_despues, tokens):
+    return LG.auditoria_final(_antes, _despues, tokens)
+
+
+@st.cache_data(show_spinner="Armando el diccionario…", max_entries=4)
+def _diccionario_cacheado(_df, firma, reglas, origenes, llaves):
+    return DD.construir_diccionario(_df, reglas, origenes, llaves=llaves)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _resumen_cacheado(_df, firma, nombre, editado, fuentes, eliminadas):
+    return DD.resumen_tabla(_df, nombre, editado, fuentes, eliminadas)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _tecnico_cacheado(_df, firma, editado, resumen):
+    return DD.diccionario_tecnico_excel(_df, editado, resumen)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _alcance_cacheado(_df, firma, editado, nombre, fuentes, cruces, eliminadas, textos, etapas,
+                      controles_extra, pendientes_extra):
+    return DD.documento_alcance_docx(_df, editado, nombre, fuentes, cruces, eliminadas, textos=textos,
+                                     etapas=etapas, controles_extra=controles_extra,
+                                     pendientes_extra=pendientes_extra)
+
+
 @st.cache_data(show_spinner=False, max_entries=8)
 def _hojas_cacheado(contenido: bytes, nombre: str) -> list:
     buffer = io.BytesIO(contenido)
@@ -165,7 +222,8 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
                "justificación de negocio y la clasificación ejecutiva las escribe usted: es lo que "
                "más le sirve a quien decide.")
     nombre = st.text_input("Nombre de la tabla maestra", value=nombre_defecto, key=f"{prefijo}_dic_nombre")
-    base = DD.construir_diccionario(df, reglas, origenes, llaves=llaves)
+    firma = _firma(df)
+    base = _diccionario_cacheado(df, firma, reglas, origenes, llaves).copy()
     base[DD.COLUMNA_CLASIFICACION] = base[DD.COLUMNA_CLASIFICACION].replace("", None)  # celda vacía del selector
     fijas = [c for c in base.columns if c not in DD.COLUMNAS_EDITABLES]
     editado = st.data_editor(
@@ -186,7 +244,7 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
     if sin_descripcion:
         st.warning(f"{sin_descripcion} de {len(editado)} campos todavía no tienen descripción "
                    "(quedan resaltados en amarillo en el Excel).")
-    resumen = DD.resumen_tabla(df, nombre, editado, fuentes, eliminadas)
+    resumen = _resumen_cacheado(df, firma, nombre, editado, fuentes, eliminadas)
 
     with st.expander("✍️ Textos del documento de alcance (opcional)"):
         st.caption("Lo que sale de los datos (tamaños, llaves, completitud, faltantes, tipos) se calcula solo. "
@@ -223,16 +281,16 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
         st.caption("**Técnico (Excel)** · una fila por campo, con tipos nativos y límites lógicos, más "
                    "resumen y leyenda. Para ingenieros, catálogos de datos y Power BI.")
         st.download_button("⬇️ Diccionario técnico (Excel)",
-                           DD.diccionario_tecnico_excel(df, editado, resumen),
+                           _tecnico_cacheado(df, firma, editado, resumen),
                            file_name=DD.NOMBRE_TECNICO, mime=MIME_XLSX,
                            key=f"{prefijo}_dic_descarga_tecnico", use_container_width=True)
     with c2:
         st.caption("**Ejecutivo (Word)** · documento de alcance: arquitectura final, llaves de unión y "
                    "solo las variables críticas. Remite al Excel técnico para el detalle.")
         try:
-            documento = DD.documento_alcance_docx(
-                df, editado, nombre, fuentes, cruces, eliminadas, textos=textos, etapas=etapas,
-                controles_extra=controles_extra, pendientes_extra=pendientes_extra)
+            documento = _alcance_cacheado(
+                df, firma, editado, nombre, fuentes, cruces, eliminadas, textos, etapas,
+                controles_extra, pendientes_extra)
         except ImportError:
             st.info("Para generar el documento de alcance instale python-docx: `pip install python-docx`.")
         else:
@@ -269,13 +327,20 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     # ---- 2. Diagnostico
     st.subheader("2. Diagnóstico de nulos y vacíos")
     base_texto = [t for t in LG.TOKENS_NULOS_BASE if t]
+    firma_df = _firma(df)
+    detectados = _detectados_cacheado(df, firma_df, ("",) + tuple(base_texto))
     extra = st.multiselect(
         "Además de las celdas vacías, contar como nulo estos textos",
         base_texto + list(LG.TOKENS_NULOS_EXTRA),
-        default=base_texto, key=f"lg_tokens_{clave}",
-        help="«na», «-» o «unknown» pueden ser datos reales, por eso no se cuentan salvo que los elija.")
+        default=base_texto + list(detectados["texto"]), key=f"lg_tokens_{clave}",
+        help="«na», «-» o «unknown» pueden ser datos reales. Los que aparecen en la tabla se marcan solos; "
+             "quite de la lista los que sí sean un dato.")
     tokens = ("",) + tuple(extra)
-    sospechosos = LG.detectar_textos_tipo_nulo(df, tokens)
+    if len(detectados):
+        st.caption("Se encontraron estos textos que suelen significar «sin dato»; se marcaron como nulos "
+                   "(quítelos de la lista de arriba si son datos reales):")
+        st.dataframe(detectados, hide_index=True)
+    sospechosos = _detectados_cacheado(df, firma_df, tokens)
     if len(sospechosos):
         st.info("Hay textos que podrían significar «sin dato» y todavía **no** cuentan como nulo. "
                 "Si lo son, agréguelos en la lista de arriba:")
@@ -377,7 +442,8 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
                    "dia_primero": dia_primero} if cols_fechas else None,
     }
     try:
-        df_pre, pasos_globales = LG.ejecutar_pasos_globales(df, config)
+        df_pre, pasos_globales = _globales_cacheado(df, firma_df, config)
+        pasos_globales = list(pasos_globales)
     except Exception as exc:
         st.error(f"No se pudo aplicar la estandarización: {exc}")
         return
@@ -386,14 +452,16 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     st.markdown("**Unir valores que significan lo mismo**")
     st.caption("Por ejemplo en género: «m», «male» y «masculino» → «M»; «f» y «female» → «F»; «si» y «yes» → «Sí». "
                "Se propone solo donde se reconoce; la columna «unificar_a» se puede editar (vacía = no cambiar).")
-    sugeridas_eq = LG.sugerir_equivalencias(df_pre, None, palabra, tokens)
+    firma_pre = _firma(df_pre)
+    sugeridas_eq = _equivalencias_cacheado(df_pre, firma_pre, None, palabra, tokens)
     opciones_eq = [c for c in df_pre.columns if not pd.api.types.is_numeric_dtype(df_pre[c])
                    and not pd.api.types.is_datetime64_any_dtype(df_pre[c])]
     cols_eq = st.multiselect(
         "Columnas a revisar", opciones_eq,
         default=[c for c in dict.fromkeys(sugeridas_eq["columna"]) if c in opciones_eq],
         key=f"lg_eq_cols_{sufijo}", help="Solo se listan las que tienen entre 2 y 30 valores distintos.")
-    tabla_eq = LG.sugerir_equivalencias(df_pre, cols_eq, palabra, tokens) if cols_eq else sugeridas_eq.iloc[0:0]
+    tabla_eq = (_equivalencias_cacheado(df_pre, firma_pre, tuple(cols_eq), palabra, tokens) if cols_eq
+                else sugeridas_eq.iloc[0:0])
     equivalencias = []
     if len(tabla_eq):
         editada_eq = st.data_editor(
@@ -425,12 +493,13 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     # ---- 4. Reglas de nulos
     st.subheader("4. Regla de nulos por columna")
     st.caption("La regla sugerida sale del tipo de columna: llaves con pocos vacíos y coordenadas, eliminar "
-               f"fila (nulo no válido); números, mediana; texto, correos, teléfonos, fechas y llaves con muchos "
-               f"vacíos, «{palabra}» (nulo válido). Puede cambiarla en la tabla.")
+               f"fila (nulo no válido); números, mediana (notas de encuesta: 0; años: «{palabra}»); texto, "
+               f"correos, teléfonos, fechas y llaves con muchos vacíos, «{palabra}» (nulo válido). "
+               "Son sugerencias: puede cambiar la regla de cualquier columna en la tabla.")
     with st.expander("¿Qué hace cada regla?"):
         for clave_regla, texto in LG.REGLAS_NULOS.items():
             st.markdown(f"- `{clave_regla}`: {texto}")
-    tabla = LG.tabla_de_reglas(df_base, tokens, palabra)
+    tabla = _reglas_cacheado(df_base, _firma(df_base), tokens, palabra)
     claves_columnas = "|".join(df_base.columns)
     editada = st.data_editor(
         tabla, hide_index=True, key=f"lg_reglas_{hash((clave, claves_columnas, tokens, palabra))}",
@@ -497,7 +566,8 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
 
     # ---- 6. Auditoria final
     st.subheader("5. Auditoría final")
-    aud = LG.auditoria_final(resultado["antes"], resultado["df"], resultado["tokens"])
+    aud = _auditoria_cacheado(resultado["antes"], _firma(resultado["antes"]), resultado["df"],
+                              _firma(resultado["df"]), resultado["tokens"])
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("Filas", f"{aud['filas_despues']:,}", f"{aud['filas_despues'] - aud['filas_antes']:,}")
     a2.metric("Columnas", aud["columnas_despues"], aud["columnas_despues"] - aud["columnas_antes"])
