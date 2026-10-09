@@ -335,35 +335,58 @@ def _guardar_tabla(df: pd.DataFrame, carpeta: str, base: str, formato: str) -> D
     return rutas
 
 
-def _guardar_diccionarios(carpeta: str, nombre_excel: str, base_documento: str, df: pd.DataFrame,
-                          nombre: str, reglas: Optional[List[Dict]] = None,
-                          origenes: Optional[Dict[str, str]] = None,
-                          fuentes: Optional[List[str]] = None,
-                          eliminadas: Optional[List[str]] = None,
-                          llaves: Optional[Sequence[str]] = None,
-                          cruces: Optional[List[Dict]] = None,
-                          textos: Optional[Dict[str, str]] = None,
-                          etapas: Optional[List[tuple]] = None,
-                          controles_extra: Optional[List[tuple]] = None,
-                          pendientes_extra: Optional[List[tuple]] = None) -> Dict[str, str]:
-    """Escribe los tres archivos del diccionario: el Excel basico, el diccionario
-    tecnico (diccionario_datos.xlsx, el que enlaza el documento de alcance) y el
-    documento de alcance en Word (se omite si falta python-docx)."""
-    diccionario, resumen, excel = generar_diccionario(df, nombre, reglas, origenes, fuentes,
-                                                      eliminadas, llaves)
-    rutas = {"diccionario": _escribir(os.path.join(carpeta, nombre_excel), excel),
-             "diccionario_tecnico": _escribir(
-                 os.path.join(carpeta, DD.NOMBRE_TECNICO),
-                 generar_diccionario_tecnico(df, diccionario, resumen))}
+def generar_documentos_diccionario(df: pd.DataFrame, nombre: str, reglas: Optional[List[Dict]] = None,
+                                   origenes: Optional[Dict[str, str]] = None,
+                                   fuentes: Optional[List[str]] = None,
+                                   eliminadas: Optional[List[str]] = None,
+                                   llaves: Optional[Sequence[str]] = None,
+                                   cruces: Optional[List[Dict]] = None,
+                                   textos: Optional[Dict[str, str]] = None,
+                                   etapas: Optional[List[tuple]] = None,
+                                   controles_extra: Optional[List[tuple]] = None,
+                                   pendientes_extra: Optional[List[tuple]] = None
+                                   ) -> Dict[str, Optional[bytes]]:
+    """Las tres salidas del diccionario, en bytes: {'basico': Excel de siempre, 'tecnico': diccionario
+    tecnico (Excel), 'alcance': documento de alcance (Word) o None si falta python-docx}."""
+    diccionario, resumen, excel = generar_diccionario(df, nombre, reglas, origenes, fuentes, eliminadas, llaves)
     try:
         documento = generar_documento_alcance(
-            df, diccionario, nombre, fuentes, cruces, eliminadas, textos, etapas,
-            controles_extra, pendientes_extra)
+            df, diccionario, nombre, fuentes, cruces, eliminadas, textos, etapas, controles_extra,
+            pendientes_extra)
     except ImportError:  # sin python-docx no hay documento de alcance
-        return rutas
-    rutas["documento_alcance"] = _escribir(
-        os.path.join(carpeta, f"documento_alcance_{base_documento}.docx"), documento)
+        documento = None
+    return {"basico": excel, "tecnico": generar_diccionario_tecnico(df, diccionario, resumen),
+            "alcance": documento}
+
+
+def _guardar_diccionarios(carpeta: str, nombre_excel: str, base_documento: str, df: pd.DataFrame,
+                          nombre: str, **argumentos) -> Dict[str, str]:
+    """Escribe los tres archivos del diccionario: el Excel basico, el diccionario tecnico
+    (diccionario_datos.xlsx, el que enlaza el documento de alcance) y el documento de alcance en
+    Word (se omite si falta python-docx). `argumentos`: los de generar_documentos_diccionario."""
+    documentos = generar_documentos_diccionario(df, nombre, **argumentos)
+    rutas = {"diccionario": _escribir(os.path.join(carpeta, nombre_excel), documentos["basico"]),
+             "diccionario_tecnico": _escribir(os.path.join(carpeta, DD.NOMBRE_TECNICO), documentos["tecnico"])}
+    if documentos["alcance"] is not None:
+        rutas["documento_alcance"] = _escribir(
+            os.path.join(carpeta, f"documento_alcance_{base_documento}.docx"), documentos["alcance"])
     return rutas
+
+
+def argumentos_diccionario_limpieza(resultado: "ResultadoLimpiezaGuiada",
+                                    textos_alcance: Optional[Dict[str, str]] = None) -> Dict:
+    """Argumentos de generar_documentos_diccionario para el resultado de una limpieza guiada
+    (incluye `nombre`): lo que usan la app web, la CLI y la API para armar el diccionario."""
+    a = resultado.auditoria
+    base = f"{nombre_base(resultado.nombre_archivo)}_limpio"
+    return dict(
+        nombre=base, reglas=resultado.reglas, fuentes=[resultado.nombre_archivo],
+        eliminadas=[r["columna"] for r in resultado.reglas
+                    if r["regla"] == "eliminar_columna" and r.get("nulos")],
+        textos=textos_alcance,
+        etapas=[("Tabla original", f"{DD._n(a['filas_antes'])} filas y {a['columnas_antes']} columnas"),
+                ("Tabla limpia final", f"{DD._n(a['filas_despues'])} filas y {a['columnas_despues']} columnas"),
+                ("Celdas nulas", f"{DD._n(a['nulos_antes'])} antes y {DD._n(a['nulos_despues'])} después")])
 
 
 def guardar_limpieza_guiada(resultado: ResultadoLimpiezaGuiada, carpeta: str,
@@ -378,16 +401,10 @@ def guardar_limpieza_guiada(resultado: ResultadoLimpiezaGuiada, carpeta: str,
     base = f"{nombre_base(resultado.nombre_archivo)}_limpio"
     rutas = _guardar_tabla(resultado.df, carpeta, base, formato)
     rutas["script"] = _escribir(os.path.join(carpeta, f"{base}_script.py"), resultado.script)
-    eliminadas = [r["columna"] for r in resultado.reglas
-                  if r["regla"] == "eliminar_columna" and r.get("nulos")]
-    a = resultado.auditoria
-    etapas = [("Tabla original", f"{DD._n(a['filas_antes'])} filas y {a['columnas_antes']} columnas"),
-              ("Tabla limpia final", f"{DD._n(a['filas_despues'])} filas y {a['columnas_despues']} columnas"),
-              ("Celdas nulas", f"{DD._n(a['nulos_antes'])} antes y {DD._n(a['nulos_despues'])} después")]
-    rutas.update(_guardar_diccionarios(
-        carpeta, f"diccionario_{base}.xlsx", base, resultado.df, base, resultado.reglas,
-        fuentes=[resultado.nombre_archivo], eliminadas=eliminadas, textos=textos_alcance,
-        etapas=etapas))
+    argumentos = argumentos_diccionario_limpieza(resultado, textos_alcance)
+    nombre = argumentos.pop("nombre")
+    rutas.update(_guardar_diccionarios(carpeta, f"diccionario_{base}.xlsx", base, resultado.df, nombre,
+                                       **argumentos))
     return rutas
 
 
@@ -546,6 +563,18 @@ def datos_alcance_merge(resultado: ResultadoMerge) -> Dict:
             "advertencias": list(aud.get("advertencias", []))}
 
 
+def argumentos_diccionario_merge(resultado: ResultadoMerge,
+                                 textos_alcance: Optional[Dict[str, str]] = None) -> Dict:
+    """Argumentos de generar_documentos_diccionario para el resultado de un merge (incluye `nombre`)."""
+    alcance = datos_alcance_merge(resultado)
+    return dict(
+        nombre="tabla_maestra", origenes=origenes_de_columnas(resultado),
+        fuentes=[resultado.params["nombre_a"], resultado.params["nombre_b"]], llaves=alcance["llaves"],
+        cruces=alcance["cruces"], textos=textos_alcance, etapas=alcance["etapas"],
+        controles_extra=alcance["controles_extra"],
+        pendientes_extra=[("Advertencia del cruce", str(a)) for a in alcance["advertencias"]])
+
+
 def guardar_merge(resultado: ResultadoMerge, carpeta: str, base: str = "resultado_merge",
                   formato: str = "csv",
                   textos_alcance: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -554,14 +583,10 @@ def guardar_merge(resultado: ResultadoMerge, carpeta: str, base: str = "resultad
     os.makedirs(carpeta, exist_ok=True)
     rutas = _guardar_tabla(resultado.df, carpeta, base, formato)
     rutas["script"] = _escribir(os.path.join(carpeta, f"{base}_script.py"), resultado.script)
-    fuentes = [resultado.params["nombre_a"], resultado.params["nombre_b"]]
-    alcance = datos_alcance_merge(resultado)
-    rutas.update(_guardar_diccionarios(
-        carpeta, "diccionario_tabla_maestra.xlsx", "tabla_maestra", resultado.df, "tabla_maestra",
-        origenes=origenes_de_columnas(resultado), fuentes=fuentes, llaves=alcance["llaves"],
-        cruces=alcance["cruces"], textos=textos_alcance, etapas=alcance["etapas"],
-        controles_extra=alcance["controles_extra"],
-        pendientes_extra=[("Advertencia del cruce", str(a)) for a in alcance["advertencias"]]))
+    argumentos = argumentos_diccionario_merge(resultado, textos_alcance)
+    nombre = argumentos.pop("nombre")
+    rutas.update(_guardar_diccionarios(carpeta, "diccionario_tabla_maestra.xlsx", "tabla_maestra", resultado.df,
+                                       nombre, **argumentos))
     return rutas
 
 
@@ -584,6 +609,18 @@ def generar_diccionario(df: pd.DataFrame, nombre: str, reglas: Optional[List[Dic
     diccionario = DD.construir_diccionario(df, reglas, origenes, llaves=llaves)
     resumen = DD.resumen_tabla(df, nombre, diccionario, fuentes, eliminadas)
     return diccionario, resumen, DD.diccionario_a_excel(diccionario, resumen)
+
+
+def guardar_diccionario(df: pd.DataFrame, carpeta: str, nombre: str,
+                        fuentes: Optional[List[str]] = None,
+                        textos_alcance: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Guarda en `carpeta` el diccionario de una tabla en sus tres salidas: el Excel basico
+    (diccionario_<nombre>.xlsx), el diccionario tecnico (diccionario_datos.xlsx) y el documento de
+    alcance en Word (se omite si falta python-docx). Devuelve {tipo: ruta}."""
+    os.makedirs(carpeta, exist_ok=True)
+    base = nombre_base(nombre)
+    return _guardar_diccionarios(carpeta, f"diccionario_{base}.xlsx", base, df, nombre,
+                                 fuentes=fuentes, textos=textos_alcance)
 
 
 def generar_diccionario_tecnico(df: pd.DataFrame, diccionario: pd.DataFrame,
