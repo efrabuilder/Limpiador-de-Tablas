@@ -105,7 +105,7 @@ lógica (`data_cleaner/flujos_guiados.py`), así que dan el mismo resultado en t
 - **Merge**: une la tabla A (la que manda) con la B (la que enriquece), revisa las llaves antes de unir y
   audita el resultado. Guarda la tabla unida, un script de pandas y el diccionario de la tabla maestra.
 - **Diccionario de datos**: Excel con las hojas *Resumen* y *Diccionario* (tipo, completitud, rangos; la descripción
-  y la justificación de negocio quedan resaltadas para completarlas).
+  se redacta sola y se puede reescribir; la justificación de negocio queda resaltada para completarla).
 
 | Interfaz | Dónde está |
 |---|---|
