@@ -862,7 +862,7 @@ def limpieza_guiada_diagnostico_endpoint(
     archivo: UploadFile = File(...),
     hoja: Optional[str] = Form(None, description="Hoja del libro Excel (si tiene varias)."),
     tokens_extra: Optional[str] = Form(None, description="Textos que cuentan como nulo, coma-separados. "
-                                       "Por defecto: nan,none,null."),
+                                       "Por defecto: nan,none,null,n/a y los textos tipo «sin dato» que aparezcan en la tabla (unknown, -, not available...)."),
     nombres_snake: bool = Form(True),
 ):
     """Diagnóstico de nulos por columna y las reglas que sugiere la app para cada una."""
@@ -883,7 +883,7 @@ def limpieza_guiada_endpoint(
     archivo: UploadFile = File(...),
     hoja: Optional[str] = Form(None),
     formato: str = Form("csv", description="csv | xlsx (formato de la tabla al descargar)."),
-    tokens_extra: Optional[str] = Form(None, description="Coma-separados. Por defecto: nan,none,null."),
+    tokens_extra: Optional[str] = Form(None, description="Coma-separados. Por defecto: nan,none,null,n/a y los textos tipo «sin dato» que aparezcan en la tabla (unknown, -, not available...)."),
     nombres_snake: bool = Form(True),
     vacios_a_nan: bool = Form(True),
     estandarizar_texto: bool = Form(True),
