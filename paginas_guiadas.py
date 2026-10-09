@@ -34,6 +34,16 @@ MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.docu
 # Lectura de archivos (con cache para no releer en cada interaccion)
 # --------------------------------------------------------------------------
 
+def _mostrable(df: pd.DataFrame) -> pd.DataFrame:
+    """Copia lista para st.dataframe: las columnas que mezclan números y texto (por ejemplo un año
+    con «No indica») se pasan a texto, porque Streamlit no puede dibujar tipos mezclados."""
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == object and df[col].dropna().map(type).nunique() > 1:
+            df[col] = df[col].map(lambda v: v if pd.isna(v) else str(v))
+    return df
+
+
 def _firma(df: pd.DataFrame):
     """Huella barata de una tabla (forma, columnas y una muestra repartida), para usar de
     clave de caché sin recorrer los millones de celdas de una tabla grande."""
@@ -489,7 +499,7 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
         for paso in pasos_globales:
             st.markdown(f"**{paso.titulo}**")
             st.text(paso.detalle)
-        st.dataframe(df_base.head(10))
+        st.dataframe(_mostrable(df_base.head(10)))
 
     # ---- 4. Reglas de nulos
     st.subheader("4. Regla de nulos por columna")
@@ -589,7 +599,7 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
             st.text(paso.detalle)
     with st.expander("Tipos de datos"):
         st.dataframe(aud["tipos"])
-    st.dataframe(resultado["df"].head(20))
+    st.dataframe(_mostrable(resultado["df"].head(20)))
 
     script = LG.generar_script_limpieza(resultado["pasos"], resultado["tokens"],
                                         resultado["nombre"], resultado["hoja"])
@@ -774,7 +784,7 @@ def pagina_merge(al_enviar_a_clasica=None) -> None:
     if aud["renombradas"]:
         with st.expander("Columnas de B renombradas"):
             st.json(aud["renombradas"])
-    st.dataframe(df_res.head(20))
+    st.dataframe(_mostrable(df_res.head(20)))
 
     with st.expander("Plan B: rellenar una columna con otra"):
         st.caption("Donde la columna principal quedó vacía se usa el valor de la columna de respaldo "
