@@ -43,7 +43,7 @@ from .patrones import (
     PATRONES_TELEFONO,
     PATRONES_NOMBRE_PROPIO,
     coincide_patron,
-    columnas_fecha_por_nombre,
+    columnas_fecha_por_nombre as _fechas_por_nombre,
     es_columna_coordenada,
     es_columna_id,
     tipo_coordenada,
@@ -314,7 +314,11 @@ def aplicar_regla(df, columna, regla, valor="", grupo="", tokens=TOKENS_NULOS_BA
                                       index=serie.index, dtype=object)  # (map() los volveria a decimal)
         elif regla == "cero":
             relleno = "0"  # columna de texto: el cero se escribe como texto
-        df[columna] = serie.where(~mascara, relleno)
+        nueva = serie.where(~mascara, relleno)
+        if pd.api.types.is_float_dtype(nueva) and nueva.notna().all() and (nueva % 1 == 0).all() \
+                and nueva.abs().max() < 2 ** 53:  # todo entero: sin decimales (2008 y no 2008.0)
+            nueva = nueva.astype("int64")
+        df[columna] = nueva
         info["afectadas"] = n_nulos
         info["mensaje"] = f"{columna}: {n_nulos} nulos -> {relleno!r}"
         return df, info
@@ -425,7 +429,7 @@ def rol_columna(df: pd.DataFrame, col, cols_fecha=None, tokens=TOKENS_NULOS_BASE
         cols_fecha = columnas_fecha_por_nombre(df)
     if es_columna_coordenada(col):
         return "coordenada"
-    if es_columna_id(col) or coincide_patron(col, _PATRONES_LLAVE_EXTRA):
+    if es_columna_id(col) or coincide_patron(col, _PATRONES_LLAVE_EXTRA) or _es_llave_por_nombre(col):
         return "id"
     if coincide_patron(col, PATRONES_EMAIL):
         return "email"
@@ -433,9 +437,65 @@ def rol_columna(df: pd.DataFrame, col, cols_fecha=None, tokens=TOKENS_NULOS_BASE
         return "telefono"
     if col in cols_fecha or pd.api.types.is_datetime64_any_dtype(df[col]):
         return "fecha"
+    if _parece_fecha_por_contenido(df[col], es_nulo(df[col], tokens)):
+        return "fecha"
     if _parece_numerica(df[col], es_nulo(df[col], tokens), umbral_numerico):
         return "numerica"
     return "texto"
+
+
+# Fechas que se reconocen por lo que contienen (ISO 2025-03-01, 2025-03-01 14:30:00, 01/03/2025...).
+_RE_FECHA_ISO = re.compile(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?"
+                           r"(?:Z|[+-]\d{2}:?\d{2})?$")
+_RE_FECHA_LATINA = re.compile(r"^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$")
+
+
+def _parece_fecha_por_contenido(serie: pd.Series, mascara_nulos: pd.Series, umbral: float = 0.9) -> bool:
+    """True si la columna es de fechas o si casi todo su texto (90 %) tiene forma de fecha. Sirve para
+    columnas con nombres como «ts_operacion», «lectura» o «ult_visita» que el nombre no delata."""
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        return True
+    if pd.api.types.is_numeric_dtype(serie) or pd.api.types.is_bool_dtype(serie):
+        return False
+    muestra = serie[~mascara_nulos].head(2000).astype(str).str.strip()
+    if len(muestra) < 3:
+        return False
+    return bool((muestra.str.match(_RE_FECHA_ISO) | muestra.str.match(_RE_FECHA_LATINA)).mean() >= umbral)
+
+
+def columnas_fecha_por_nombre(df: pd.DataFrame) -> List[str]:
+    """Columnas de fecha: las que el nombre delata («fecha_venta», «birth_date») y, ademas, las que por su
+    contenido son fechas aunque se llamen distinto («ts_operacion», «lectura»). Mantiene el orden de la tabla.
+    (Conserva el nombre de siempre para que app, CLI y API la usen sin cambios.)"""
+    por_nombre = set(_fechas_por_nombre(df))
+    elegidas = []
+    for col in df.columns:
+        if col in por_nombre:
+            elegidas.append(col)
+        elif not (es_columna_id(col) or es_columna_coordenada(col) or coincide_patron(col, PATRONES_EMAIL)
+                  or coincide_patron(col, PATRONES_TELEFONO)) \
+                and isinstance(df[col], pd.Series) and _parece_fecha_por_contenido(df[col], es_nulo(df[col])):
+            elegidas.append(col)
+    return elegidas
+
+
+# Nombres que son un codigo o numero de documento aunque no digan «id» ni «codigo».
+_PALABRAS_LLAVE_EXTRA = ("placa", "patente", "sku", "vin", "chasis", "imei", "iban", "swift", "ean", "upc", "gtin",
+                         "tracking", "guia", "awb", "carne", "carnet", "cedula", "dni", "pasaporte", "nit", "ruc",
+                         "rfc", "curp", "mcc", "isbn", "uuid", "guid")
+_SUSTANTIVOS_NUMERADOS = ("cuenta", "poliza", "contrato", "factura", "pedido", "orden", "guia", "tracking", "serie",
+                          "lote", "folio", "expediente", "referencia", "documento", "caso", "ticket", "reserva",
+                          "boleta", "recibo", "comprobante", "tarjeta", "cliente", "empleado", "paciente",
+                          "estudiante", "matricula")
+
+
+def _es_llave_por_nombre(columna) -> bool:
+    """«placa», «nro_guia», «numero_cuenta», «mcc»: codigos que no se rellenan ni se promedian."""
+    palabras = _palabras_nombre(columna)
+    if any(p in _PALABRAS_LLAVE_EXTRA for p in palabras):
+        return True
+    return len(palabras) >= 2 and palabras[0] in ("num", "numero", "nro", "number") \
+        and palabras[1] in _SUSTANTIVOS_NUMERADOS
 
 
 # Palabras (separadas por _ en el nombre de la columna) que delatan el tipo de numero.
@@ -452,11 +512,35 @@ def _sin_tildes(texto: str) -> str:
     return unicodedata.normalize("NFKD", str(texto)).encode("ascii", "ignore").decode().lower()
 
 
-def sugerir_regla(rol: str, pct_nulos: float, columna: str = "") -> Tuple[str, str]:
-    """(regla, valor) sugerida para una columna segun su rol y, en numeros, su nombre:
-    notas de encuesta (nps, satisfaction...) -> 0 (no respondio); anios (vehicle_year...)
-    -> «No indica» (no aplica); el resto de numeros -> mediana. Es solo un punto de
-    partida: se puede cambiar columna por columna en la tabla."""
+# Conteos de eventos: un vacio casi siempre significa «no hubo ninguno».
+PALABRAS_CONTEO_EVENTOS = ("reclamos", "visitas", "hijos", "dependientes", "intentos", "quejas", "devoluciones",
+                           "llamadas", "fallas", "accidentes", "multas", "incidentes", "compras", "pedidos",
+                           "claims", "visits", "children", "complaints", "attempts", "returns", "calls")
+# Escalas y calificaciones: se rellenan con el valor mas frecuente, no con una mediana que no existe en la escala.
+PALABRAS_ESCALA = ("evaluacion", "calificacion", "puntaje", "puntuacion", "score", "rating", "nivel", "level",
+                   "prioridad", "riesgo", "grado", "satisfaccion", "escala", "ranking", "estrellas", "severidad",
+                   "desempeno")
+
+
+def perfil_numerico(serie, tokens=TOKENS_NULOS_BASE) -> Dict[str, bool]:
+    """Que tipo de numero es (a partir de los datos): `binaria` (solo 0 y 1), `entera`, `pocos_valores`
+    (hasta 10 valores enteros distintos: escala, nivel o categoria). Vacio si hay menos de 5 datos."""
+    nums = a_numero(serie[~es_nulo(serie, tokens)]).dropna()
+    if len(nums) < 5:
+        return {}
+    distintos = int(nums.nunique())
+    enteros = bool((nums % 1 == 0).all())
+    return {"binaria": distintos == 2 and set(nums.unique()) <= {0, 1},
+            "entera": enteros, "pocos_valores": enteros and distintos <= 10}
+
+
+def sugerir_regla(rol: str, pct_nulos: float, columna: str = "", serie=None) -> Tuple[str, str]:
+    """(regla, valor) sugerida para una columna segun su rol, su nombre y, si se da `serie`, sus datos.
+    Numeros: notas de encuesta (nps, satisfaction...) -> 0 (no respondio); anios -> «No indica»;
+    indicadores 0/1 y escalas (evaluacion, nivel...) -> valor mas frecuente; conteos de eventos
+    (reclamos, visitas, hijos...) -> 0; columnas casi vacias (60 % o mas) -> dejar (rellenar tanto
+    inventaria la mayoria de la columna); el resto -> mediana. Es solo un punto de partida: se puede
+    cambiar columna por columna en la tabla."""
     if pct_nulos == 0:
         return "dejar", ""
     if pct_nulos >= 100:
@@ -473,6 +557,15 @@ def sugerir_regla(rol: str, pct_nulos: float, columna: str = "") -> Tuple[str, s
             return "cero", ""  # vacio = no respondio la encuesta
         if any(w in PALABRAS_ANIO for w in palabras):
             return "no_indica", ""  # vacio = no tiene vehiculo / inmueble / no aplica
+        perfil = perfil_numerico(serie) if serie is not None else {}
+        if pct_nulos >= 60:
+            return "dejar", ""  # rellenar mas de la mitad inventaria la columna: mejor decidirlo a mano
+        if perfil.get("binaria"):
+            return "moda", ""  # indicador 0/1: una mediana no tiene sentido
+        if any(w in PALABRAS_CONTEO_EVENTOS for w in palabras) and perfil.get("entera", True):
+            return "cero", ""  # vacio = no hubo eventos
+        if perfil.get("pocos_valores") and any(w in PALABRAS_ESCALA for w in palabras):
+            return "moda", ""  # escala: el valor mas frecuente existe en la escala, la mediana puede no existir
         return "mediana", ""
     # correo, telefono, fecha y texto: el nulo suele ser valido (no dio el dato, aun no
     # ocurre...), asi que se rellena con la palabra elegida («No indica» por defecto).
@@ -515,7 +608,9 @@ def tabla_de_reglas(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE,
     for col in df.columns:
         rol_clave = _ROL_POR_TEXTO[diag.loc[col, "rol"]]
         pct = float(diag.loc[col, "porcentaje"])
-        regla, valor = sugerir_regla(rol_clave, pct, col)
+        serie_col = df[col]
+        regla, valor = sugerir_regla(rol_clave, pct, col,
+                                     serie_col if isinstance(serie_col, pd.Series) else None)
         if regla == "no_indica":
             valor = palabra
         filas.append({
@@ -767,13 +862,45 @@ def paso_fechas(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-%m-%d"
                     advertencia="\n".join(avisos))
 
 
+# En columnas con nombres de personas no se sugieren uniones por tipeo («Marta» y «Martha» pueden ser dos personas).
+_PALABRAS_PERSONA = ("nombre", "apellido", "apellidos", "nombres", "name", "contacto", "cliente", "empleado",
+                     "paciente", "estudiante", "alumno", "vendedor", "gerente", "jefe", "representante")
+
+
 def _clave_texto(valor) -> str:
     """Texto sin tildes, minusculas y sin signos: 'N/A' -> 'n a', 'München' -> 'munchen'."""
     s = unicodedata.normalize("NFKD", str(valor)).encode("ascii", "ignore").decode().lower()
     return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
 
-def _destinos_sugeridos(conteo: pd.Series, palabra: str) -> Dict[str, str]:
+def _a_una_edicion(a: str, b: str) -> bool:
+    """True si `a` y `b` difieren en una sola letra (de mas, de menos, cambiada o dos intercambiadas)."""
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        difs = [i for i in range(len(a)) if a[i] != b[i]]
+        if len(difs) == 1:
+            return True
+        return len(difs) == 2 and difs[1] == difs[0] + 1 and a[difs[0]] == b[difs[1]] and a[difs[1]] == b[difs[0]]
+    corto, largo = (a, b) if len(a) < len(b) else (b, a)
+    i = 0
+    while i < len(corto) and corto[i] == largo[i]:
+        i += 1
+    return corto[i:] == largo[i + 1:]
+
+
+def _es_tipeo_de(menor: str, mayor: str) -> bool:
+    """True si `menor` parece un error de tipeo de `mayor` (una letra de mas, de menos, cambiada o
+    intercambiada). Solo palabras de 5+ letras, sin numeros y que empiezan igual; «Alajuela» y
+    «Alajuelita» son lugares distintos (difieren en dos letras) y no se unen."""
+    if len(menor) < 5 or len(mayor) < 5 or menor[0] != mayor[0]:
+        return False
+    if any(c.isdigit() for c in menor + mayor):
+        return False
+    return _a_una_edicion(menor, mayor)
+
+
+def _destinos_sugeridos(conteo: pd.Series, palabra: str, buscar_tipeos: bool = True) -> Dict[str, str]:
     destinos: Dict[str, str] = {}
     claves = {v: _clave_texto(v) for v in conteo.index}
     total = max(int(conteo.sum()), 1)
@@ -790,10 +917,24 @@ def _destinos_sugeridos(conteo: pd.Series, palabra: str) -> Dict[str, str]:
     for v in conteo.index:
         if v not in destinos:
             por_clave.setdefault(claves[v], []).append(v)
-    for variantes in por_clave.values():
+    principales: Dict[str, str] = {}  # clave -> valor mas frecuente de cada grupo
+    for clave, variantes in por_clave.items():
+        principal = max(variantes, key=lambda x: int(conteo[x]))
+        principales[clave] = principal
         if len(variantes) > 1:
-            principal = max(variantes, key=lambda x: int(conteo[x]))
             destinos.update({v: principal for v in variantes if v != principal})
+    if buscar_tipeos:  # 3) errores de tipeo: «Hredia» -> «Heredia» (solo si es raro frente al valor correcto)
+        ordenadas = sorted(principales, key=lambda k: -int(conteo[principales[k]]))
+        for i, clave_rara in enumerate(ordenadas):
+            rara = principales[clave_rara]
+            if clave_rara in {_clave_texto(v) for v in destinos.values()}:
+                continue  # ya es el destino de otros: no la movemos
+            for clave_comun in ordenadas[:i]:
+                comun = principales[clave_comun]
+                if int(conteo[rara]) <= max(3, 0.1 * int(conteo[comun])) and _es_tipeo_de(clave_rara, clave_comun):
+                    destinos[rara] = comun
+                    destinos.update({v: comun for v in por_clave[clave_rara] if v != rara})
+                    break
     return destinos
 
 
@@ -812,7 +953,7 @@ def sugerir_equivalencias(df: pd.DataFrame, columnas: Optional[List[str]] = None
         conteo = serie[~es_nulo(serie, tokens)].astype(str).value_counts()
         if not 2 <= len(conteo) <= max_valores:
             continue
-        destinos = _destinos_sugeridos(conteo, palabra)
+        destinos = _destinos_sugeridos(conteo, palabra, buscar_tipeos=not coincide_patron(col, _PALABRAS_PERSONA))
         if columnas is None and not destinos:
             continue
         for valor, n in conteo.items():
