@@ -493,7 +493,192 @@ _UNIDADES: List[Tuple[_Patron, str]] = [
     (_p("km"), "kilómetros"), (_p("m2"), "metros cuadrados"), (_p("m3"), "metros cúbicos"),
     (_p("usd", "dolares"), "dólares (USD)"), (_p("eur", "euros"), "euros"), (_p("crc", "colones"), "colones (CRC)"),
     (_p("mxn"), "pesos mexicanos"), (_p("pct"), "porcentaje"),
+    (_p("months", "meses"), "meses"), (_p("days", "dias"), "días"), (_p("years", "anios"), "años"),
 ]
+
+
+# --------------------------------------------------------------------------
+# Traducción de palabras sueltas (inglés -> español) y nombres compuestos de seguros
+# --------------------------------------------------------------------------
+
+# palabra en inglés -> (español, género). Sirve para que un nombre en inglés no se describa a medias
+# («Dato de «vehicle make»») y para armar artículos («del vehículo», «de la póliza»).
+_TRAD_BASE: Dict[str, Tuple[str, str]] = {
+    "vehicle": ("vehículo", "m"), "car": ("auto", "m"), "property": ("inmueble", "m"), "home": ("vivienda", "f"),
+    "policy": ("póliza", "f"), "claim": ("reclamo", "m"), "adjuster": ("ajustador", "m"),
+    "adjustment": ("ajuste", "m"), "settlement": ("liquidación", "f"), "renewal": ("renovación", "f"),
+    "agent": ("agente", "m"), "broker": ("corredor", "m"), "customer": ("cliente", "m"),
+    "client": ("cliente", "m"), "incident": ("incidente", "m"), "coverage": ("cobertura", "f"),
+    "premium": ("prima", "f"), "deductible": ("deducible", "m"), "commission": ("comisión", "f"),
+    "discount": ("descuento", "m"), "bonus": ("bonificación", "f"), "loyalty": ("fidelidad", "f"),
+    "complaint": ("queja", "f"), "fraud": ("fraude", "m"), "risk": ("riesgo", "m"),
+    "order": ("pedido", "m"), "product": ("producto", "m"), "invoice": ("factura", "f"),
+    "sale": ("venta", "f"), "payment": ("pago", "m"), "account": ("cuenta", "f"), "user": ("usuario", "m"),
+    "employee": ("empleado", "m"), "supplier": ("proveedor", "m"), "store": ("tienda", "f"),
+    "branch": ("sucursal", "f"), "shipment": ("envío", "m"), "contract": ("contrato", "m"),
+    "loan": ("préstamo", "m"), "card": ("tarjeta", "f"), "transaction": ("transacción", "f"),
+    "patient": ("paciente", "m"), "student": ("estudiante", "m"), "course": ("curso", "m"),
+    "project": ("proyecto", "m"), "task": ("tarea", "f"), "campaign": ("campaña", "f"),
+    "item": ("artículo", "m"), "device": ("dispositivo", "m"), "session": ("sesión", "f"),
+    "visit": ("visita", "f"), "police": ("policía", "f"), "balance": ("saldo", "m"), "report": ("informe", "m"),
+    "decision": ("decisión", "f"), "location": ("ubicación", "f"), "city": ("ciudad", "f"),
+    "address": ("dirección", "f"), "note": ("nota", "f"), "survey": ("encuesta", "f"),
+}
+_ES_PLURAL_IRREGULAR = {"transacción": "transacciones", "sesión": "sesiones", "comisión": "comisiones",
+                        "liquidación": "liquidaciones", "renovación": "renovaciones", "decisión": "decisiones",
+                        "ubicación": "ubicaciones", "dirección": "direcciones", "bonificación": "bonificaciones",
+                        "ciudad": "ciudades", "informe": "informes"}
+# Palabras sueltas sin género (adjetivos, verbos, otras): solo se traducen, no llevan artículo.
+_TRAD_PALABRAS: Dict[str, str] = {
+    "filed": "presentado", "approved": "aprobado", "denied": "rechazado", "paid": "pagado",
+    "outstanding": "pendiente", "built": "construido", "created": "creado", "updated": "actualizado",
+    "denial": "rechazo", "reason": "motivo", "frequency": "frecuencia", "probability": "probabilidad",
+    "limit": "límite", "amount": "monto", "value": "valor", "total": "total", "make": "marca", "model": "modelo",
+    "type": "tipo", "status": "estado", "state": "estado", "name": "nombre", "description": "descripción",
+    "score": "puntaje", "satisfaction": "satisfacción", "tenure": "antigüedad", "lifetime": "vida",
+    "notes": "notas", "multi": "múltiples", "start": "inicio", "end": "fin", "year": "año", "month": "mes",
+    "underwriting": "suscripción", "churn": "abandono", "applied": "aplicado",
+    "number": "número", "date": "fecha", "id": "identificador",
+}
+
+
+def _pluralizar_es(palabra: str) -> str:
+    if palabra in _ES_PLURAL_IRREGULAR:
+        return _ES_PLURAL_IRREGULAR[palabra]
+    return palabra + ("s" if palabra[-1] in "aeiouáéíóú" else "es")
+
+
+def _trad_sustantivo(token: str) -> Optional[Tuple[str, str, bool]]:
+    """(español, género, es_plural) de un sustantivo en inglés, o None. Entiende «claims» y «policies»."""
+    if token in _TRAD_BASE:
+        return _TRAD_BASE[token] + (False,)
+    for sufijo, base in (("ies", "y"), ("es", ""), ("s", "")):
+        if token.endswith(sufijo) and len(token) > len(sufijo) + 2:
+            raiz = token[: -len(sufijo)] + base
+            if raiz in _TRAD_BASE:
+                return _TRAD_BASE[raiz] + (True,)
+    return None
+
+
+def _traducir_tokens(tokens: Sequence[str]) -> str:
+    """Palabras del nombre en español cuando se conocen (el resto queda tal cual)."""
+    salida = []
+    for t in tokens:
+        sust = _trad_sustantivo(t)
+        if sust:
+            salida.append(_pluralizar_es(sust[0]) if sust[2] else sust[0])
+        else:
+            salida.append(_TRAD_PALABRAS.get(t, t))
+    return " ".join(salida)
+
+
+def _de_sintagma(tokens: Sequence[str]) -> str:
+    """'de la póliza', 'del vehículo' (un sustantivo conocido) o 'de «x y»' (si no se conoce)."""
+    if len(tokens) == 1:
+        sust = _trad_sustantivo(tokens[0])
+        if sust and not sust[2]:
+            return f"de la {sust[0]}" if sust[1] == "f" else f"del {sust[0]}"
+    return f"de «{_traducir_tokens(tokens)}»"
+
+
+# Nombres compuestos de seguros y analítica de clientes que el glosario general describe a medias
+# (primero el más específico). La descripción no menciona unidades: se agregan solas («Se expresa en euros»).
+_SEGUROS: List[Tuple[_Patron, str]] = [
+    # --- pólizas
+    (_p("policy number", "numero poliza"), "Número de la póliza tal como lo ve el cliente (distinto del identificador interno)."),
+    (_p("policy status", "estado poliza"), "Estado de la póliza (por ejemplo activa, vencida o cancelada)."),
+    (_p("policy start date", "policy start", "policy effective date", "inicio vigencia"),
+     "Fecha de inicio de vigencia de la póliza."),
+    (_p("policy end date", "policy end", "policy expiry date", "policy expiration", "fin vigencia"),
+     "Fecha de fin de vigencia de la póliza."),
+    (_p("renewal date", "fecha renovacion"), "Fecha de renovación de la póliza."),
+    (_p("insurance type", "tipo seguro", "ramo"), "Tipo o ramo de seguro (por ejemplo vida, auto u hogar)."),
+    (_p("coverage type", "tipo cobertura"), "Tipo de cobertura contratada; define hasta dónde responde el seguro."),
+    (_p("coverage limit", "limite cobertura"), "Límite de cobertura: monto máximo que paga el seguro."),
+    (_p("deductible", "deducible"), "Deducible: monto que asume el cliente antes de que el seguro pague."),
+    (_p("payment frequency", "frecuencia pago"),
+     "Periodicidad con que se paga la prima (por ejemplo mensual, trimestral o anual)."),
+    (_p("total paid", "total pagado"),
+     "Total pagado acumulado; confirmar si corresponde a primas o a reclamos."),
+    (_p("outstanding balance", "saldo pendiente"), "Saldo pendiente de pago."),
+    # --- bienes asegurados
+    (_p("vehicle make"), "Marca del vehículo asegurado."),
+    (_p("vehicle model"), "Modelo del vehículo asegurado."),
+    (_p("vehicle value"), "Valor del vehículo asegurado."),
+    (_p("vehicle year", "model year"), "Año del vehículo asegurado (modelo o fabricación)."),
+    (_p("property type"), "Tipo de inmueble asegurado."),
+    (_p("property value"), "Valor del inmueble asegurado."),
+    (_p("property year built", "year built", "anio construccion"), "Año de construcción del inmueble asegurado."),
+    # --- reclamos
+    (_p("claim status", "estado reclamo"), "Estado en que se encuentra el reclamo."),
+    (_p("claim amount", "monto reclamado"),
+     "Monto reclamado (solicitado) por el cliente. No equivale al monto aprobado y no deben combinarse "
+     "como un único costo."),
+    (_p("claim description"), "Descripción del reclamo o de lo ocurrido."),
+    (_p("claim denial reason", "denial reason", "motivo rechazo"), "Motivo por el que se rechazó el reclamo (si aplica)."),
+    (_p("incident location"), "Lugar donde ocurrió el incidente."),
+    (_p("police report filed"), "Indicador Sí/No: señala si se presentó denuncia o informe policial."),
+    (_p("police report number"), "Número del informe o denuncia policial."),
+    (_p("adjuster id"), "Identificador del ajustador (perito) que revisó el reclamo. Sirve para enlazar registros "
+                        "entre tablas."),
+    (_p("adjuster name"), "Nombre del ajustador (perito) que revisó el reclamo."),
+    (_p("adjustment date"), "Fecha en que se ajustó o peritó el reclamo."),
+    (_p("settlement date"), "Fecha de liquidación (pago) del reclamo."),
+    (_p("settlement amount"), "Monto liquidado (pagado) del reclamo; puede apoyar un indicador de siniestralidad "
+                              "pagada cuando su definición y período estén confirmados."),
+    # --- riesgo y fraude
+    (_p("fraud flag"), "Indicador Sí/No: señala si el registro tiene sospecha de fraude."),
+    (_p("fraud score"), "Puntaje de riesgo de fraude. Su interpretación requiere conocer la escala de origen."),
+    (_p("risk score"), "Puntaje de riesgo asignado al cliente o a la póliza. Su interpretación requiere conocer "
+                       "la escala de origen."),
+    # --- ventas y comisiones
+    (_p("commission amount"), "Monto de la comisión pagada al agente o corredor."),
+    (_p("agent id"), "Identificador del agente que vendió la póliza. Sirve para enlazar registros entre tablas."),
+    (_p("agent name"), "Nombre del agente que vendió la póliza."),
+    (_p("agent commission"), "Comisión del agente sobre la venta."),
+    (_p("broker id"), "Identificador del corredor (broker) que intermedió la póliza. Sirve para enlazar registros "
+                      "entre tablas."),
+    (_p("broker commission"), "Comisión del corredor (broker) sobre la venta."),
+    (_p("discount applied"), "Descuento aplicado a la prima."),
+    (_p("no claims bonus", "no claim bonus"), "Bonificación por no haber tenido reclamos."),
+    (_p("loyalty discount"), "Descuento por fidelidad del cliente."),
+    (_p("multi policy discount"), "Descuento por tener varias pólizas."),
+    # --- clientes
+    (_p("customer lifetime value", "clv", "ltv"),
+     "Valor de vida del cliente (CLV): ingreso estimado que aporta durante toda su relación con la empresa."),
+    (_p("customer tenure", "tenure"), "Antigüedad del cliente: tiempo transcurrido desde que lo es."),
+    (_p("customer satisfaction", "satisfaction score", "satisfaccion cliente"),
+     "Nota de satisfacción del cliente. Su interpretación requiere conocer la escala de origen."),
+    (_p("nps score", "nps", "net promoter score"),
+     "Net Promoter Score (NPS): qué tan probable es que el cliente recomiende la empresa. Su interpretación "
+     "requiere conocer la escala de origen."),
+    (_p("complaint filed"), "Indicador Sí/No: señala si el cliente presentó una queja."),
+    (_p("complaint type"), "Tipo de queja presentada por el cliente."),
+    (_p("churn risk"), "Riesgo de que el cliente abandone (churn); confirmar si es un nivel, una probabilidad o un porcentaje."),
+]
+
+# Para nombres que ninguna regla conoce: «{cabeza} de {algo}» cuando la última palabra dice qué es.
+_CABEZAS: Dict[str, str] = {
+    "amount": "Monto", "value": "Valor", "total": "Total", "balance": "Saldo", "limit": "Límite",
+    "status": "Estado", "type": "Tipo", "reason": "Motivo", "name": "Nombre", "description": "Descripción",
+    "score": "Puntaje", "rate": "Tasa", "level": "Nivel", "category": "Categoría", "location": "Ubicación",
+}
+
+
+def _componer(tokens: Sequence[str]) -> Optional[str]:
+    """«order_status» -> «Estado del pedido». Solo cuando es una palabra de contexto conocida
+    más una cabeza reconocida; en cualquier otro caso devuelve None (mejor genérico que equivocado)."""
+    unidades = {"eur", "usd", "crc", "mxn", "pct", "percent"}
+    base = [t for t in tokens if t not in unidades and t not in ("of", "de", "del", "the")]
+    if len(base) != 2 or base[1] not in _CABEZAS:
+        return None
+    sust = _trad_sustantivo(base[0])
+    if not sust or sust[2]:
+        return None
+    frase = f"{_CABEZAS[base[1]]} {_de_sintagma([base[0]])}"
+    if base[1] == "name":
+        frase += " (texto libre; no sirve como llave)"
+    return frase + "."
 
 _NOMBRE_GENERICO = re.compile(r"^(?:col|column|columna|campo|field|var|variable|feature|f|v|c|x|y|z|unnamed|"
                               r"attr|atributo|dato|data)(?: ?\d+)*(?: \d+)?$")
@@ -545,6 +730,10 @@ def _vocabulario() -> Tuple[str, ...]:
             palabras.update(patron.palabras)
     for patron, _ in _ENTIDADES:
         palabras.update(patron.palabras)
+    for patron, _ in _SEGUROS:
+        palabras.update(patron.palabras)
+    palabras.update(_TRAD_BASE)
+    palabras.update(_TRAD_PALABRAS)
     palabras.update(_DOCUMENTO_IDENTIDAD.palabras)
     return tuple(sorted(p for p in palabras if " " not in p and len(p) >= 5 and p.isalpha()))
 
@@ -727,7 +916,8 @@ def _descripcion_identificador(tokens: List[str], texto: str, rol: str, es_llave
         es_id = True
     elif ids_fuertes and (tokens[0] in _ID_FUERTE or tokens[-1] in _ID_FUERTE):
         es_id = True
-    elif ids_numero and sustantivo and (tokens[0] in _ID_NUMERO or tokens[-1] in _ID_NUMERO):
+    elif ids_numero and sustantivo and (tokens[0] in _ID_NUMERO or tokens[-1] in _ID_NUMERO) \
+            and not (ids_numero == ["no"] and len(resto) >= 2):  # «no_claims_bonus» no es un número
         es_id = True  # num_factura, numero_orden, no_poliza
     elif _TRACKING.search(texto) and not ids_numero:
         es_id = True
@@ -743,7 +933,7 @@ def _descripcion_identificador(tokens: List[str], texto: str, rol: str, es_llave
         return _GLOSARIO[_indice_codigo_postal()][1]
     if not resto:
         return "Identificador del registro. Sirve para enlazar registros entre tablas y para detectar duplicados."
-    nombre_id = sustantivo or base
+    nombre_id = sustantivo or _traducir_tokens(resto)
     if ids_fuertes and tokens[0] in ("codigo", "cod", "clave", "cve") and not sustantivo:
         return (f"Código de {base}. Identifica o abrevia ese dato y sirve para enlazar con catálogos "
                 "y para detectar duplicados.")
@@ -774,10 +964,12 @@ def _calificadores(texto: str, norm_base: str) -> List[str]:
 def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: str = "",
                     origen: str = "", es_llave: bool = False, *,
                     serie: Optional[pd.Series] = None, ejemplos: str = "",
-                    unicos: Optional[int] = None, filas: Optional[int] = None) -> str:
+                    unicos: Optional[int] = None, filas: Optional[int] = None,
+                    contexto: Optional[Sequence[str]] = None) -> str:
     """Descripción redactada de un campo a partir de su nombre, rol, tipo y (si se dan) sus valores.
     `serie` son los datos de la columna; sin ella se puede pasar `ejemplos` (texto de «Rango o ejemplos»)
-    y `unicos`/`filas`. Siempre devuelve texto (nunca vacío)."""
+    y `unicos`/`filas`. `contexto` son los nombres de las demás columnas de la tabla: ayudan a leer palabras
+    ambiguas («state» junto a city y country es una región, no una situación). Siempre devuelve texto."""
     nombre = str(col)
     norm_base = normalizar_nombre(nombre)
     n = nombre_legible(nombre)
@@ -829,7 +1021,7 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
 
     # Indicador Sí/No por prefijo (es_frecuente, has_children, tiene_deuda).
     if resultado is None and len(tokens) >= 2 and tokens[0] in _PREFIJO_BOOLEANO:
-        resto = " ".join(tokens[1:])
+        resto = _traducir_tokens(tokens[1:])
         resultado = (f"Indicador Sí/No: señala si el registro cumple «{resto}»; "
                      "confirmar cómo se codifican Sí y No.")
 
@@ -880,6 +1072,20 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
     conteo_plural = tipo in ("Entero", "Decimal") and any(t in ("num", "numero", "nro") for t in tokens) and any(
         t.endswith("s") and len(t) > 3 and not t.endswith(("ss", "us", "is")) for t in tokens)
 
+    # Nombres compuestos de seguros y de analítica de clientes (antes de los identificadores para que
+    # «adjuster_id» o «agent_id» digan quién es, no solo «Identificador de adjuster»).
+    curado = False
+    if resultado is None and tokens in (["state"], ["estado"]) and contexto:
+        vecinas = {t for c in contexto for t in normalizar_nombre(c).split()}
+        if vecinas & {"city", "ciudad", "country", "pais", "postal", "zip", "cp", "address", "direccion",
+                      "municipio", "province", "provincia", "region"}:
+            resultado, curado = ("Estado, provincia o región donde se ubica el registro; conviene homologar sus "
+                                 "nombres (e idioma) entre fuentes antes de cruzar o comparar."), True
+    if resultado is None:
+        encontrado = _buscar(texto, compacto, _SEGUROS)
+        if encontrado:
+            resultado, curado = encontrado[1], True
+
     # Identificadores.
     if resultado is None and not conteo_plural:
         resultado = _descripcion_identificador(tokens, texto, rol, es_llave)
@@ -902,8 +1108,9 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
                     if patron.search(texto_norm):
                         calificador = [t for t in sin_relleno if t not in palabras_calendario]
                         if calificador:  # «vehicle_year», «birth_year»: año de otra cosa, no del registro
-                            resultado = (f"{frase.split()[0]} de «{' '.join(calificador)}»; "
-                                         "confirmar a qué se refiere.")
+                            sust = _de_sintagma(calificador)
+                            resultado = (f"{frase.split()[0]} {sust}" + ("." if sust.startswith(("del ", "de la "))
+                                         else "; confirmar a qué se refiere."))
                         else:
                             resultado = frase
                         break
@@ -920,7 +1127,7 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
         if encontrado:
             resultado = encontrado[1]
         else:
-            base_fecha = " ".join(t for t in tokens if t not in _PALABRAS_RELLENO_FECHA)
+            base_fecha = _traducir_tokens([t for t in tokens if t not in _PALABRAS_RELLENO_FECHA])
             if base_fecha:
                 resultado = f"Fecha de «{base_fecha}»."
             else:
@@ -929,7 +1136,10 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
     # Conteos por registro (n_reclamos, num_hijos, cantidad_visitas...).
     if resultado is None and tipo in ("Entero", "Decimal"):
         marcas = {"n", "num", "numero", "nro", "conteo", "count", "nbr"}
-        base = " ".join(t for t in tokens if t not in marcas and t not in ("de", "del", "total", "cantidad"))
+        if "number" in tokens and "of" in tokens:  # number_of_policies
+            marcas = marcas | {"number"}
+        base = _traducir_tokens([t for t in tokens if t not in marcas and t not in ("de", "del", "of", "total",
+                                                                                      "cantidad")])
         if any(t in marcas for t in tokens) and base:
             resultado = f"Cantidad de {base} por registro."
         elif any(t in ("total", "cantidad") for t in tokens) and base and not _buscar(base, base.replace(" ", "")):
@@ -942,6 +1152,11 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
             resultado = _GLOSARIO[_indice_por_palabra("periodicidad")][1]
         else:
             resultado = "Forma o método con que se realizó el pago."
+
+    # «order_status» -> «Estado del pedido» (solo si la palabra de contexto y la cabeza son conocidas).
+    if resultado is None:
+        resultado = _componer(tokens)
+        curado = resultado is not None
 
     # Glosario general por nombre.
     if resultado is None:
@@ -1004,6 +1219,7 @@ def completar_descripciones(diccionario: pd.DataFrame, origenes: Optional[Dict[s
     vacias = resultado["Descripción"].fillna("").astype(str).str.strip() == ""
     if not vacias.any():
         return resultado
+    nombres_columnas = [str(c) for c in resultado["Campo"]]
     roles_inversos = {"identificador / llave": "id", "coordenada": "coordenada", "email": "email",
                       "teléfono": "telefono", "fecha": "fecha", "número": "numerica", "texto": "texto"}
     for idx in resultado.index[vacias]:
@@ -1018,5 +1234,6 @@ def completar_descripciones(diccionario: pd.DataFrame, origenes: Optional[Dict[s
             str(fila.get("Tipo de dato", "Texto")), str(fila.get("Tratamiento de nulos", "") or ""),
             origen, es_llave=clasif.startswith("Llave"),
             serie=serie, ejemplos=str(fila.get("Rango o ejemplos", "") or ""),
-            unicos=int(unicos) if pd.notna(unicos) and str(unicos).isdigit() else None)
+            unicos=int(unicos) if pd.notna(unicos) and str(unicos).isdigit() else None,
+            contexto=nombres_columnas)
     return resultado
