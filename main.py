@@ -199,7 +199,7 @@ def flujo_limpieza_guiada(args) -> None:
 
     print("\nTextos que cuentan como nulo además de la celda vacía "
           f"(opciones: {', '.join(LG.TOKENS_NULOS_EXTRA)}).")
-    extra_txt = preguntar("Escriba los textos separados por coma (Enter = nan,none,null; '-' = ninguno):", defecto="")
+    extra_txt = preguntar("Escriba los textos separados por coma (Enter = nan,none,null,n/a y los textos tipo «sin dato» que haya en la tabla; '-' = ninguno):", defecto="")
     config = FG.configurar_limpieza_guiada(df, tokens_extra=_lista_o_none(extra_txt))
     print("\n--- Diagnóstico de nulos y vacíos ---")
     print(LG.diagnostico_nulos(df, config["tokens"]).to_string())
