@@ -104,8 +104,16 @@ lógica (`data_cleaner/flujos_guiados.py`), así que dan el mismo resultado en t
   y una regla por columna. Guarda la tabla limpia, un script de pandas que repite la limpieza y el diccionario.
 - **Merge**: une la tabla A (la que manda) con la B (la que enriquece), revisa las llaves antes de unir y
   audita el resultado. Guarda la tabla unida, un script de pandas y el diccionario de la tabla maestra.
-- **Diccionario de datos**: Excel con las hojas *Resumen* y *Diccionario* (tipo, completitud, rangos; la descripción
-  se redacta sola y se puede reescribir; la justificación de negocio queda resaltada para completarla).
+- **Diccionario de datos**, en tres salidas: el **Excel básico** (hojas *Resumen* y *Diccionario*), el **diccionario
+  técnico** (`diccionario_datos.xlsx`: una fila por campo con tipo nativo, tipo sugerido y límites lógicos, para
+  Power BI o un catálogo de datos) y el **documento de alcance** en Word (arquitectura final, llaves de unión y
+  solo las variables críticas; necesita `python-docx`). Tipo, completitud y rangos salen de los datos; la
+  descripción se redacta sola y se puede reescribir; la justificación de negocio queda resaltada para completarla.
+  Cada guardado de la limpieza guiada o del merge deja los tres.
+
+La limpieza guiada sigue estos pasos: estandarizar → fechas en un solo formato → unir valores equivalentes
+(`m` / `male` → `M`) → una regla de nulos por columna → cierre sin vacíos (todos los nulos válidos con una misma
+palabra, «No indica» por defecto). Los números que sigan vacíos se rellenan con la mediana, con 0 o con la palabra.
 
 | Interfaz | Dónde está |
 |---|---|
@@ -121,8 +129,13 @@ python cli.py limpieza-guiada --input clientes.csv --outdir salida \
     --regla "email=valor_fijo:Sin correo" --regla "monto=mediana_por_grupo:zona"
 python cli.py merge --tabla-a clientes.csv --tabla-b segmentos.csv \
     --llave-a id_cliente --llave-b id_cliente --union left --outdir salida
-python cli.py diccionario --input clientes.csv --outdir salida
+python cli.py diccionario --input clientes.csv --outdir salida --proyecto "Mi proyecto" --autor "Ana"
+# Opciones de la limpieza guiada: --palabra "Sin dato" --fechas fecha_alta,fecha_baja --formato-fecha "%d/%m/%Y"
+#   --mes-primero --no-unir-equivalentes --numeros-cierre cero --no-cierre
 ```
+
+En la API, `POST /diccionario` acepta `tipo` = `basico` | `tecnico` | `alcance` | `todos` (zip), y
+`GET /descargar-guiado/{id}/{tipo}` acepta además `diccionario_tecnico`, `documento_alcance` y `diccionarios` (zip).
 
 ### 🌐 Interfaz web (Streamlit)
 
