@@ -1,1 +1,906 @@
+#!/usr/bin/env python3
+"""
+Limpiador de Tablas — CLI no interactiva (flags)
+==================================================
+Pensada para automatización (scripts, cron, CI/CD): a diferencia de
+main.py, no hace preguntas por consola — todo se indica por parámetros.
 
+Ejemplos:
+    python cli.py analizar --input ejemplo_datos.csv
+    python cli.py analizar --input datos.xlsx --metodo-atipicos zscore
+
+    python cli.py limpiar --input ejemplo_datos.csv --outdir salida \
+        --faltante reemplazar_mediana --duplicado eliminar_fila \
+        --atipico limitar --tipo-invalido marcar_solo
+
+    python cli.py limpiar --input ejemplo_datos.csv --outdir salida \
+        --faltante valor_fijo --valor-fijo edad=0 --valor-fijo salario=0
+"""
+from __future__ import annotations
+
+import os
+import sys
+import json
+from contextlib import contextmanager
+from typing import Iterator, List, Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from data_cleaner import (
+    load_table, analizar, limpiar, DEFAULT_CONFIG,
+    construir_reporte, exportar_reporte_excel, exportar,
+)
+from data_cleaner import flujos_guiados as FG
+from data_cleaner import limpieza_guiada as LG
+from data_cleaner import merge_tablas as MT
+from data_cleaner.exportador_m import generar_editor_m_puro
+from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES
+
+app = typer.Typer(
+    add_completion=False,
+    help="Limpiador de Tablas — detección y corrección de calidad de datos por línea de comandos.",
+)
+console = Console()
+
+ACCIONES_FALTANTE = ["reemplazar_media", "reemplazar_mediana", "reemplazar_moda",
+                      "valor_fijo", "rellenar_nan", "eliminar_fila", "marcar_solo"]
+ACCIONES_DUPLICADO = ["eliminar_fila", "marcar_solo"]
+ACCIONES_ATIPICO = ["limitar", "reemplazar_mediana", "reemplazar_media",
+                     "eliminar_fila", "marcar_solo"]
+ACCIONES_TIPO_INVALIDO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_FECHA = ["eliminar_fila", "valor_fijo", "normalizar_formato_fecha", "marcar_solo"]
+ACCIONES_EMAIL = ["eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_TELEFONO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_ID_DUPLICADO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_FORMULA = ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_TEXTO = ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_ESTADO = ["eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_CAPITALIZACION = ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"]
+ACCIONES_ESPACIO_EXTRA = ["usar_sugerido", "eliminar_fila", "valor_fijo", "marcar_solo"]
+
+
+def _parsear_valores_fijos(pares: Optional[List[str]]) -> dict:
+    """Convierte ['columna=valor', ...] en {'columna': 'valor', ...}."""
+    resultado = {}
+    for par in pares or []:
+        if "=" not in par:
+            console.print(f"[red]--valor-fijo inválido: '{par}' (use columna=valor)[/red]")
+            raise typer.Exit(code=2)
+        col, val = par.split("=", 1)
+        resultado[col.strip()] = val.strip()
+    return resultado
+
+
+def _parsear_formatos_fecha(pares: Optional[List[str]]) -> dict:
+    """Convierte ['columna=clave', ...] en {'columna': 'clave', ...}, donde
+    'clave' debe ser una de patrones.FORMATOS_FECHA_DISPONIBLES (ver
+    --formato-fecha)."""
+    resultado = {}
+    claves_validas = ", ".join(FORMATOS_FECHA_DISPONIBLES.keys())
+    for par in pares or []:
+        if "=" not in par:
+            console.print(f"[red]--formato-fecha inválido: '{par}' (use columna=clave)[/red]")
+            raise typer.Exit(code=2)
+        col, clave = par.split("=", 1)
+        col, clave = col.strip(), clave.strip()
+        if clave not in FORMATOS_FECHA_DISPONIBLES:
+            console.print(f"[red]--formato-fecha inválido para '{col}': '{clave}'. "
+                           f"Válidas: {claves_validas}[/red]")
+            raise typer.Exit(code=2)
+        resultado[col] = clave
+    return resultado
+
+
+def _imprimir_resumen(resultado) -> None:
+    tabla = Table(title="Resumen del análisis")
+    tabla.add_column("Indicador")
+    tabla.add_column("Valor", justify="right")
+    tabla.add_row("Filas analizadas", str(resultado.filas_analizadas))
+    tabla.add_row("Columnas analizadas", str(resultado.columnas_analizadas))
+    tabla.add_row("Total de hallazgos", str(len(resultado.issues)))
+    for tipo, cantidad in resultado.por_tipo().items():
+        tabla.add_row(f"  {tipo}", str(cantidad))
+    console.print(tabla)
+    if resultado.columnas_excluidas_atipicos_por_contenido:
+        cols = ", ".join(f"[bold]{c}[/bold]" for c in resultado.columnas_excluidas_atipicos_por_contenido)
+        console.print(
+            f"[yellow]ℹ️  Excluidas del chequeo de atípicos por su CONTENIDO (no por el nombre): "
+            f"{cols}. Parecen identificadores de un solo uso. Si en realidad son una magnitud "
+            f"continua (precio, cantidad...), revíselas a mano.[/yellow]"
+        )
+
+
+def _parsear_lista_columnas(valor: Optional[str]) -> Optional[List[str]]:
+    """Convierte 'col1,col2' en ['col1','col2']. None si no se indicó nada
+    (deja que el analizador auto-detecte esas columnas por nombre)."""
+    if not valor:
+        return None
+    return [c.strip() for c in valor.split(",") if c.strip()]
+
+
+def _resolver_digitos_telefono(digitos_telefono: Optional[str]) -> Optional[tuple[int, int]]:
+    """Convierte 'min-max' en (min, max). None si no se indicó nada (deja
+    que el rango se calcule por --paises-telefono, o al internacional
+    amplio de 7-15 dígitos si tampoco se indican países)."""
+    if not digitos_telefono:
+        return None
+    min_dig, max_dig = (int(x) for x in digitos_telefono.split("-", 1))
+    return (min_dig, max_dig)
+
+
+@app.command("analizar")
+def analizar_cmd(
+    input: Optional[str] = typer.Option(None, "--input", "-i", help="Ruta del archivo CSV/Excel a analizar (o use --input-sql-conexion)."),
+    input_sql_conexion: Optional[str] = typer.Option(
+        None, "--input-sql-conexion", help="Cadena de conexión SQLAlchemy de origen, en vez de --input.",
+    ),
+    input_sql_tabla: Optional[str] = typer.Option(None, "--input-sql-tabla", help="Tabla a leer (o use --input-sql-query)."),
+    input_sql_query: Optional[str] = typer.Option(None, "--input-sql-query", help="Consulta SQL a ejecutar (o use --input-sql-tabla)."),
+    metodo_atipicos: str = typer.Option("iqr", "--metodo-atipicos", "-m",
+                                         help="Método de detección de atípicos: iqr | zscore | ambos."),
+    sin_auto_columnas: bool = typer.Option(False, "--sin-auto-columnas",
+                                            help="Desactiva la auto-detección de columnas por nombre "
+                                                 "para fecha/email/teléfono/id/fórmula/texto."),
+    columnas_fecha: Optional[str] = typer.Option(None, "--columnas-fecha", help="Columnas de fecha (coma-separadas)."),
+    fecha_min: Optional[str] = typer.Option(None, "--fecha-min", help="Fecha mínima válida (AAAA-MM-DD)."),
+    fecha_max: Optional[str] = typer.Option(None, "--fecha-max", help="Fecha máxima válida (AAAA-MM-DD)."),
+    columnas_email: Optional[str] = typer.Option(None, "--columnas-email", help="Columnas de email (coma-separadas)."),
+    columnas_telefono: Optional[str] = typer.Option(None, "--columnas-telefono", help="Columnas de teléfono (coma-separadas)."),
+    digitos_telefono: Optional[str] = typer.Option(
+        None, "--digitos-telefono",
+        help="Rango de dígitos válido, formato min-max (ej. 8-8). Si no se indica, "
+             "se calcula por --paises-telefono, o al rango internacional amplio "
+             "(7-15 dígitos) si tampoco se indican países.",
+    ),
+    paises_telefono: Optional[str] = typer.Option(
+        None, "--paises-telefono",
+        help="País(es) para el rango de dígitos de celular (coma-separados, ej. 'cr,mexico'). "
+             "Ignorado si se indica --digitos-telefono explícitamente.",
+    ),
+    permitir_codigo_pais: bool = typer.Option(
+        True, "--permitir-codigo-pais/--no-permitir-codigo-pais",
+        help="Acepta el mismo número con 1-3 dígitos extra al inicio (código de país sin '+').",
+    ),
+    columnas_id: Optional[str] = typer.Option(None, "--columnas-id", help="Columnas identificadoras (coma-separadas)."),
+    total: Optional[str] = typer.Option(None, "--total", help="Columna de total (regla Total = Cantidad × Precio)."),
+    cantidad: Optional[str] = typer.Option(None, "--cantidad", help="Columna de cantidad."),
+    precio: Optional[str] = typer.Option(None, "--precio", help="Columna de precio unitario."),
+    columnas_texto: Optional[str] = typer.Option(None, "--columnas-texto", help="Columnas categóricas (coma-separadas)."),
+):
+    """Analiza una tabla e imprime el resumen de hallazgos, sin modificar nada."""
+    if not input and not (input_sql_conexion and (input_sql_tabla or input_sql_query)):
+        console.print("[red]Indique --input, o --input-sql-conexion junto con --input-sql-tabla/--input-sql-query.[/red]")
+        raise typer.Exit(code=2)
+    if input:
+        if not os.path.exists(input):
+            console.print(f"[red]No existe el archivo: {input}[/red]")
+            raise typer.Exit(code=1)
+        df = load_table(input, kind="auto")
+    else:
+        try:
+            df = load_table(input_sql_conexion, kind="sql", table_name=input_sql_tabla, query=input_sql_query)
+        except Exception as exc:
+            console.print(f"[red]No se pudo leer de la base de datos: {exc}[/red]")
+            raise typer.Exit(code=1)
+    resultado = analizar(
+        df, metodo_atipicos=metodo_atipicos,
+        auto_detectar_columnas=not sin_auto_columnas,
+        columnas_fecha=_parsear_lista_columnas(columnas_fecha), fecha_min=fecha_min, fecha_max=fecha_max,
+        columnas_email=_parsear_lista_columnas(columnas_email),
+        columnas_telefono=_parsear_lista_columnas(columnas_telefono),
+        digitos_telefono=_resolver_digitos_telefono(digitos_telefono),
+        paises_telefono=_parsear_lista_columnas(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais,
+        columnas_id=_parsear_lista_columnas(columnas_id),
+        columna_total=total, columna_cantidad=cantidad, columna_precio=precio,
+        columnas_texto=_parsear_lista_columnas(columnas_texto),
+    )
+    console.print(f"Tabla cargada: [bold]{len(df)}[/bold] filas x [bold]{len(df.columns)}[/bold] columnas.")
+    _imprimir_resumen(resultado)
+
+
+@app.command("limpiar")
+def limpiar_cmd(
+    input: Optional[str] = typer.Option(None, "--input", "-i", help="Ruta del archivo CSV/Excel a limpiar (o use --input-sql-conexion)."),
+    input_sql_conexion: Optional[str] = typer.Option(
+        None, "--input-sql-conexion", help="Cadena de conexión SQLAlchemy de origen, en vez de --input.",
+    ),
+    input_sql_tabla: Optional[str] = typer.Option(None, "--input-sql-tabla", help="Tabla a leer (o use --input-sql-query)."),
+    input_sql_query: Optional[str] = typer.Option(None, "--input-sql-query", help="Consulta SQL a ejecutar (o use --input-sql-tabla)."),
+    outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta donde guardar los resultados."),
+    metodo_atipicos: str = typer.Option("iqr", "--metodo-atipicos", "-m",
+                                         help="Método de detección de atípicos: iqr | zscore | ambos."),
+    faltante: str = typer.Option(DEFAULT_CONFIG["faltante"], "--faltante",
+                                  help=f"Acción para valores faltantes: {', '.join(ACCIONES_FALTANTE)}."),
+    duplicado: str = typer.Option(DEFAULT_CONFIG["duplicado"], "--duplicado",
+                                   help=f"Acción para filas duplicadas: {', '.join(ACCIONES_DUPLICADO)}."),
+    atipico: str = typer.Option(DEFAULT_CONFIG["atipico"], "--atipico",
+                                 help=f"Acción para valores atípicos: {', '.join(ACCIONES_ATIPICO)}."),
+    tipo_invalido: str = typer.Option(DEFAULT_CONFIG["tipo_invalido"], "--tipo-invalido",
+                                       help=f"Acción para errores de tipo: {', '.join(ACCIONES_TIPO_INVALIDO)}."),
+    fecha_invalida: str = typer.Option(DEFAULT_CONFIG["fecha_invalida"], "--fecha-invalida",
+                                        help=f"Acción para fechas inválidas: {', '.join(ACCIONES_FECHA)}."),
+    email_invalido: str = typer.Option(DEFAULT_CONFIG["email_invalido"], "--email-invalido",
+                                        help=f"Acción para emails inválidos: {', '.join(ACCIONES_EMAIL)}."),
+    telefono_invalido: str = typer.Option(DEFAULT_CONFIG["telefono_invalido"], "--telefono-invalido",
+                                           help=f"Acción para teléfonos inválidos: {', '.join(ACCIONES_TELEFONO)}."),
+    id_duplicado: str = typer.Option(DEFAULT_CONFIG["id_duplicado"], "--id-duplicado",
+                                      help=f"Acción para IDs duplicados: {', '.join(ACCIONES_ID_DUPLICADO)}."),
+    formula_incorrecta: str = typer.Option(DEFAULT_CONFIG["formula_incorrecta"], "--formula-incorrecta",
+                                            help=f"Acción para Total≠Cantidad×Precio: {', '.join(ACCIONES_FORMULA)}."),
+    texto_inconsistente: str = typer.Option(DEFAULT_CONFIG["texto_inconsistente"], "--texto-inconsistente",
+                                             help=f"Acción para variantes de texto: {', '.join(ACCIONES_TEXTO)}."),
+    estado_invalido: str = typer.Option(DEFAULT_CONFIG["estado_invalido"], "--estado-invalido",
+                                         help=f"Acción para estados no reconocidos: {', '.join(ACCIONES_ESTADO)}."),
+    capitalizacion_incorrecta: str = typer.Option(DEFAULT_CONFIG["capitalizacion_incorrecta"], "--capitalizacion-incorrecta",
+                                                   help=f"Acción para capitalización inconsistente: {', '.join(ACCIONES_CAPITALIZACION)}."),
+    espacio_extra: str = typer.Option(DEFAULT_CONFIG["espacio_extra"], "--espacio-extra",
+                                       help=f"Acción para texto con espacios de más: {', '.join(ACCIONES_ESPACIO_EXTRA)}."),
+    valor_fijo: List[str] = typer.Option(
+        [], "--valor-fijo", help="Valor fijo por columna, formato columna=valor. Repetible."
+    ),
+    formato_fecha: List[str] = typer.Option(
+        [], "--formato-fecha",
+        help="Formato de fecha preferido por columna (solo si --fecha-invalida "
+             f"normalizar_formato_fecha), formato columna=clave. Claves válidas: "
+             f"{', '.join(FORMATOS_FECHA_DISPONIBLES.keys())}. Repetible.",
+    ),
+    formato_salida: str = typer.Option("excel", "--formato-salida", help="Formato del archivo limpio: csv | excel | sql."),
+    salida_sql_conexion: Optional[str] = typer.Option(
+        None, "--salida-sql-conexion",
+        help="Cadena de conexión SQLAlchemy destino (solo si --formato-salida sql). "
+             "Ej: postgresql+psycopg2://usuario:clave@host/basedatos",
+    ),
+    salida_sql_tabla: Optional[str] = typer.Option(
+        None, "--salida-sql-tabla", help="Tabla destino (solo si --formato-salida sql).",
+    ),
+    salida_sql_si_existe: str = typer.Option(
+        "replace", "--salida-sql-si-existe", help="replace | append | fail (solo si --formato-salida sql).",
+    ),
+    sin_auto_columnas: bool = typer.Option(False, "--sin-auto-columnas",
+                                            help="Desactiva la auto-detección de columnas por nombre "
+                                                 "para fecha/email/teléfono/id/fórmula/texto."),
+    columnas_fecha: Optional[str] = typer.Option(None, "--columnas-fecha", help="Columnas de fecha (coma-separadas)."),
+    fecha_min: Optional[str] = typer.Option(None, "--fecha-min", help="Fecha mínima válida (AAAA-MM-DD)."),
+    fecha_max: Optional[str] = typer.Option(None, "--fecha-max", help="Fecha máxima válida (AAAA-MM-DD)."),
+    columnas_email: Optional[str] = typer.Option(None, "--columnas-email", help="Columnas de email (coma-separadas)."),
+    columnas_telefono: Optional[str] = typer.Option(None, "--columnas-telefono", help="Columnas de teléfono (coma-separadas)."),
+    digitos_telefono: Optional[str] = typer.Option(
+        None, "--digitos-telefono",
+        help="Rango de dígitos válido, formato min-max (ej. 8-8). Si no se indica, "
+             "se calcula por --paises-telefono, o al rango internacional amplio "
+             "(7-15 dígitos) si tampoco se indican países.",
+    ),
+    paises_telefono: Optional[str] = typer.Option(
+        None, "--paises-telefono",
+        help="País(es) para el rango de dígitos de celular (coma-separados, ej. 'cr,mexico'). "
+             "Ignorado si se indica --digitos-telefono explícitamente.",
+    ),
+    permitir_codigo_pais: bool = typer.Option(
+        True, "--permitir-codigo-pais/--no-permitir-codigo-pais",
+        help="Acepta el mismo número con 1-3 dígitos extra al inicio (código de país sin '+').",
+    ),
+    columnas_id: Optional[str] = typer.Option(None, "--columnas-id", help="Columnas identificadoras (coma-separadas)."),
+    total: Optional[str] = typer.Option(None, "--total", help="Columna de total (regla Total = Cantidad × Precio)."),
+    cantidad: Optional[str] = typer.Option(None, "--cantidad", help="Columna de cantidad."),
+    precio: Optional[str] = typer.Option(None, "--precio", help="Columna de precio unitario."),
+    columnas_texto: Optional[str] = typer.Option(None, "--columnas-texto", help="Columnas categóricas (coma-separadas)."),
+):
+    """Analiza, limpia y exporta la tabla + reporte, todo en un solo comando (sin preguntas)."""
+    if not input and not (input_sql_conexion and (input_sql_tabla or input_sql_query)):
+        console.print("[red]Indique --input, o --input-sql-conexion junto con --input-sql-tabla/--input-sql-query.[/red]")
+        raise typer.Exit(code=2)
+    if input and not os.path.exists(input):
+        console.print(f"[red]No existe el archivo: {input}[/red]")
+        raise typer.Exit(code=1)
+
+    acciones_validas = {
+        "faltante": ACCIONES_FALTANTE, "duplicado": ACCIONES_DUPLICADO,
+        "atipico": ACCIONES_ATIPICO, "tipo_invalido": ACCIONES_TIPO_INVALIDO,
+        "fecha_invalida": ACCIONES_FECHA, "email_invalido": ACCIONES_EMAIL,
+        "telefono_invalido": ACCIONES_TELEFONO, "id_duplicado": ACCIONES_ID_DUPLICADO,
+        "formula_incorrecta": ACCIONES_FORMULA, "texto_inconsistente": ACCIONES_TEXTO,
+        "estado_invalido": ACCIONES_ESTADO,
+        "capitalizacion_incorrecta": ACCIONES_CAPITALIZACION,
+        "espacio_extra": ACCIONES_ESPACIO_EXTRA,
+    }
+    config = {"faltante": faltante, "duplicado": duplicado,
+              "atipico": atipico, "tipo_invalido": tipo_invalido,
+              "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
+              "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
+              "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+              "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta,
+              "espacio_extra": espacio_extra}
+    for tipo, accion in config.items():
+        if accion not in acciones_validas[tipo]:
+            console.print(f"[red]Acción inválida para {tipo}: '{accion}'. "
+                           f"Válidas: {', '.join(acciones_validas[tipo])}[/red]")
+            raise typer.Exit(code=2)
+    if formato_salida not in ("csv", "excel", "sql"):
+        console.print("[red]--formato-salida debe ser 'csv', 'excel' o 'sql'[/red]")
+        raise typer.Exit(code=2)
+    if formato_salida == "sql" and not (salida_sql_conexion and salida_sql_tabla):
+        console.print("[red]--formato-salida sql requiere --salida-sql-conexion y --salida-sql-tabla[/red]")
+        raise typer.Exit(code=2)
+    if salida_sql_si_existe not in ("replace", "append", "fail"):
+        console.print("[red]--salida-sql-si-existe debe ser 'replace', 'append' o 'fail'[/red]")
+        raise typer.Exit(code=2)
+
+    valores_fijos = _parsear_valores_fijos(valor_fijo)
+    formatos_fecha = _parsear_formatos_fecha(formato_fecha)
+
+    os.makedirs(outdir, exist_ok=True)
+    if input:
+        df = load_table(input, kind="auto")
+        nombre_fuente = input
+    else:
+        try:
+            df = load_table(input_sql_conexion, kind="sql", table_name=input_sql_tabla, query=input_sql_query)
+        except Exception as exc:
+            console.print(f"[red]No se pudo leer de la base de datos: {exc}[/red]")
+            raise typer.Exit(code=1)
+        nombre_fuente = input_sql_tabla or "consulta_sql"
+    console.print(f"Tabla cargada: [bold]{len(df)}[/bold] filas x [bold]{len(df.columns)}[/bold] columnas.")
+
+    resultado = analizar(
+        df, metodo_atipicos=metodo_atipicos,
+        auto_detectar_columnas=not sin_auto_columnas,
+        columnas_fecha=_parsear_lista_columnas(columnas_fecha), fecha_min=fecha_min, fecha_max=fecha_max,
+        columnas_email=_parsear_lista_columnas(columnas_email),
+        columnas_telefono=_parsear_lista_columnas(columnas_telefono),
+        digitos_telefono=_resolver_digitos_telefono(digitos_telefono),
+        paises_telefono=_parsear_lista_columnas(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais,
+        columnas_id=_parsear_lista_columnas(columnas_id),
+        columna_total=total, columna_cantidad=cantidad, columna_precio=precio,
+        columnas_texto=_parsear_lista_columnas(columnas_texto),
+    )
+    _imprimir_resumen(resultado)
+
+    if not resultado.issues:
+        console.print("[green]No se encontraron problemas. No es necesario limpiar la tabla.[/green]")
+        raise typer.Exit(code=0)
+
+    faltan = [
+        tipo for tipo, accion in config.items()
+        if accion == "valor_fijo"
+        and not any(i.columna in valores_fijos for i in resultado.issues if i.tipo == tipo)
+    ]
+    if faltan:
+        console.print(f"[red]Falta --valor-fijo columna=valor para el/los tipo(s): {', '.join(faltan)}[/red]")
+        raise typer.Exit(code=2)
+
+    df_limpio, registro = limpiar(df, resultado.issues, config=config, valores_fijos=valores_fijos,
+                                   formatos_fecha=formatos_fecha)
+    tablas_reporte = construir_reporte(resultado, registro, nombre_fuente=nombre_fuente)
+
+    ruta_reporte = os.path.join(outdir, "reporte_calidad_datos.xlsx")
+    exportar_reporte_excel(tablas_reporte, ruta_reporte)
+
+    if formato_salida == "sql":
+        from data_cleaner.exporters import exportar_sql
+        mensaje_sql = exportar_sql(
+            df_limpio, salida_sql_conexion, salida_sql_tabla, if_exists=salida_sql_si_existe,
+        )
+        console.print("\n[bold green]✅ Proceso completado.[/bold green]")
+        console.print(f"   {mensaje_sql}")
+        console.print(f"   Reporte:         {ruta_reporte}")
+        console.print(f"   Filas finales:   {len(df_limpio)} (originales: {len(df)})")
+        raise typer.Exit(code=0)
+
+    ext = "csv" if formato_salida == "csv" else "xlsx"
+    ruta_limpio = os.path.join(outdir, f"datos_limpios.{ext}")
+    exportar(df_limpio, ruta_limpio, kind=formato_salida)
+
+    console.print("\n[bold green]✅ Proceso completado.[/bold green]")
+    console.print(f"   Archivo limpio:  {ruta_limpio}")
+    console.print(f"   Reporte:         {ruta_reporte}")
+    console.print(f"   Filas finales:   {len(df_limpio)} (originales: {len(df)})")
+
+
+@app.command("generar-m")
+def generar_m_cmd(
+    input: Optional[str] = typer.Option(None, "--input", "-i", help="Ruta del archivo CSV/Excel a analizar (o use --input-sql-conexion)."),
+    input_sql_conexion: Optional[str] = typer.Option(
+        None, "--input-sql-conexion", help="Cadena de conexión SQLAlchemy de origen, en vez de --input.",
+    ),
+    input_sql_tabla: Optional[str] = typer.Option(None, "--input-sql-tabla", help="Tabla a leer (o use --input-sql-query)."),
+    input_sql_query: Optional[str] = typer.Option(None, "--input-sql-query", help="Consulta SQL a ejecutar (o use --input-sql-tabla)."),
+    outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta donde guardar el archivo .m generado."),
+    salida: str = typer.Option("codigo_generado.m", "--salida", help="Nombre del archivo .m dentro de --outdir."),
+    nombre_paso_anterior: str = typer.Option(
+        "TuPasoAnterior", "--nombre-paso-anterior",
+        help="Nombre EXACTO del paso previo en Power Query (el que entrega la tabla ya "
+             "cargada) al que se debe encadenar el código generado. Revíselo en el panel "
+             "'Pasos aplicados' del Editor de Power Query.",
+    ),
+    faltante: str = typer.Option(DEFAULT_CONFIG["faltante"], "--faltante",
+                                  help=f"Acción para valores faltantes: {', '.join(ACCIONES_FALTANTE)}."),
+    duplicado: str = typer.Option(DEFAULT_CONFIG["duplicado"], "--duplicado",
+                                   help=f"Acción para filas duplicadas: {', '.join(ACCIONES_DUPLICADO)}."),
+    atipico: str = typer.Option(DEFAULT_CONFIG["atipico"], "--atipico",
+                                 help=f"Acción para valores atípicos: {', '.join(ACCIONES_ATIPICO)}."),
+    tipo_invalido: str = typer.Option(DEFAULT_CONFIG["tipo_invalido"], "--tipo-invalido",
+                                       help=f"Acción para errores de tipo: {', '.join(ACCIONES_TIPO_INVALIDO)}."),
+    fecha_invalida: str = typer.Option(DEFAULT_CONFIG["fecha_invalida"], "--fecha-invalida",
+                                        help=f"Acción para fechas inválidas: {', '.join(ACCIONES_FECHA)}."),
+    email_invalido: str = typer.Option(DEFAULT_CONFIG["email_invalido"], "--email-invalido",
+                                        help=f"Acción para emails inválidos: {', '.join(ACCIONES_EMAIL)}."),
+    telefono_invalido: str = typer.Option(DEFAULT_CONFIG["telefono_invalido"], "--telefono-invalido",
+                                           help=f"Acción para teléfonos inválidos: {', '.join(ACCIONES_TELEFONO)}."),
+    id_duplicado: str = typer.Option(DEFAULT_CONFIG["id_duplicado"], "--id-duplicado",
+                                      help=f"Acción para IDs duplicados: {', '.join(ACCIONES_ID_DUPLICADO)}."),
+    formula_incorrecta: str = typer.Option(DEFAULT_CONFIG["formula_incorrecta"], "--formula-incorrecta",
+                                            help=f"Acción para Total≠Cantidad×Precio: {', '.join(ACCIONES_FORMULA)}."),
+    texto_inconsistente: str = typer.Option(DEFAULT_CONFIG["texto_inconsistente"], "--texto-inconsistente",
+                                             help=f"Acción para variantes de texto: {', '.join(ACCIONES_TEXTO)}."),
+    estado_invalido: str = typer.Option(DEFAULT_CONFIG["estado_invalido"], "--estado-invalido",
+                                         help=f"Acción para estados no reconocidos: {', '.join(ACCIONES_ESTADO)}."),
+    capitalizacion_incorrecta: str = typer.Option(DEFAULT_CONFIG["capitalizacion_incorrecta"], "--capitalizacion-incorrecta",
+                                                   help=f"Acción para capitalización inconsistente: {', '.join(ACCIONES_CAPITALIZACION)}."),
+    espacio_extra: str = typer.Option(DEFAULT_CONFIG["espacio_extra"], "--espacio-extra",
+                                       help=f"Acción para texto con espacios de más: {', '.join(ACCIONES_ESPACIO_EXTRA)}."),
+    valor_fijo: List[str] = typer.Option(
+        [], "--valor-fijo", help="Valor fijo por columna, formato columna=valor. Repetible."
+    ),
+    formato_fecha: List[str] = typer.Option(
+        [], "--formato-fecha",
+        help="Formato de fecha preferido por columna (solo si --fecha-invalida "
+             f"normalizar_formato_fecha), formato columna=clave. Claves válidas: "
+             f"{', '.join(FORMATOS_FECHA_DISPONIBLES.keys())}. Repetible.",
+    ),
+    sin_auto_columnas: bool = typer.Option(False, "--sin-auto-columnas",
+                                            help="Desactiva la auto-detección de columnas por nombre "
+                                                 "para fecha/email/teléfono/id/fórmula/texto."),
+    columnas_fecha: Optional[str] = typer.Option(None, "--columnas-fecha", help="Columnas de fecha (coma-separadas)."),
+    fecha_min: Optional[str] = typer.Option(None, "--fecha-min", help="Fecha mínima válida (AAAA-MM-DD)."),
+    fecha_max: Optional[str] = typer.Option(None, "--fecha-max", help="Fecha máxima válida (AAAA-MM-DD)."),
+    columnas_email: Optional[str] = typer.Option(None, "--columnas-email", help="Columnas de email (coma-separadas)."),
+    columnas_telefono: Optional[str] = typer.Option(None, "--columnas-telefono", help="Columnas de teléfono (coma-separadas)."),
+    digitos_telefono: Optional[str] = typer.Option(
+        None, "--digitos-telefono",
+        help="Rango de dígitos válido, formato min-max (ej. 8-8). Si no se indica, "
+             "se calcula por --paises-telefono, o al rango internacional amplio "
+             "(7-15 dígitos) si tampoco se indican países.",
+    ),
+    paises_telefono: Optional[str] = typer.Option(
+        None, "--paises-telefono",
+        help="País(es) para el rango de dígitos de celular (coma-separados, ej. 'cr,mexico'). "
+             "Ignorado si se indica --digitos-telefono explícitamente.",
+    ),
+    permitir_codigo_pais: bool = typer.Option(
+        True, "--permitir-codigo-pais/--no-permitir-codigo-pais",
+        help="Acepta el mismo número con 1-3 dígitos extra al inicio (código de país sin '+').",
+    ),
+    columnas_id: Optional[str] = typer.Option(None, "--columnas-id", help="Columnas identificadoras (coma-separadas)."),
+    total: Optional[str] = typer.Option(None, "--total", help="Columna de total (regla Total = Cantidad × Precio)."),
+    cantidad: Optional[str] = typer.Option(None, "--cantidad", help="Columna de cantidad."),
+    precio: Optional[str] = typer.Option(None, "--precio", help="Columna de precio unitario."),
+    columnas_texto: Optional[str] = typer.Option(None, "--columnas-texto", help="Columnas categóricas (coma-separadas)."),
+):
+    """Genera código M 100% nativo (sin Python.Execute) para pegar en el
+    Editor avanzado de Power Query, equivalente a lo que hace 'limpiar' pero
+    sin depender de Python ni de este proyecto una vez pegado.
+
+    Ejemplo:
+        python cli.py generar-m --input clientes.xlsx --outdir salida \\
+            --nombre-paso-anterior "Tipo cambiado" --faltante reemplazar_mediana \\
+            --atipico limitar
+    """
+    if not input and not (input_sql_conexion and (input_sql_tabla or input_sql_query)):
+        console.print("[red]Indique --input, o --input-sql-conexion junto con --input-sql-tabla/--input-sql-query.[/red]")
+        raise typer.Exit(code=2)
+    if input and not os.path.exists(input):
+        console.print(f"[red]No existe el archivo: {input}[/red]")
+        raise typer.Exit(code=1)
+
+    acciones_validas = {
+        "faltante": ACCIONES_FALTANTE, "duplicado": ACCIONES_DUPLICADO,
+        "atipico": ACCIONES_ATIPICO, "tipo_invalido": ACCIONES_TIPO_INVALIDO,
+        "fecha_invalida": ACCIONES_FECHA, "email_invalido": ACCIONES_EMAIL,
+        "telefono_invalido": ACCIONES_TELEFONO, "id_duplicado": ACCIONES_ID_DUPLICADO,
+        "formula_incorrecta": ACCIONES_FORMULA, "texto_inconsistente": ACCIONES_TEXTO,
+        "estado_invalido": ACCIONES_ESTADO,
+        "capitalizacion_incorrecta": ACCIONES_CAPITALIZACION,
+        "espacio_extra": ACCIONES_ESPACIO_EXTRA,
+    }
+    config = {"faltante": faltante, "duplicado": duplicado,
+              "atipico": atipico, "tipo_invalido": tipo_invalido,
+              "fecha_invalida": fecha_invalida, "email_invalido": email_invalido,
+              "telefono_invalido": telefono_invalido, "id_duplicado": id_duplicado,
+              "formula_incorrecta": formula_incorrecta, "texto_inconsistente": texto_inconsistente,
+              "estado_invalido": estado_invalido, "capitalizacion_incorrecta": capitalizacion_incorrecta,
+              "espacio_extra": espacio_extra}
+    for tipo, accion in config.items():
+        if accion not in acciones_validas[tipo]:
+            console.print(f"[red]Acción inválida para {tipo}: '{accion}'. "
+                           f"Válidas: {', '.join(acciones_validas[tipo])}[/red]")
+            raise typer.Exit(code=2)
+
+    valores_fijos = _parsear_valores_fijos(valor_fijo)
+    formatos_fecha = _parsear_formatos_fecha(formato_fecha)
+
+    os.makedirs(outdir, exist_ok=True)
+    if input:
+        df = load_table(input, kind="auto")
+    else:
+        try:
+            df = load_table(input_sql_conexion, kind="sql", table_name=input_sql_tabla, query=input_sql_query)
+        except Exception as exc:
+            console.print(f"[red]No se pudo leer de la base de datos: {exc}[/red]")
+            raise typer.Exit(code=1)
+    console.print(f"Tabla cargada: [bold]{len(df)}[/bold] filas x [bold]{len(df.columns)}[/bold] columnas.")
+
+    faltan = [tipo for tipo, accion in config.items() if accion == "valor_fijo" and not valores_fijos]
+    if faltan:
+        console.print(f"[red]Falta --valor-fijo columna=valor para el/los tipo(s): {', '.join(faltan)}[/red]")
+        raise typer.Exit(code=2)
+
+    _cols_o_vacia = (lambda v: _parsear_lista_columnas(v) or []) if sin_auto_columnas \
+        else _parsear_lista_columnas
+    codigo_m = generar_editor_m_puro(
+        df, config=config, valores_fijos=valores_fijos,
+        nombre_paso_anterior=nombre_paso_anterior,
+        # generar_editor_m_puro solo lee 'faltante'/'duplicado'/'atipico'/
+        # 'tipo_invalido' de `config`; las 9 reglas "nuevas" deben pasarse
+        # como kwargs propios o quedan silenciosamente en su default
+        # ("marcar_solo"/"usar_sugerido") sin importar lo que pida --xxx.
+        fecha_invalida=fecha_invalida, email_invalido=email_invalido,
+        telefono_invalido=telefono_invalido, id_duplicado=id_duplicado,
+        formula_incorrecta=formula_incorrecta, texto_inconsistente=texto_inconsistente,
+        estado_invalido=estado_invalido, capitalizacion_incorrecta=capitalizacion_incorrecta,
+        espacio_extra=espacio_extra,
+        formatos_fecha=formatos_fecha,
+        columnas_fecha=_cols_o_vacia(columnas_fecha), fecha_min=fecha_min, fecha_max=fecha_max,
+        columnas_email=_cols_o_vacia(columnas_email),
+        columnas_telefono=_cols_o_vacia(columnas_telefono),
+        digitos_telefono=_resolver_digitos_telefono(digitos_telefono),
+        paises_telefono=_parsear_lista_columnas(paises_telefono),
+        permitir_codigo_pais_telefono=permitir_codigo_pais,
+        columnas_id=_cols_o_vacia(columnas_id),
+        columna_total=total, columna_cantidad=cantidad, columna_precio=precio,
+        columnas_texto=_cols_o_vacia(columnas_texto),
+        incluir_generico=not sin_auto_columnas,
+    )
+
+    ruta_m = os.path.join(outdir, salida)
+    with open(ruta_m, "w", encoding="utf-8") as f:
+        f.write(codigo_m)
+
+    console.print("\n[bold green]✅ Código M generado.[/bold green]")
+    console.print(f"   Archivo:  {ruta_m}")
+    console.print("   Ábralo, copie todo el contenido y péguelo en el Editor avanzado de Power Query,")
+    console.print(f"   encadenado después del paso \"{nombre_paso_anterior}\".")
+
+
+@app.command("modelo-sql")
+def modelo_sql_cmd(
+    input: str = typer.Option(..., "--input", "-i", help="Ruta del Excel con las hojas del modelo."),
+    modelo: str = typer.Option(
+        ..., "--modelo",
+        help='Ruta a un archivo JSON con el modelo: {"nombre_tabla": {"hoja": "...", '
+             '"clave_primaria": "...", "claves_foraneas": [{"columna": "...", '
+             '"tabla_referencia": "...", "columna_referencia": "..."}]}, ...}. '
+             "Ver data_cleaner/modelo_sql.py y excel_a_sql.py para ejemplos.",
+    ),
+    conexion: str = typer.Option(..., "--conexion", help="Cadena de conexión SQLAlchemy destino."),
+    si_existe: str = typer.Option(
+        "replace", "--si-existe",
+        help="replace | append | fail. Con PK/FK conviene 'replace': con 'append' las "
+             "restricciones pueden fallar si ya hay valores repetidos o nulos.",
+    ),
+    diagrama_salida: Optional[str] = typer.Option(
+        None, "--diagrama-salida",
+        help="Si se indica, guarda el diagrama del modelo en formato Graphviz DOT en esa ruta "
+             "(péguelo en https://dreampuf.github.io/GraphvizOnline para verlo).",
+    ),
+):
+    """
+    Carga varias hojas de un Excel y las escribe en SQL como un modelo de
+    datos en ESTRELLA o COPO DE NIEVE (con llave primaria y llaves
+    foráneas), a partir de un JSON de modelo.
+
+    Ejemplo:
+        python cli.py modelo-sql --input datos.xlsx --modelo modelo.json \\
+            --conexion "mssql+pyodbc://@servidor/base?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes&trusted_connection=yes"
+    """
+    if not os.path.exists(input):
+        console.print(f"[red]No existe el archivo: {input}[/red]")
+        raise typer.Exit(code=1)
+    if not os.path.exists(modelo):
+        console.print(f"[red]No existe el archivo de modelo: {modelo}[/red]")
+        raise typer.Exit(code=1)
+    if si_existe not in ("replace", "append", "fail"):
+        console.print("[red]--si-existe debe ser 'replace', 'append' o 'fail'[/red]")
+        raise typer.Exit(code=2)
+
+    from data_cleaner.loaders import load_excel_hojas
+    from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo
+
+    try:
+        with open(modelo, "r", encoding="utf-8") as f:
+            modelo_dict = json.load(f)
+    except json.JSONDecodeError as exc:
+        console.print(f"[red]El archivo de modelo no es un JSON válido: {exc}[/red]")
+        raise typer.Exit(code=2)
+    if not isinstance(modelo_dict, dict) or not modelo_dict:
+        console.print("[red]El JSON de modelo debe ser un objeto no vacío (tabla -> definición).[/red]")
+        raise typer.Exit(code=2)
+
+    hojas_necesarias = sorted({definicion["hoja"] for definicion in modelo_dict.values()})
+    try:
+        hojas_cargadas = load_excel_hojas(input, hojas=hojas_necesarias)
+    except Exception as exc:
+        console.print(f"[red]No se pudo cargar el Excel: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        mensajes = aplicar_modelo_sql(modelo_dict, hojas_cargadas, conexion, if_exists=si_existe)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        console.print(f"[red]No se pudo crear el modelo en la base de datos: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    for m in mensajes:
+        if "⚠" in m:
+            console.print(f"[yellow]{m}[/yellow]")
+        else:
+            console.print(f"[green]{m}[/green]")
+
+    if diagrama_salida:
+        with open(diagrama_salida, "w", encoding="utf-8") as f:
+            f.write(generar_dot_modelo(modelo_dict))
+        console.print(f"\nDiagrama guardado en: {diagrama_salida}")
+
+    console.print("\n[bold green]✅ Modelo aplicado.[/bold green]")
+
+
+@app.command("crear-base-datos")
+def crear_base_datos_cmd(
+    nombre: str = typer.Option(..., "--nombre", "-n", help="Nombre de la base de datos a crear."),
+    motor: str = typer.Option(
+        "sql_server", "--motor", "-m",
+        help="sql_server | mysql | postgresql (motor destino).",
+    ),
+    salida: Optional[str] = typer.Option(
+        None, "--salida", help="Si se indica, guarda el script en esa ruta en vez de solo imprimirlo.",
+    ),
+):
+    """
+    Genera el script SQL (CREATE DATABASE / USE) que hay que pegar en
+    SSMS/mysql/psql cuando la base de datos destino TODAVÍA NO EXISTE.
+    No requiere ninguna cadena de conexión: una vez creada la base con
+    este script, recién ahí use 'modelo-sql --conexion ...' apuntando a
+    esa base ya creada.
+    """
+    from data_cleaner.modelo_sql import generar_script_crear_base_datos
+
+    try:
+        script = generar_script_crear_base_datos(nombre, motor)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+
+    if salida:
+        with open(salida, "w", encoding="utf-8") as f:
+            f.write(script)
+        console.print(f"Script guardado en: {salida}")
+    else:
+        console.print(script)
+
+
+# =============================================================================
+# Limpieza guiada, merge y diccionario de datos
+# =============================================================================
+
+@contextmanager
+def _errores_de_usuario() -> Iterator[None]:
+    """Muestra los errores de validación (columna inexistente, regla inválida...)
+    como mensaje corto y sale con código 2, sin traza de Python."""
+    try:
+        yield
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+
+
+def _lista_o_none(valor: Optional[str]) -> Optional[List[str]]:
+    """None = elegir automáticamente; cadena vacía = ninguna."""
+    if valor is None:
+        return None
+    return [c.strip() for c in valor.split(",") if c.strip()]
+
+
+def _rango(valor: Optional[str], opcion: str) -> Optional[tuple]:
+    if not valor:
+        return None
+    partes = valor.split(",")
+    if len(partes) != 2:
+        console.print(f"[red]{opcion} debe ser minimo,maximo (ej. 8,12)[/red]")
+        raise typer.Exit(code=2)
+    return (float(partes[0]), float(partes[1]))
+
+
+def _imprimir_dataframe(df, titulo: str, maximo: int = 30) -> None:
+    tabla = Table(title=titulo)
+    for columna in df.columns:
+        tabla.add_column(str(columna))
+    for fila in df.head(maximo).itertuples(index=False):
+        tabla.add_row(*[str(v) for v in fila])
+    console.print(tabla)
+
+
+def _imprimir_rutas(rutas: dict) -> None:
+    console.print("\n[bold green]✅ Proceso completado.[/bold green]")
+    for tipo, ruta in rutas.items():
+        console.print(f"   {tipo:<12} {ruta}")
+
+
+@app.command("limpieza-guiada")
+def limpieza_guiada_cmd(
+    input: str = typer.Option(..., "--input", "-i", help="Archivo CSV/Excel a limpiar."),
+    hoja: Optional[str] = typer.Option(None, "--hoja", help="Hoja del libro Excel (si tiene varias)."),
+    outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
+    formato_salida: str = typer.Option("csv", "--formato-salida", help="csv, xlsx o ambos."),
+    tokens_extra: Optional[str] = typer.Option(
+        None, "--tokens-extra",
+        help="Textos que cuentan como nulo además de la celda vacía (coma-separados). "
+             "Por defecto: nan,none,null,n/a y los textos tipo «sin dato» que aparezcan en la tabla "
+             "(unknown, -, not available...). Otros posibles: " + ", ".join(LG.TOKENS_NULOS_EXTRA)),
+    nombres_snake: bool = typer.Option(True, "--nombres-snake/--no-nombres-snake",
+                                        help="Nombres de columna en snake_case."),
+    vacios_a_nan: bool = typer.Option(True, "--vacios-a-nan/--no-vacios-a-nan",
+                                       help="Pasar los vacíos a nulos reales (NaN)."),
+    estandarizar_texto: bool = typer.Option(True, "--estandarizar-texto/--no-estandarizar-texto"),
+    columnas_texto: Optional[str] = typer.Option(
+        None, "--columnas-texto", help="Columnas de texto a estandarizar (coma-separadas). "
+        "Sin esta opción se eligen solas; '' = ninguna."),
+    minusculas: bool = typer.Option(True, "--minusculas/--no-minusculas"),
+    espacios: bool = typer.Option(True, "--espacios/--no-espacios", help="Quitar espacios repetidos."),
+    comillas: bool = typer.Option(True, "--comillas/--no-comillas", help="Quitar comillas."),
+    numericas: Optional[str] = typer.Option(
+        None, "--numericas", help="Columnas a convertir a número (coma-separadas). "
+        "Sin esta opción se eligen solas; '' = ninguna."),
+    latitud: Optional[str] = typer.Option(None, "--latitud", help="Columna de latitud ('' = ninguna)."),
+    longitud: Optional[str] = typer.Option(None, "--longitud", help="Columna de longitud ('' = ninguna)."),
+    rango_latitud: Optional[str] = typer.Option(None, "--rango-latitud", help="minimo,maximo esperado."),
+    rango_longitud: Optional[str] = typer.Option(None, "--rango-longitud", help="minimo,maximo esperado."),
+    regla: List[str] = typer.Option(
+        [], "--regla",
+        help="Regla de nulos por columna: columna=regla[:parametro]. Sin esta opción se usa la "
+             "sugerida. Reglas: " + ", ".join(LG.REGLAS_NULOS) + ". Ej. email=valor_fijo:Sin correo, "
+             "monto=mediana_por_grupo:zona. Repetible."),
+    solo_diagnostico: bool = typer.Option(
+        False, "--solo-diagnostico", help="Muestra el diagnóstico y las reglas sugeridas, sin limpiar."),
+):
+    """Limpieza guiada de nulos: diagnóstico, estandarización y una regla por
+    columna. Guarda la tabla limpia, un script de pandas que repite la limpieza
+    y el diccionario de datos."""
+    with _errores_de_usuario():
+        df = FG.leer_tabla_guiada(input, hoja=hoja)
+        console.print(f"Tabla cargada: [bold]{len(df)}[/bold] filas x [bold]{len(df.columns)}[/bold] columnas.")
+        config = FG.configurar_limpieza_guiada(
+            df, tokens_extra=_lista_o_none(tokens_extra), nombres_snake=nombres_snake,
+            vacios_a_nan=vacios_a_nan, estandarizar_texto=estandarizar_texto,
+            columnas_texto=_lista_o_none(columnas_texto), minusculas=minusculas,
+            espacios=espacios, comillas=comillas, numericas=_lista_o_none(numericas),
+            latitud=latitud, longitud=longitud, rango_latitud=_rango(rango_latitud, "--rango-latitud"),
+            rango_longitud=_rango(rango_longitud, "--rango-longitud"))
+        diagnostico = LG.diagnostico_nulos(df, config["tokens"]).reset_index()
+        _imprimir_dataframe(diagnostico, "Diagnóstico de nulos y vacíos")
+        ajustes = FG.parsear_ajustes_reglas(regla)
+
+        if solo_diagnostico:
+            df_base, _ = LG.ejecutar_pasos_globales(df, config)
+            sugeridas = LG.tabla_de_reglas(df_base, config["tokens"])
+            _imprimir_dataframe(sugeridas, "Reglas sugeridas (use --regla para cambiarlas)")
+            raise typer.Exit(code=0)
+
+        resultado = FG.ejecutar_limpieza_guiada(df, config, ajustes, nombre_archivo=input, hoja=hoja)
+        for paso in resultado.pasos:
+            console.print(f"• [bold]{paso.titulo}[/bold]: {paso.detalle}")
+        auditoria = resultado.auditoria
+        console.print(
+            f"\nFilas: {auditoria['filas_antes']} → {auditoria['filas_despues']} · "
+            f"Celdas nulas: {auditoria['nulos_antes']} → {auditoria['nulos_despues']} · "
+            f"Duplicados: {auditoria['duplicados_despues']}")
+        if len(auditoria["nulos_restantes"]):
+            _imprimir_dataframe(auditoria["nulos_restantes"].reset_index(), "Nulos que quedan")
+        _imprimir_rutas(FG.guardar_limpieza_guiada(resultado, outdir, formato_salida))
+
+
+@app.command("merge")
+def merge_cmd(
+    tabla_a: str = typer.Option(..., "--tabla-a", "-a", help="Tabla A (la que manda): CSV/Excel."),
+    tabla_b: str = typer.Option(..., "--tabla-b", "-b", help="Tabla B (la que enriquece): CSV/Excel."),
+    hoja_a: Optional[str] = typer.Option(None, "--hoja-a", help="Hoja de A si es un libro con varias."),
+    hoja_b: Optional[str] = typer.Option(None, "--hoja-b", help="Hoja de B si es un libro con varias."),
+    llave_a: Optional[str] = typer.Option(None, "--llave-a", help="Columnas llave de A (coma-separadas). "
+                                           "Sin esta opción ni --llave-b se usa la pareja sugerida."),
+    llave_b: Optional[str] = typer.Option(None, "--llave-b", help="Columnas llave de B, en el mismo orden."),
+    union: str = typer.Option("left", "--union", help="Tipo de unión: " + ", ".join(MT.TIPOS_UNION) + "."),
+    validar: str = typer.Option(
+        "auto", "--validar",
+        help="Relación esperada: auto, vacio (sin validar), " + ", ".join(k for k in MT.VALIDACIONES if k) + "."),
+    modo_llave: str = typer.Option("texto", "--modo-llave", help="Cómo comparar las llaves: " + ", ".join(MT.MODOS_LLAVE) + "."),
+    ancho: int = typer.Option(0, "--ancho", help="Con --modo-llave codigo: rellenar con ceros hasta este ancho."),
+    prefijo_b: str = typer.Option("", "--prefijo-b", help="Prefijo para las columnas de B."),
+    prefijo_todas: bool = typer.Option(False, "--prefijo-todas", help="Aplicar el prefijo a todas las de B, no solo a las repetidas."),
+    sufijo_b: str = typer.Option("_b", "--sufijo-b", help="Sufijo para columnas repetidas sin prefijo."),
+    no_colapsar_b: bool = typer.Option(False, "--no-colapsar-b", help="No dejar una fila por llave en B cuando B repite llaves."),
+    agregacion: List[str] = typer.Option([], "--agregacion", help="columna=funcion para colapsar B (" + ", ".join(MT.AGREGACIONES) + "). Repetible."),
+    relleno: List[str] = typer.Option([], "--relleno", help="Plan B: destino=respaldo (rellena los vacíos de destino con respaldo). Repetible."),
+    conservar_indicador: bool = typer.Option(False, "--conservar-indicador", help="Conservar la columna _merge."),
+    outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
+    formato_salida: str = typer.Option("csv", "--formato-salida", help="csv, xlsx o ambos."),
+    solo_diagnostico: bool = typer.Option(False, "--solo-diagnostico", help="Solo revisa las llaves, sin unir."),
+):
+    """Une dos tablas (A manda, B enriquece), revisa las llaves antes de unir y
+    audita el resultado. Guarda la tabla unida, un script de pandas y el
+    diccionario de datos de la tabla maestra."""
+    with _errores_de_usuario():
+        df_a = FG.leer_tabla_guiada(tabla_a, hoja=hoja_a)
+        df_b = FG.leer_tabla_guiada(tabla_b, hoja=hoja_b)
+        console.print(f"A: [bold]{len(df_a)}[/bold] filas · B: [bold]{len(df_b)}[/bold] filas.")
+        claves_a, claves_b = _lista_o_none(llave_a) or [], _lista_o_none(llave_b) or []
+        if not claves_a and not claves_b:
+            _imprimir_dataframe(MT.sugerir_llaves(df_a, df_b), "Llaves sugeridas")
+
+        if solo_diagnostico:
+            _, _, diagnostico = FG.diagnosticar_llaves(df_a, df_b, claves_a, claves_b, modo_llave, ancho)
+            diag = FG.diagnostico_a_dict(diagnostico)
+            ejemplos = diag.pop("ejemplos_sin_pareja")
+            for clave, valor in diag.items():
+                console.print(f"  {clave}: {valor}")
+            if ejemplos:
+                console.print(f"  llaves de A sin pareja en B: {ejemplos}")
+            raise typer.Exit(code=0)
+
+        resultado = FG.ejecutar_merge(
+            df_a, df_b, tabla_a, tabla_b, claves_a, claves_b, how=union, validate="" if validar == "vacio" else validar,
+            modo=modo_llave, ancho=ancho, prefijo_b=prefijo_b, solo_repetidas=not prefijo_todas,
+            colapsar_b=not no_colapsar_b, agregaciones=FG.parsear_pares(agregacion, "--agregacion") or None,
+            sufijo_b=sufijo_b, conservar_indicador=conservar_indicador,
+            rellenos=list(FG.parsear_pares(relleno, "--relleno").items()), hoja_a=hoja_a, hoja_b=hoja_b)
+        aud = resultado.auditoria
+        console.print(f"Filas del resultado: [bold]{len(resultado.df)}[/bold] "
+                      f"({len(resultado.df) - aud['filas_a']:+d} vs A) · "
+                      f"A con pareja: {aud['semaforo']} {aud['pct_filas_con_pareja']}%")
+        if aud["conteo_merge"]:
+            console.print("Conteo del cruce: " + " · ".join(f"{k}: {v}" for k, v in aud["conteo_merge"].items()))
+        for aviso in aud["advertencias"]:
+            console.print(f"[yellow]⚠ {aviso}[/yellow]")
+        _imprimir_rutas(FG.guardar_merge(resultado, outdir, formato=formato_salida))
+
+
+@app.command("diccionario")
+def diccionario_cmd(
+    input: str = typer.Option(..., "--input", "-i", help="Tabla (CSV/Excel) de la que armar el diccionario."),
+    hoja: Optional[str] = typer.Option(None, "--hoja", help="Hoja del libro Excel (si tiene varias)."),
+    nombre: Optional[str] = typer.Option(None, "--nombre", help="Nombre de la tabla maestra (por defecto, el del archivo)."),
+    outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
+):
+    """Diccionario de datos en Excel (hojas Resumen y Diccionario): tipo,
+    completitud, valores únicos y rango salen de los datos; la descripción y la
+    justificación de negocio quedan resaltadas para completarlas."""
+    with _errores_de_usuario():
+        df = FG.leer_tabla_guiada(input, hoja=hoja)
+        tabla = nombre or FG.nombre_base(input)
+        _, _, excel = FG.generar_diccionario(df, tabla, fuentes=[input])
+        os.makedirs(outdir, exist_ok=True)
+        ruta = os.path.join(outdir, f"diccionario_{FG.nombre_base(tabla)}.xlsx")
+        with open(ruta, "wb") as archivo:
+            archivo.write(excel)
+        _imprimir_rutas({"diccionario": ruta})
+
+
+if __name__ == "__main__":
+    try:
+        app()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Proceso cancelado por el usuario.[/yellow]")
+        sys.exit(1)
