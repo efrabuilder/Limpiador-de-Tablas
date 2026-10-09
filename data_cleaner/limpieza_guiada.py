@@ -307,7 +307,11 @@ def aplicar_regla(df, columna, regla, valor="", grupo="", tokens=TOKENS_NULOS_BA
                 if relleno.is_integer() and (serie.dropna() % 1 == 0).all():
                     relleno = int(relleno)
             except (TypeError, ValueError):
+                enteros = bool((serie.dropna() % 1 == 0).all())
                 serie = serie.astype(object)  # el valor es texto: la columna pasa a texto
+                if enteros:  # anios, codigos: que quede 2008 y no 2008.0 junto al texto
+                    serie = pd.Series([v if pd.isna(v) else int(v) for v in serie],
+                                      index=serie.index, dtype=object)  # (map() los volveria a decimal)
         elif regla == "cero":
             relleno = "0"  # columna de texto: el cero se escribe como texto
         df[columna] = serie.where(~mascara, relleno)
