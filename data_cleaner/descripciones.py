@@ -875,8 +875,13 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
         if encontrado:
             ganador, resultado = encontrado
 
+    # «num_reclamos», «nro_visitas»: un número seguido de un sustantivo en plural es un conteo,
+    # no un identificador («numero_poliza», en singular, sí lo es).
+    conteo_plural = tipo in ("Entero", "Decimal") and any(t in ("num", "numero", "nro") for t in tokens) and any(
+        t.endswith("s") and len(t) > 3 and not t.endswith(("ss", "us", "is")) for t in tokens)
+
     # Identificadores.
-    if resultado is None:
+    if resultado is None and not conteo_plural:
         resultado = _descripcion_identificador(tokens, texto, rol, es_llave)
 
     # «nota» es un puntaje si es numérica y un comentario si es texto.
@@ -895,7 +900,12 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
             else:
                 for patron, frase in _CALENDARIO:
                     if patron.search(texto_norm):
-                        resultado = frase
+                        calificador = [t for t in sin_relleno if t not in palabras_calendario]
+                        if calificador:  # «vehicle_year», «birth_year»: año de otra cosa, no del registro
+                            resultado = (f"{frase.split()[0]} de «{' '.join(calificador)}»; "
+                                         "confirmar a qué se refiere.")
+                        else:
+                            resultado = frase
                         break
 
     # Fechas.
