@@ -249,7 +249,8 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
         es_llave = (col in llaves) if llaves is not None else rol == "id"
         descripcion = describir_campo(col, rol, tipo, tratamiento,
                                       (origenes or {}).get(col, ""), es_llave=es_llave,
-                                      serie=serie)  # el contenido ayuda cuando el nombre no dice nada
+                                      serie=serie,  # el contenido ayuda cuando el nombre no dice nada
+                                      contexto=[str(c) for c in df.columns])  # y las columnas vecinas
         if rol == "coordenada" and tipo_coordenada(col):
             descripcion = f"{tipo_coordenada(col).capitalize()} en grados decimales."
         fila = {
