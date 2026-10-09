@@ -769,6 +769,28 @@ def limpieza_guiada_cmd(
     longitud: Optional[str] = typer.Option(None, "--longitud", help="Columna de longitud ('' = ninguna)."),
     rango_latitud: Optional[str] = typer.Option(None, "--rango-latitud", help="minimo,maximo esperado."),
     rango_longitud: Optional[str] = typer.Option(None, "--rango-longitud", help="minimo,maximo esperado."),
+    fechas: Optional[str] = typer.Option(
+        None, "--fechas", help="Columnas de fecha a dejar en un solo formato (coma-separadas). "
+        "Sin esta opción se eligen solas; '' = ninguna."),
+    formato_fecha: str = typer.Option("%Y-%m-%d", "--formato-fecha", help="Formato de salida de las fechas (strftime)."),
+    dia_primero: bool = typer.Option(
+        True, "--dia-primero/--mes-primero",
+        help="Cómo leer 05/06/2025 cuando no hay pistas: día/mes/año (por defecto) o mes/día/año."),
+    palabra: str = typer.Option(
+        LG.TEXTO_NO_INDICA, "--palabra",
+        help="Palabra con la que se rellenan los nulos válidos (texto, correos, teléfonos, fechas...)."),
+    unir_equivalentes: bool = typer.Option(
+        True, "--unir-equivalentes/--no-unir-equivalentes",
+        help="Unir valores que significan lo mismo (m / male / masculino -> M; si / yes -> Sí)."),
+    cierre: bool = typer.Option(
+        True, "--cierre/--no-cierre", help="Al final, rellenar los nulos válidos que sobren (cierre sin vacíos)."),
+    numeros_cierre: str = typer.Option(
+        "mediana", "--numeros-cierre", help="Qué poner en los números que sigan vacíos: mediana, cero o palabra "
+        "(con palabra la columna pasa a texto)."),
+    fechas_cierre: bool = typer.Option(
+        True, "--fechas-cierre/--no-fechas-cierre", help="Incluir las fechas en el cierre sin vacíos."),
+    proyecto: str = typer.Option("", "--proyecto", help="Nombre del proyecto, para el documento de alcance."),
+    autor: str = typer.Option("", "--autor", help="Autor(a), para el documento de alcance."),
     regla: List[str] = typer.Option(
         [], "--regla",
         help="Regla de nulos por columna: columna=regla[:parametro]. Sin esta opción se usa la "
@@ -789,20 +811,25 @@ def limpieza_guiada_cmd(
             columnas_texto=_lista_o_none(columnas_texto), minusculas=minusculas,
             espacios=espacios, comillas=comillas, numericas=_lista_o_none(numericas),
             latitud=latitud, longitud=longitud, rango_latitud=_rango(rango_latitud, "--rango-latitud"),
-            rango_longitud=_rango(rango_longitud, "--rango-longitud"))
+            rango_longitud=_rango(rango_longitud, "--rango-longitud"), fechas=_lista_o_none(fechas),
+            formato_fecha=formato_fecha, dia_primero=dia_primero)
         diagnostico = LG.diagnostico_nulos(df, config["tokens"]).reset_index()
         _imprimir_dataframe(diagnostico, "Diagnóstico de nulos y vacíos")
         ajustes = FG.parsear_ajustes_reglas(regla)
 
         if solo_diagnostico:
             df_base, _ = LG.ejecutar_pasos_globales(df, config)
-            sugeridas = LG.tabla_de_reglas(df_base, config["tokens"])
+            sugeridas = LG.tabla_de_reglas(df_base, config["tokens"], palabra.strip() or LG.TEXTO_NO_INDICA)
             _imprimir_dataframe(sugeridas, "Reglas sugeridas (use --regla para cambiarlas)")
             raise typer.Exit(code=0)
 
-        resultado = FG.ejecutar_limpieza_guiada(df, config, ajustes, nombre_archivo=input, hoja=hoja)
+        resultado = FG.ejecutar_limpieza_guiada(
+            df, config, ajustes, nombre_archivo=input, hoja=hoja, palabra=palabra, unir_equivalentes=unir_equivalentes,
+            asegurar_sin_vacios=cierre, numeros_cierre=numeros_cierre, incluir_fechas_cierre=fechas_cierre)
         for paso in resultado.pasos:
             console.print(f"• [bold]{paso.titulo}[/bold]: {paso.detalle}")
+        for aviso in resultado.avisos:
+            console.print(f"[yellow]⚠ {aviso}[/yellow]")
         auditoria = resultado.auditoria
         console.print(
             f"\nFilas: {auditoria['filas_antes']} → {auditoria['filas_despues']} · "
@@ -810,7 +837,8 @@ def limpieza_guiada_cmd(
             f"Duplicados: {auditoria['duplicados_despues']}")
         if len(auditoria["nulos_restantes"]):
             _imprimir_dataframe(auditoria["nulos_restantes"].reset_index(), "Nulos que quedan")
-        _imprimir_rutas(FG.guardar_limpieza_guiada(resultado, outdir, formato_salida))
+        _imprimir_rutas(FG.guardar_limpieza_guiada(resultado, outdir, formato_salida,
+                                                   textos_alcance={"proyecto": proyecto, "autor": autor}))
 
 
 @app.command("merge")
@@ -838,6 +866,8 @@ def merge_cmd(
     outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
     formato_salida: str = typer.Option("csv", "--formato-salida", help="csv, xlsx o ambos."),
     solo_diagnostico: bool = typer.Option(False, "--solo-diagnostico", help="Solo revisa las llaves, sin unir."),
+    proyecto: str = typer.Option("", "--proyecto", help="Nombre del proyecto, para el documento de alcance."),
+    autor: str = typer.Option("", "--autor", help="Autor(a), para el documento de alcance."),
 ):
     """Une dos tablas (A manda, B enriquece), revisa las llaves antes de unir y
     audita el resultado. Guarda la tabla unida, un script de pandas y el
@@ -874,7 +904,8 @@ def merge_cmd(
             console.print("Conteo del cruce: " + " · ".join(f"{k}: {v}" for k, v in aud["conteo_merge"].items()))
         for aviso in aud["advertencias"]:
             console.print(f"[yellow]⚠ {aviso}[/yellow]")
-        _imprimir_rutas(FG.guardar_merge(resultado, outdir, formato=formato_salida))
+        _imprimir_rutas(FG.guardar_merge(resultado, outdir, formato=formato_salida,
+                                         textos_alcance={"proyecto": proyecto, "autor": autor}))
 
 
 @app.command("diccionario")
@@ -883,19 +914,22 @@ def diccionario_cmd(
     hoja: Optional[str] = typer.Option(None, "--hoja", help="Hoja del libro Excel (si tiene varias)."),
     nombre: Optional[str] = typer.Option(None, "--nombre", help="Nombre de la tabla maestra (por defecto, el del archivo)."),
     outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
+    proyecto: str = typer.Option("", "--proyecto", help="Nombre del proyecto, para el documento de alcance."),
+    autor: str = typer.Option("", "--autor", help="Autor(a), para el documento de alcance."),
 ):
-    """Diccionario de datos en Excel (hojas Resumen y Diccionario): tipo,
-    completitud, valores únicos y rango salen de los datos; la descripción y la
-    justificación de negocio quedan resaltadas para completarlas."""
+    """Diccionario de datos en sus tres salidas: Excel básico (Resumen y Diccionario), diccionario técnico
+    (diccionario_datos.xlsx, una fila por campo con tipos y límites) y documento de alcance en Word (necesita
+    python-docx). Tipo, completitud, valores únicos y rango salen de los datos; las descripciones se redactan
+    solas y se pueden reescribir; la justificación de negocio queda resaltada para completarla."""
     with _errores_de_usuario():
         df = FG.leer_tabla_guiada(input, hoja=hoja)
         tabla = nombre or FG.nombre_base(input)
-        _, _, excel = FG.generar_diccionario(df, tabla, fuentes=[input])
-        os.makedirs(outdir, exist_ok=True)
-        ruta = os.path.join(outdir, f"diccionario_{FG.nombre_base(tabla)}.xlsx")
-        with open(ruta, "wb") as archivo:
-            archivo.write(excel)
-        _imprimir_rutas({"diccionario": ruta})
+        rutas = FG.guardar_diccionario(df, outdir, tabla, fuentes=[input],
+                                       textos_alcance={"proyecto": proyecto, "autor": autor})
+        if "documento_alcance" not in rutas:
+            console.print("[yellow]⚠ No se generó el documento de alcance: instale python-docx "
+                          "(pip install python-docx).[/yellow]")
+        _imprimir_rutas(rutas)
 
 
 if __name__ == "__main__":
