@@ -201,12 +201,35 @@ def _nombre_base(nombre: str) -> str:
     return re.sub(r"[^\w\-]+", "_", base).strip("_") or "tabla"  # sin espacios ni símbolos
 
 
+@st.cache_data(show_spinner=False, max_entries=4)
+def _bytes_cacheado(_df, firma, formato):
+    return tabla_a_bytes(_df, formato)
+
+
+# Hasta este tamaño (celdas) el Excel se arma solo; arriba de eso solo cuando se pide, porque armar
+# un .xlsx de millones de celdas tarda casi un minuto y se repetiría en cada clic de la pantalla.
+CELDAS_EXCEL_AUTOMATICO = 200_000
+
+
 def _botones_descarga(df: pd.DataFrame, base: str, script: str, prefijo: str) -> None:
     c1, c2, c3 = st.columns(3)
-    c1.download_button("⬇️ CSV", tabla_a_bytes(df, "csv"), file_name=f"{base}.csv",
+    firma = _firma(df)
+    c1.download_button("⬇️ CSV", _bytes_cacheado(df, firma, "csv"), file_name=f"{base}.csv",
                        mime="text/csv", key=f"{prefijo}_dl_csv")
-    c2.download_button("⬇️ Excel (.xlsx)", tabla_a_bytes(df, "xlsx"), file_name=f"{base}.xlsx",
-                       mime=MIME_XLSX, key=f"{prefijo}_dl_xlsx")
+    if df.size <= CELDAS_EXCEL_AUTOMATICO:
+        c2.download_button("⬇️ Excel (.xlsx)", _bytes_cacheado(df, firma, "xlsx"), file_name=f"{base}.xlsx",
+                           mime=MIME_XLSX, key=f"{prefijo}_dl_xlsx")
+    else:
+        llave_bytes, llave_firma = f"{prefijo}_xlsx_bytes", f"{prefijo}_xlsx_firma"
+        if st.session_state.get(llave_firma) == firma:
+            c2.download_button("⬇️ Excel (.xlsx)", st.session_state[llave_bytes], file_name=f"{base}.xlsx",
+                               mime=MIME_XLSX, key=f"{prefijo}_dl_xlsx")
+        elif c2.button("📄 Preparar Excel (.xlsx)", key=f"{prefijo}_prep_xlsx",
+                       help="La tabla es grande: armar el Excel tarda, por eso solo se hace si lo pide."):
+            with st.spinner("Armando el Excel (puede tardar un poco)…"):
+                st.session_state[llave_bytes] = _bytes_cacheado(df, firma, "xlsx")
+                st.session_state[llave_firma] = firma
+            st.rerun()
     c3.download_button("⬇️ Script Python", script, file_name=f"{base}_script.py",
                        mime="text/x-python", key=f"{prefijo}_dl_py")
 
