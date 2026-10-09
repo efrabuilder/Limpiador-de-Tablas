@@ -47,8 +47,19 @@ def normalizar_nombre(nombre) -> str:
     texto = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(nombre))  # camelCase
     texto = _sin_acentos(texto).lower()
     texto = re.sub(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])", " ", texto)  # apellido1 -> apellido 1
-    texto = re.sub(r"[^a-z0-9]+", " ", texto)
-    return texto.strip()
+    texto = re.sub(r"[^a-z0-9]+", " ", texto).strip()
+    for patron, union in _UNIR_TOKENS:  # m3, co2, pm25 no son «m 3», «co 2», «pm 2 5»
+        texto = patron.sub(union, texto)
+    for patron, union in _UNIR_VENTANA:  # «num_visitas_12m» -> «num visitas 12 meses»
+        texto = patron.sub(union, texto)
+    return texto
+
+
+_UNIR_TOKENS = ((re.compile(r"\b(m|km|cm|mm) (2|3)\b"), r"\1\2"), (re.compile(r"\bco 2\b"), "co2"),
+                (re.compile(r"\bh 2 o\b"), "h2o"), (re.compile(r"\bpm 2 5\b"), "pm25"),
+                (re.compile(r"\bpm 10\b"), "pm10"), (re.compile(r"\bo 2\b"), "o2"))
+_UNIR_VENTANA = ((re.compile(r"\b(\d+) m\b"), r"\1 meses"), (re.compile(r"\b(\d+) d\b"), r"\1 dias"),
+                 (re.compile(r"\b(\d+) a\b"), r"\1 anios"))
 
 
 def nombre_legible(nombre) -> str:
@@ -91,6 +102,7 @@ _ABREVIATURAS: Dict[str, str] = {
     "obs": "observacion", "observ": "observacion", "coment": "comentario", "comm": "comentario",
     "pwd": "contrasena", "passwd": "contrasena", "pass": "contrasena", "password": "contrasena",
     "sts": "status", "stat": "status",
+    "vol": "volumen", "ult": "ultimo", "rel": "relativa", "bat": "bateria", "ponder": "ponderado",
 }
 
 # Si «desc» viene con alguna de estas palabras se entiende como descuento y no como descripción.
@@ -189,9 +201,10 @@ _ENTIDADES: List[Tuple[_Patron, str]] = [
     (_p("reserva", "booking", "cita", "appointment", "vuelo", "flight"), "reserva o cita"),
     (_p("lote", "batch"), "lote"),
     (_p("caso", "expediente", "case"), "caso"),
+    (_p("dispositivo", "device", "equipo", "sensor", "maquina"), "dispositivo"),
 ]
 _FEMENINOS = {"sucursal", "factura", "venta", "cuenta", "tarjeta", "póliza o contrato", "campaña",
-              "reserva o cita", "transacción"}
+              "reserva o cita", "transacción", "póliza"}
 
 _GLOSARIO: List[Tuple[_Patron, str]] = [
     # --- contraseñas y datos sensibles (primero, para no confundirlos con claves de enlace)
@@ -332,7 +345,7 @@ _GLOSARIO: List[Tuple[_Patron, str]] = [
     (_p("pagado", "paid", "pago", "payment"), "Pago realizado o registrado ({n})."),
     (_p("total", "grand total", "importe total", "suma"), "Total del registro ({n}); confirmar qué conceptos suma y su moneda."),
     (_p("monto", "importe", "valor", "amount", "saldo", "balance", "value", "cobro", "recaudo"),
-     "Monto en moneda del campo {n}; requiere un período definido para compararse."),
+     "Monto monetario ({n}); requiere un período definido para compararse."),
     # --- productos e inventario
     (_p("marca", "brand"), "Marca del producto."),
     (_p("modelo", "model"), "Modelo del producto."),
@@ -375,7 +388,7 @@ _GLOSARIO: List[Tuple[_Patron, str]] = [
     (_p("curso", "asignatura", "materia", "course", "carrera", "programa", "escuela", "universidad", "colegio",
         "school", "ciclo", "grado", "grade", "creditos", "credits"),
      "Dato académico ({n})."),
-    (_p("campana", "campaign", "utm", "fuente", "source", "medio", "medium", "referido", "referrer", "origen"),
+    (_p("campana", "campaign", "utm", "fuente", "source", "medio", "medium", "referido", "referrer"),
      "Origen o campaña que generó el registro ({n})."),
     (_p("clics", "clicks", "click", "impresiones", "impressions", "visitas", "visits", "sesiones", "sessions",
         "vistas", "views", "descargas", "downloads", "likes", "seguidores", "followers", "reproducciones", "plays"),
@@ -387,7 +400,7 @@ _GLOSARIO: List[Tuple[_Patron, str]] = [
      "Dispositivo o plataforma desde la que se generó el registro ({n})."),
     (_p("turno", "shift", "jornada", "horas extra", "horas trabajadas", "vacaciones", "ausencia", "asistencia",
         "attendance"),
-     "Dato de jornada laboral ({n}); confirmar su unidad (horas o días)."),
+     "Dato de jornada o asistencia ({n}); confirmar su unidad (horas, días o porcentaje)."),
     # --- medidas
     (_p("porcentaje", "percent", "percentage", "tasa", "ratio", "proporcion", "indice", "index", "participacion",
         "share"),
@@ -494,6 +507,10 @@ _UNIDADES: List[Tuple[_Patron, str]] = [
     (_p("usd", "dolares"), "dólares (USD)"), (_p("eur", "euros"), "euros"), (_p("crc", "colones"), "colones (CRC)"),
     (_p("mxn"), "pesos mexicanos"), (_p("pct"), "porcentaje"),
     (_p("months", "meses"), "meses"), (_p("days", "dias"), "días"), (_p("years", "anios"), "años"),
+    (_p("ppm"), "partes por millón (ppm)"), (_p("mgdl"), "mg/dL"), (_p("mg"), "miligramos"),
+    (_p("mmhg"), "mmHg"), (_p("bpm"), "latidos por minuto"), (_p("kwh"), "kilovatios-hora"),
+    (_p("kw"), "kilovatios"), (_p("gb"), "gigabytes"), (_p("mb"), "megabytes"), (_p("hz"), "hercios"),
+    (_p("rpm"), "revoluciones por minuto"), (_p("cop"), "pesos colombianos"), (_p("gbp"), "libras esterlinas"),
 ]
 
 
@@ -836,8 +853,8 @@ def _muestra(serie: Optional[pd.Series], ejemplos: str = "", maximo: int = 300) 
     """Valores de ejemplo como texto, sin nulos. Con serie se toman de los datos; si solo se tiene el texto
     de «Rango o ejemplos» del diccionario, se usan esos ejemplos."""
     if serie is not None:
-        texto = serie.dropna().astype(str).str.strip()
-        return [v for v in texto.head(maximo * 4).tolist() if v.lower() not in _NULOS_TEXTO][:maximo]
+        texto = serie.dropna().head(maximo * 4).astype(str).str.strip()
+        return [v for v in texto.tolist() if v.lower() not in _NULOS_TEXTO][:maximo]
     limpio = re.sub(r"\(\+\d+ más\)\s*$", "", re.sub(r"^Ej\.:\s*", "", str(ejemplos or ""))).strip()
     return [v.strip() for v in limpio.split(",") if v.strip() and v.strip().lower() not in _NULOS_TEXTO]
 
@@ -868,7 +885,7 @@ def _pista_contenido(valores: Sequence[str], tipo: str, n: str, unicos: Optional
         return f"Monto monetario de {n}, guardado con símbolo de moneda; conviene convertirlo a número."
     bajos = {v.lower() for v in valores}
     if 2 <= len(bajos) <= 3 and bajos <= _BOOLEANOS and tipo != "Fecha":
-        return f"Parece un indicador Sí/No de {n}."
+        return f"Indicador Sí/No de {n}: señala si el registro cumple esa condición."
     if len(bajos) <= 4 and bajos <= _SEXOS and len(bajos) >= 2:
         return "Parece el sexo o género de la persona."
     if len(bajos) <= 8 and len(bajos) >= 2 and bajos <= _PERIODICIDADES:
@@ -892,11 +909,532 @@ def _pista_contenido(valores: Sequence[str], tipo: str, n: str, unicos: Optional
         largo = sum(len(v) for v in valores) / len(valores)
         if largo > 60:
             return f"Texto libre extenso de {n}."
+    if tipo == "Categoría" and serie is not None:
+        return f"Categoría de {n}."
     if tipo == "Categoría":
         frecuentes = pd.Series(list(valores)).value_counts().index.tolist()[:4]
         corto = ", ".join(v if len(v) <= 25 else v[:22] + "..." for v in frecuentes)
         return f"Categoría de {n} con valores como: {corto}."
     return None
+
+
+# --------------------------------------------------------------------------
+# Tildes, dominio de la tabla y glosarios por rubro
+# --------------------------------------------------------------------------
+
+# Palabras del nombre (ya sin tildes) -> con tildes, solo para que el texto se lea bien.
+_ACENTOS: Dict[str, str] = {
+    "comision": "comisión", "operacion": "operación", "transaccion": "transacción", "direccion": "dirección",
+    "descripcion": "descripción", "categoria": "categoría", "informacion": "información", "poblacion": "población",
+    "evaluacion": "evaluación", "antiguedad": "antigüedad", "dias": "días", "dia": "día", "anio": "año",
+    "anios": "años", "ano": "año", "anos": "años", "telefono": "teléfono", "codigo": "código", "numero": "número",
+    "ubicacion": "ubicación", "cancelacion": "cancelación", "devolucion": "devolución",
+    "facturacion": "facturación", "desempeno": "desempeño", "poliza": "póliza", "razon": "razón",
+    "limite": "límite", "tamano": "tamaño", "area": "área", "pais": "país", "matricula": "matrícula",
+    "cedula": "cédula", "credito": "crédito", "creditos": "créditos", "debito": "débito", "interes": "interés",
+    "prestamo": "préstamo", "renovacion": "renovación", "liquidacion": "liquidación",
+    "produccion": "producción", "medicion": "medición", "presion": "presión", "bateria": "batería",
+    "diagnostico": "diagnóstico", "atencion": "atención", "educacion": "educación", "estacion": "estación",
+    "region": "región", "canton": "cantón", "almacen": "almacén", "ultimo": "último", "ultima": "última",
+    "gestion": "gestión", "sesion": "sesión", "version": "versión", "cardiaca": "cardíaca",
+    "sistolica": "sistólica", "diastolica": "diastólica", "dioxido": "dióxido", "academico": "académico",
+    "transito": "tránsito", "envio": "envío", "periodo": "período", "contrasena": "contraseña",
+    "campana": "campaña", "facturacion ": "facturación", "inscripcion": "inscripción", "ocupacion": "ocupación",
+    "solicitud": "solicitud", "garantia": "garantía", "politica": "política", "compania": "compañía",
+    "marca": "marca", "genero": "género", "edad": "edad", "indice": "índice", "maximo": "máximo",
+    "minimo": "mínimo", "promedio": "promedio", "pronostico": "pronóstico", "tecnico": "técnico",
+    "medico": "médico", "clinica": "clínica", "farmacia": "farmacia", "vehiculo": "vehículo",
+}
+
+
+def _con_tildes(texto: str) -> str:
+    """'dias vacaciones pendientes' -> 'días vacaciones pendientes' (solo palabras conocidas)."""
+    return " ".join(_ACENTOS.get(t, t) for t in str(texto).split())
+
+
+# Rubro de la tabla según el conjunto de nombres de columna. Sirve para leer palabras ambiguas
+# («origen», «area», «fecha ingreso», «asistencia») con el sentido que tienen en esa tabla.
+_DOMINIOS: Dict[str, frozenset] = {
+    "rrhh": frozenset({"empleado", "salario", "sueldo", "vacaciones", "puesto", "cargo", "contrato", "jefe",
+                       "teletrabajo", "extra", "evaluacion", "desempeno", "planilla", "employee", "salary",
+                       "ingreso", "contratacion", "ausentismo", "turno", "jornada", "colaborador", "hire"}),
+    "logistica": frozenset({"guia", "flete", "envio", "despacho", "transito", "conductor", "chofer", "placa",
+                            "origen", "destino", "peso", "volumen", "entrega", "entregado", "transportista",
+                            "carrier", "freight", "shipment", "ruta", "tracking", "shipping", "ship"}),
+    "salud": frozenset({"paciente", "imc", "presion", "glucosa", "consulta", "diagnostico", "fumador", "examen",
+                        "medico", "tratamiento", "dosis", "sintoma", "hospital", "colesterol", "patient",
+                        "sistolica", "diastolica", "bmi"}),
+    "educacion": frozenset({"estudiante", "carne", "creditos", "beca", "matricula", "curso", "nota", "promedio",
+                            "sede", "asistencia", "docente", "carrera", "student", "grade", "ponderado",
+                            "aprobados", "calificacion"}),
+    "finanzas": frozenset({"cuenta", "saldo", "transaccion", "txn", "monto", "comision", "canal", "fraude",
+                           "mcc", "tarjeta", "prestamo", "interes", "credito", "banco", "operacion", "fraud"}),
+    "seguros": frozenset({"poliza", "prima", "reclamo", "siniestro", "asegurado", "cobertura", "deducible",
+                          "policy", "claim", "premium", "insured", "adjuster", "broker", "vigencia"}),
+    "ventas": frozenset({"venta", "pedido", "factura", "cliente", "producto", "precio", "cantidad", "descuento",
+                         "sucursal", "orden", "order", "customer", "unit", "qty", "discount", "stock",
+                         "inventario", "existencias"}),
+    "sensores": frozenset({"sensor", "temperatura", "temp", "humedad", "co2", "bateria", "lectura", "dispositivo",
+                           "voltaje", "ppm", "humidity", "battery", "reading", "celsius"}),
+    "marketing": frozenset({"campana", "clic", "click", "impresiones", "utm", "ctr", "cpc", "conversion", "lead",
+                            "audiencia", "segmento", "campaign", "impressions"}),
+}
+
+
+@lru_cache(maxsize=64)
+def _dominio(contexto: Tuple[str, ...]) -> Optional[str]:
+    """Rubro de la tabla (rrhh, logistica, salud, educacion...) si las columnas apuntan a uno solo."""
+    palabras = set()
+    for c in contexto:
+        for t in _expandir_abreviaturas(normalizar_nombre(c).split()):
+            palabras.add(t)
+            palabras.add(_singular_token(t))
+    puntajes = {d: len(palabras & ws) for d, ws in _DOMINIOS.items()}
+    mejor = max(puntajes.values()) if puntajes else 0
+    if mejor < 2:
+        return None
+    ganadores = [d for d, p in puntajes.items() if p == mejor]
+    return ganadores[0] if len(ganadores) == 1 else None
+
+
+# Frases con sentido propio (se buscan antes que el glosario general): (patrón, texto, rubros, tipos).
+# `rubros` / `tipos` = None significa «en cualquier tabla» / «con cualquier tipo de dato».
+_Especifico = Tuple[_Patron, str, Optional[Tuple[str, ...]], Optional[Tuple[str, ...]]]
+
+
+def _e(palabras: Sequence[str], texto: str, rubros: Optional[Tuple[str, ...]] = None,
+       tipos: Optional[Tuple[str, ...]] = None) -> _Especifico:
+    return (_Patron(*palabras), texto, rubros, tipos)
+
+
+_ESPECIFICOS: List[_Especifico] = [
+    # --- recursos humanos
+    _e(("salario base", "sueldo base", "base salary", "salary base"),
+       "Salario base de la persona, sin bonos ni deducciones; confirmar la moneda y si es mensual, quincenal o anual."),
+    _e(("fecha ingreso", "fecha contratacion", "fecha alta", "hire date"),
+       "Fecha en que la persona ingresó a la organización; sirve para calcular su antigüedad.", ("rrhh",)),
+    _e(("vacaciones pendientes", "dias vacaciones", "vacation days", "dias libres"),
+       "Días de vacaciones que la persona aún no ha disfrutado, a la fecha de corte de la tabla."),
+    _e(("horas extra", "hora extra", "overtime"),
+       "Horas extra trabajadas en el período; base para calcular el pago de horas extraordinarias."),
+    _e(("jefe directo", "jefatura", "supervisor directo", "jefe inmediato"),
+       "Jefatura directa de la persona (quien la supervisa)."),
+    _e(("evaluacion desempeno", "calificacion desempeno", "performance review", "performance rating", "desempeno"),
+       "Resultado de la evaluación de desempeño de la persona; su escala debe confirmarse."),
+    _e(("ausentismo", "absentismo", "absenteeism"),
+       "Ausencias de la persona en el período; confirmar si se miden en días u horas."),
+    # --- logística y envíos
+    _e(("tarifa flete", "costo flete", "costo envio", "shipping cost", "freight cost", "flete"),
+       "Costo de transporte (flete) del envío; confirmar la moneda."),
+    _e(("dias transito", "tiempo transito", "transit days", "transit time"),
+       "Tiempo que tarda el envío en llegar a su destino (tránsito)."),
+    _e(("entregado a tiempo", "a tiempo", "on time", "puntual", "entrega a tiempo"),
+       "Indica si la entrega se hizo dentro del plazo comprometido."),
+    _e(("fecha despacho", "dispatch date", "ship date", "shipped date", "fecha salida"),
+       "Fecha en que el envío salió de su origen (despacho)."),
+    _e(("ship city", "shipping city"), "Ciudad de destino del envío."),
+    _e(("ship country", "shipping country"), "País de destino del envío."),
+    _e(("ship region", "ship state"), "Región o estado de destino del envío."),
+    _e(("ship postal code", "ship zip"), "Código postal de destino del envío; se conserva como texto."),
+    _e(("ship address",), "Dirección de entrega del envío."),
+    _e(("ship name",), "Nombre de la persona o empresa que recibe el envío."),
+    _e(("ship via", "shipper"), "Empresa transportista que realiza el envío."),
+    # --- salud
+    _e(("presion sistolica", "systolic"),
+       "Presión arterial sistólica (la máxima durante el latido), normalmente en mmHg."),
+    _e(("presion diastolica", "diastolic"),
+       "Presión arterial diastólica (la mínima entre latidos), normalmente en mmHg."),
+    _e(("presion arterial", "blood pressure"),
+       "Presión arterial; confirmar si es sistólica o diastólica y su unidad (mmHg)."),
+    _e(("glucosa", "glucose", "glicemia", "glucemia"),
+       "Nivel de glucosa en sangre; confirmar la unidad (mg/dL o mmol/L) y si se midió en ayunas."),
+    _e(("colesterol", "cholesterol"),
+       "Nivel de colesterol en sangre; confirmar la unidad y el tipo (total, LDL o HDL)."),
+    _e(("frecuencia cardiaca", "pulso", "heart rate"), "Frecuencia cardíaca, en latidos por minuto."),
+    _e(("fecha consulta", "fecha cita", "visit date", "fecha atencion"),
+       "Fecha de la consulta o atención del paciente.", ("salud",)),
+    _e(("resultado examen", "resultado laboratorio", "lab result", "test result", "resultado prueba"),
+       "Resultado del examen o prueba realizada a la persona; sus valores posibles deben tener un significado definido."),
+    # --- educación
+    _e(("creditos aprobados", "creditos cursados", "creditos acumulados"),
+       "Créditos académicos aprobados (acumulados) por la persona estudiante."),
+    _e(("creditos matriculados",), "Créditos académicos en los que la persona se matriculó en el período."),
+    _e(("promedio ponderado", "promedio academico", "promedio general", "gpa", "promedio notas"),
+       "Promedio ponderado de las calificaciones de la persona estudiante; su escala debe confirmarse."),
+    _e(("ultimo matricula", "ultima matricula", "last enrollment"),
+       "Último período lectivo en que la persona estudiante se matriculó."),
+    _e(("nota final", "calificacion final", "final grade"),
+       "Calificación final obtenida por la persona estudiante; su escala debe confirmarse."),
+    _e(("asistencia", "attendance"),
+       "Asistencia a clases o actividades; confirmar si se mide en porcentaje, días o sesiones.", ("educacion",)),
+    # --- finanzas
+    _e(("cuenta origen",), "Cuenta desde la que sale la operación; dato financiero sensible, conviene enmascararlo "
+                           "al compartir."),
+    _e(("cuenta destino",), "Cuenta que recibe la operación; dato financiero sensible, conviene enmascararlo "
+                            "al compartir."),
+    _e(("saldo posterior", "saldo despues", "balance after"), "Saldo de la cuenta después de aplicar la operación."),
+    _e(("saldo anterior", "saldo previo", "balance before", "saldo inicial"),
+       "Saldo de la cuenta antes de aplicar la operación."),
+    _e(("tipo cambio", "exchange rate", "tasa cambio"),
+       "Tipo de cambio aplicado entre monedas; confirmar el par de monedas y la fecha de la tasa."),
+    # --- sensores y mediciones
+    _e(("humedad relativa", "humidity"), "Humedad relativa del aire, en porcentaje."),
+    _e(("co2", "dioxido carbono"),
+       "Concentración de dióxido de carbono (CO₂) en el aire, normalmente en partes por millón (ppm)."),
+    _e(("temp c", "temperatura c", "celsius"), "Temperatura en grados Celsius (°C)."),
+    _e(("temp f", "temperatura f", "fahrenheit"), "Temperatura en grados Fahrenheit (°F)."),
+    _e(("lectura timestamp", "fecha lectura", "reading time"), "Fecha y hora en que se tomó la lectura."),
+    # --- inventario y comercio
+    _e(("reorder level", "reorder point", "punto reorden", "nivel reorden"),
+       "Nivel de existencias a partir del cual conviene reabastecer el producto (punto de reorden)."),
+    _e(("units on order", "unidades pedidas"),
+       "Unidades del producto ya pedidas al proveedor y aún no recibidas."),
+]
+
+# Nombres de una sola palabra que, sin contexto, el glosario describe mal o a medias. Solo coinciden cuando el
+# nombre completo es esa palabra («sensor» sí, «sensor_id» no): [(texto, rubros, tipos)].
+_EXACTOS: Dict[str, List[Tuple[str, Optional[Tuple[str, ...]], Optional[Tuple[str, ...]]]]] = {
+    "sensor": [("Sensor o equipo que genera la lectura.", None, None)],
+    "area": [("Área, departamento o unidad de la organización a la que pertenece el registro.", None,
+              ("Categoría", "Texto"))],
+    "origen": [("Lugar de origen del envío.", ("logistica",), None),
+               ("Fuente o canal de origen del registro (campaña, referido u otro).", ("marketing",), None),
+               ("Lugar, fuente o canal de origen del registro; confirmar cuál.", None, None)],
+    "destino": [("Lugar de destino del envío.", ("logistica",), None),
+                ("Lugar o punto al que se dirige el registro (ciudad, país, bodega u otro); confirmar cuál.",
+                 None, None)],
+    "canal": [("Canal por el que se origina o se realiza el registro (por ejemplo app, web, tienda o cajero).",
+               None, None)],
+    "sede": [("Sede, campus o local de la organización al que pertenece el registro.", None, None)],
+    "beca": [("Indica si la persona estudiante recibe beca.", None, None)],
+    "carne": [("Carné estudiantil: identifica a la persona estudiante; se conserva como texto.", None, None)],
+    "placa": [("Placa del vehículo; identifica al vehículo.", None, None)],
+    "conductor": [("Conductor asignado al envío o al vehículo.", None, None)],
+    "fumador": [("Indica si la persona fuma (hábito de salud). Dato de salud: restringir su acceso.", None, None)],
+    "teletrabajo": [("Modalidad de teletrabajo de la persona (si trabaja a distancia).", None, None)],
+    "bateria": [("Nivel de carga de la batería del dispositivo; confirmar si se expresa en porcentaje.",
+                 None, None)],
+    "freight": [("Costo de transporte (flete) del envío; confirmar la moneda.", None, None)],
+    "discontinued": [("Indica si el producto está descontinuado (ya no se vende).", None, None)],
+    "imc": [("Índice de masa corporal (peso en kg dividido entre la estatura en metros al cuadrado).", None, None)],
+    "bmi": [("Índice de masa corporal (peso en kg dividido entre la estatura en metros al cuadrado).", None, None)],
+    "mcc": [("Código de categoría del comercio (MCC): clasifica el giro del comercio donde se hizo la operación.",
+             None, None)],
+}
+
+
+def _filtro_ok(rubros, tipos, dominio, tipo) -> bool:
+    return (not rubros or dominio in rubros) and (not tipos or tipo in tipos)
+
+
+def _buscar_especifico(texto: str, compacto: str, texto_norm: str, dominio: Optional[str],
+                       tipo: str) -> Optional[str]:
+    """Descripción curada para frases con sentido propio o nombres de una sola palabra ambiguos."""
+    singular = " ".join(_singular_token(t) for t in texto_norm.split())
+    for clave in (texto_norm, singular):
+        for plantilla, rubros, tipos in _EXACTOS.get(clave, ()):
+            if _filtro_ok(rubros, tipos, dominio, tipo):
+                return plantilla
+    for patron, plantilla, rubros, tipos in _ESPECIFICOS:
+        if _filtro_ok(rubros, tipos, dominio, tipo) and patron.search(texto):
+            return plantilla
+    for patron, plantilla, rubros, tipos in _ESPECIFICOS:
+        if _filtro_ok(rubros, tipos, dominio, tipo) and patron.en_compacto(compacto):
+            return plantilla
+    return None
+
+
+# «tipo_contrato» -> «Tipo del contrato»: palabra de cabecera + entidad conocida (el orden del español).
+_CABEZAS_ES: Dict[str, str] = {
+    "tipo": "Tipo", "estado": "Estado", "motivo": "Motivo", "nombre": "Nombre", "descripcion": "Descripción",
+    "monto": "Monto", "valor": "Valor", "total": "Total", "saldo": "Saldo", "limite": "Límite",
+    "puntaje": "Puntaje", "tasa": "Tasa", "nivel": "Nivel", "categoria": "Categoría", "resultado": "Resultado",
+    "costo": "Costo", "precio": "Precio", "fecha": "Fecha", "clase": "Clase", "canal": "Canal",
+}
+_ARTICULO_PREFIJO = {"de", "del", "la", "el", "los", "las"}
+
+
+def _de_entidad(palabra: str, sustantivo: str) -> str:
+    """'del contrato', 'de la póliza', 'de la factura'."""
+    if sustantivo == "póliza o contrato":
+        femenino = palabra in ("poliza", "policy")
+    elif sustantivo == "reserva o cita":
+        femenino = True
+    else:
+        femenino = sustantivo in _FEMENINOS
+    return f"de la {_con_tildes(palabra)}" if femenino else f"del {_con_tildes(palabra)}"
+
+
+def _componer_es(tokens: Sequence[str]) -> Optional[str]:
+    """«nombre_cliente» -> «Nombre del cliente»; «estado_pedido» -> «Estado del pedido». Solo con una
+    palabra de cabecera conocida seguida de una entidad conocida; si no, None (mejor genérico que equivocado)."""
+    base = [t for t in tokens if t not in _ARTICULO_PREFIJO]
+    if len(base) != 2 or base[0] not in _CABEZAS_ES or base[0] == "fecha":
+        return None
+    palabra = _singular_token(base[1])
+    if palabra != base[1]:  # «total_ventas» (plural) es una suma de varias, no «de la venta»
+        return None
+    for patron, sustantivo in _ENTIDADES:
+        if patron.search(palabra) or patron.search(base[1]):
+            frase = f"{_CABEZAS_ES[base[0]]} {_de_entidad(palabra, sustantivo)}"
+            if base[0] == "nombre":
+                frase += " (texto libre; no sirve como llave)"
+            return frase + "."
+    return None
+
+
+_VERBO_PREFIJO = {"es": "es", "is": "es", "fue": "fue", "was": "fue", "esta": "está", "tiene": "tiene",
+                  "has": "tiene", "ha": "ha", "posee": "tiene", "hay": "tiene", "tuvo": "tuvo",
+                  "puede": "puede", "can": "puede", "aplica": "aplica"}
+
+
+# --------------------------------------------------------------------------
+# Lo que dicen los datos (ayuda a que ninguna descripción quede genérica)
+# --------------------------------------------------------------------------
+
+def _fmt(valor: float) -> str:
+    if pd.isna(valor):
+        return ""
+    valor = float(valor)
+    if valor.is_integer():
+        return f"{int(valor):,}"
+    return f"{valor:,.2f}".rstrip("0").rstrip(".")
+
+
+def _pct_txt(parte: float) -> str:
+    p = parte * 100
+    return "menos de 1 %" if 0 < p < 1 else f"{p:.0f} %"
+
+
+def _numeros(serie: pd.Series) -> pd.Series:
+    """Valores numéricos de la columna (también si vino como texto: «1,250.50», «₡ 3 000», «45 %»)."""
+    if pd.api.types.is_numeric_dtype(serie) and not pd.api.types.is_bool_dtype(serie):
+        return pd.to_numeric(serie, errors="coerce").dropna().astype(float)
+    texto = serie.dropna().astype(str).str.strip()
+    texto = texto[~texto.str.lower().isin(_NULOS_TEXTO)]
+    if texto.empty:
+        return pd.Series(dtype=float)
+    directo = pd.to_numeric(texto, errors="coerce")
+    if directo.notna().mean() >= 0.98:  # lo normal: ya son numeros escritos como texto
+        return directo.dropna().astype(float)
+    texto = texto.str.replace(r"[\s$€£¥₡%]", "", regex=True)
+    if texto.str.contains(r",\d{1,2}$").mean() > 0.5 and not texto.str.contains(r"\.").any():
+        texto = texto.str.replace(",", ".", regex=False)  # coma decimal
+    else:
+        texto = texto.str.replace(",", "", regex=False)
+    return pd.to_numeric(texto, errors="coerce").dropna().astype(float)
+
+
+def _binaria(serie: Optional[pd.Series]) -> Optional[Dict[str, int]]:
+    """{valor: filas} si la columna tiene exactamente dos valores de tipo Sí/No (Sí/No, 1/0, true/false...)."""
+    if serie is None or serie.nunique(dropna=True) > 6:  # descarte rapido: no es un Sí/No
+        return None
+    texto = serie.dropna().astype(str).str.strip()
+    texto = texto[~texto.str.lower().isin(_NULOS_TEXTO)]
+    if len(texto) < 2:
+        return None
+    texto = texto.str.replace(r"\.0$", "", regex=True)
+    conteo = texto.value_counts()
+    if len(conteo) != 2 or not {v.lower() for v in conteo.index} <= _BOOLEANOS:
+        return None
+    if {v.lower() for v in conteo.index} <= {"m", "f", "h", "x"}:  # M/F es sexo, no Sí/No
+        return None
+    return {str(k): int(v) for k, v in conteo.items()}
+
+
+def _frase_binaria(conteo: Dict[str, int]) -> str:
+    total = max(sum(conteo.values()), 1)
+    partes = ", ".join(f"«{k}» {_pct_txt(v / total)}" for k, v in conteo.items())
+    return f"Solo toma dos valores: {partes}."
+
+
+def _mascara(valor: str) -> str:
+    return "".join("9" if c.isdigit() else "A" if c.isupper() else "a" if c.isalpha() else c for c in valor)
+
+
+def _fechas_de(serie: pd.Series) -> pd.Series:
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        return serie.dropna().head(3000)
+    texto = serie.dropna().head(3000).astype(str).str.strip()
+    texto = texto[~texto.str.lower().isin(_NULOS_TEXTO)]
+    if texto.empty:
+        return pd.Series(dtype="datetime64[ns]")
+    latina = bool(texto.str.match(r"^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}").mean() > 0.5)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return pd.to_datetime(texto, errors="coerce", dayfirst=latina).dropna()
+
+
+def _tiene_hora(serie: Optional[pd.Series]) -> bool:
+    if serie is None:
+        return False
+    fechas = _fechas_de(serie.head(500))
+    return len(fechas) > 0 and bool((fechas.dt.normalize() != fechas).any())
+
+
+_NOMBRES_CON_NEGATIVOS = _p("temperatura", "temp", "saldo", "balance", "margen", "utilidad", "ganancia", "diferencia",
+                            "variacion", "cambio", "latitud", "longitud", "ajuste", "perdida", "profit", "delta")
+_NOMBRES_ESCALA = _p("evaluacion", "calificacion", "puntaje", "puntuacion", "score", "rating", "nivel", "level",
+                     "prioridad", "riesgo", "grado", "satisfaccion", "nota", "escala", "ranking", "estrellas",
+                     "severidad", "desempeno")
+_NOMBRES_FECHA_FUTURA = _p("vencimiento", "vence", "expiracion", "caducidad", "programada", "esperada", "estimada",
+                           "renovacion", "fin", "vigencia", "entrega", "proxima", "proximo", "cita", "reserva",
+                           "expiry", "expiration", "scheduled", "due")
+
+
+def _detalle_numerico(s: pd.Series, texto_norm: str, es_pct: bool, es_llave: bool) -> List[str]:
+    if s.empty:
+        return []
+    frases: List[str] = []
+    minimo, maximo, mediana = float(s.min()), float(s.max()), float(s.median())
+    distintos = int(s.nunique())
+    enteros = bool((s % 1 == 0).all())
+    if distintos == 1:
+        return [f"Tiene un único valor ({_fmt(minimo)}) en toda la tabla; no aporta variación."]
+    if es_llave:
+        repetidos = len(s) - distintos
+        frases.append("Es único en todas las filas, por lo que puede usarse como llave." if repetidos == 0 else
+                      f"Tiene {repetidos:,} valores repetidos entre {len(s):,} filas; revisar antes de usarlo como llave.")
+    if enteros and distintos == len(s) and len(s) >= 10:
+        orden = s.sort_values().diff().dropna()
+        if (orden == 1).all():
+            frases.append(f"Valores consecutivos de {_fmt(minimo)} a {_fmt(maximo)}, sin saltos ni repetidos, "
+                          "como un número de orden.")
+            return frases[-2:]
+    if es_pct:
+        if maximo <= 1 and minimo >= 0 and not enteros:
+            frases.append("Los valores van de 0 a 1: parecen fracciones y no puntos porcentuales (0 a 100); "
+                          "confirmar la escala.")
+        elif maximo <= 100 and minimo >= 0:
+            frases.append("Los valores van de 0 a 100: están en puntos porcentuales.")
+        elif maximo > 100:
+            frases.append(f"Hay valores sobre 100 (máximo {_fmt(maximo)}), fuera de lo esperable para un porcentaje; "
+                          "revisarlos.")
+    elif minimo >= 0 and maximo <= 1 and not enteros:
+        frases.append("Los valores están entre 0 y 1: se leen como proporción o fracción, no como porcentaje de 0 a 100.")
+    elif enteros and distintos <= 10 and maximo - minimo <= 12:
+        sugerencia = ("; se lee como escala u orden y no como una medida continua"
+                      if _NOMBRES_ESCALA.search(texto_norm) else "")
+        frases.append(f"Solo toma {distintos} valores enteros distintos (de {_fmt(minimo)} a {_fmt(maximo)})"
+                      f"{sugerencia}.")
+    if len(frases) < 2 and minimo < 0 and not _NOMBRES_CON_NEGATIVOS.search(texto_norm):
+        negativos = int((s < 0).sum())
+        frases.append(f"Incluye {negativos:,} valores negativos; confirmar si son válidos (ajustes, devoluciones) "
+                      "o errores de captura.")
+    if len(frases) < 2:
+        ceros = float((s == 0).mean())
+        if ceros >= 0.3 and distintos > 2:
+            frases.append(f"El {_pct_txt(ceros)} de los valores son 0; confirmar si 0 significa «ninguno» o «sin dato».")
+        elif len(s) >= 30 and mediana > 0 and maximo / mediana >= 10 and distintos > 10:
+            frases.append(f"Distribución muy asimétrica: el máximo ({_fmt(maximo)}) es {maximo / mediana:,.0f} veces "
+                          f"la mediana ({_fmt(mediana)}); revisar valores extremos antes de promediar.")
+    return frases
+
+
+def _detalle_fecha(serie: pd.Series, texto_norm: str) -> List[str]:
+    fechas = _fechas_de(serie)
+    if fechas.empty:
+        return []
+    frases: List[str] = []
+    if _tiene_hora(serie):
+        frases.append("Incluye la hora del día.")
+    if _p("nacimiento", "nac", "birth", "birthday", "cumpleanos", "dob").search(texto_norm):
+        edades = (pd.Timestamp.today() - fechas).dt.days / 365.25
+        frases.append(f"Corresponde a personas de {edades.min():.0f} a {edades.max():.0f} años.")
+        return frases
+    dias = fechas.dt.normalize().drop_duplicates().sort_values().diff().dropna().dt.days
+    if len(dias) >= 5:
+        moda = int(dias.mode().iloc[0])
+        if (dias == moda).mean() >= 0.6:
+            nombre = {1: "diaria", 7: "semanal"}.get(moda) or ("mensual" if 28 <= moda <= 31 else None)
+            if nombre:
+                frases.append(f"Los registros siguen una cadencia {nombre}.")
+    if len(frases) < 2:
+        futuras = int((fechas > pd.Timestamp.today() + pd.Timedelta(days=1)).sum())
+        antiguas = int((fechas < pd.Timestamp("1900-01-01")).sum())
+        if antiguas:
+            frases.append(f"Hay {antiguas:,} fechas anteriores a 1900; probablemente son errores de captura.")
+        elif futuras and not _NOMBRES_FECHA_FUTURA.search(texto_norm):
+            frases.append(f"Hay {futuras:,} fechas posteriores a hoy; confirmar si son válidas o errores de captura.")
+    return frases
+
+
+def _clave_variante(valor: str) -> str:
+    sin = "".join(c for c in unicodedata.normalize("NFD", valor) if unicodedata.category(c) != "Mn")
+    return re.sub(r"[^a-z0-9]+", " ", sin.lower()).strip()
+
+
+def _detalle_texto(serie: pd.Series, tipo: str, es_llave: bool, rol: str, filas_validas: int) -> List[str]:
+    texto = serie.dropna().astype(str).str.strip()
+    texto = texto[~texto.str.lower().isin(_NULOS_TEXTO)]
+    if texto.empty:
+        return []
+    frases: List[str] = []
+    conteo = texto.value_counts()
+    distintos = len(conteo)
+    if es_llave or rol == "id":
+        repetidos = len(texto) - distintos
+        frases.append("Es único en todas las filas, por lo que puede usarse como llave." if repetidos == 0 else
+                      f"Tiene {repetidos:,} valores repetidos entre {len(texto):,} filas; revisar antes de usarlo como llave.")
+    muestra = texto.head(2000)
+    if len(muestra) >= 5 and distintos > 3:
+        mascaras = muestra.map(_mascara)
+        top, veces = mascaras.value_counts().index[0], int(mascaras.value_counts().iloc[0])
+        if veces / len(muestra) >= 0.9 and 3 <= len(top) <= 20 and any(c.isdigit() for c in top) \
+                and "@" not in top and not _RE_FECHA_VALOR.match(muestra.iloc[0]):
+            if set(top) == {"9"}:
+                frases.append(f"Código numérico de {len(top)} dígitos en todas las filas.")
+            else:
+                leyenda = [t for c, t in (("A", "A = letra mayúscula"), ("a", "a = letra minúscula"),
+                                          ("9", "9 = dígito")) if c in top]
+                frases.append(f"Formato uniforme «{top}» ({', '.join(leyenda)}).")
+    if tipo in ("Categoría", "Texto", "Sí/No") and 2 <= distintos <= 20 and distintos / len(texto) <= 0.5:
+        claves = {_clave_variante(v) for v in conteo.index}
+        if len(claves) < distintos:
+            frases.append(f"Hay {distintos - len(claves)} variantes de escritura de valores equivalentes "
+                          "(mayúsculas, tildes o espacios); conviene unificarlas.")
+        total = int(conteo.sum())
+        primero, veces = conteo.index[0], int(conteo.iloc[0])
+        if veces / total >= 0.9 and distintos > 2:
+            frases.append(f"Predomina «{primero}» ({_pct_txt(veces / total)}); aporta poca variación.")
+        elif distintos <= 6:
+            frases.append("Valores: " + ", ".join(f"{k if len(k) <= 25 else k[:22] + '...'} ({_pct_txt(v / total)})"
+                                                   for k, v in conteo.items()) + ".")
+        else:
+            frases.append(f"{distintos} valores distintos; los más frecuentes: " + ", ".join(
+                f"{k if len(k) <= 25 else k[:22] + '...'} ({_pct_txt(v / total)})"
+                for k, v in list(conteo.items())[:3]) + ".")
+    elif tipo == "Texto" and len(texto) >= 5:
+        largo = float(texto.str.len().mean())
+        if largo > 60:
+            frases.append(f"Longitud media de {largo:.0f} caracteres (texto libre).")
+    return frases
+
+
+def _detalle_datos(serie: pd.Series, tipo: str, rol: str, es_llave: bool, es_pct: bool, texto_norm: str,
+                   binaria: Optional[Dict[str, int]]) -> List[str]:
+    """Frases que salen solo de los valores: escala, formato, cadencia, unicidad, variantes, vacíos."""
+    frases: List[str] = []
+    total = len(serie)
+    if total == 0:
+        return frases
+    if pd.api.types.is_numeric_dtype(serie) or pd.api.types.is_datetime64_any_dtype(serie):
+        vacias = int(serie.isna().sum())
+    else:
+        vacias = int((serie.isna() | serie.astype(str).str.strip().str.lower().isin(_NULOS_TEXTO)).sum())
+    if binaria:
+        frases.append(_frase_binaria(binaria))
+    elif tipo in ("Entero", "Decimal"):
+        frases.extend(_detalle_numerico(_numeros(serie), texto_norm, es_pct, es_llave))
+    elif tipo == "Fecha":
+        frases.extend(_detalle_fecha(serie, texto_norm))
+    elif tipo not in ("Vacío",):
+        frases.extend(_detalle_texto(serie, tipo, es_llave, rol, total - vacias))
+    if vacias / total >= 0.5 and vacias < total:
+        frases.append(f"Está vacío en el {_pct_txt(vacias / total)} de las filas; evaluar si el campo es útil o si "
+                      "el vacío es un dato válido («no aplica»).")
+    return frases[:3]
 
 
 # --------------------------------------------------------------------------
@@ -919,7 +1457,7 @@ def _descripcion_identificador(tokens: List[str], texto: str, rol: str, es_llave
     elif ids_numero and sustantivo and (tokens[0] in _ID_NUMERO or tokens[-1] in _ID_NUMERO) \
             and not (ids_numero == ["no"] and len(resto) >= 2):  # «no_claims_bonus» no es un número
         es_id = True  # num_factura, numero_orden, no_poliza
-    elif _TRACKING.search(texto) and not ids_numero:
+    elif _TRACKING.search(texto):
         es_id = True
     if not es_id:
         return None
@@ -969,18 +1507,26 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
     """Descripción redactada de un campo a partir de su nombre, rol, tipo y (si se dan) sus valores.
     `serie` son los datos de la columna; sin ella se puede pasar `ejemplos` (texto de «Rango o ejemplos»)
     y `unicos`/`filas`. `contexto` son los nombres de las demás columnas de la tabla: ayudan a leer palabras
-    ambiguas («state» junto a city y country es una región, no una situación). Siempre devuelve texto."""
+    ambiguas («state» junto a city y country es una región; «origen» junto a «guía» y «flete» es el origen
+    de un envío) y a reconocer el rubro de la tabla (RR. HH., logística, salud, educación...).
+    Con `serie` la descripción añade lo que dicen los datos: escala o formato, valores y su peso, variantes
+    de escritura, unicidad, cadencia de las fechas. Siempre devuelve texto."""
     nombre = str(col)
     norm_base = normalizar_nombre(nombre)
-    n = nombre_legible(nombre)
+    n = _con_tildes(nombre_legible(nombre))
     tokens = _tokens_nombre(nombre)
     texto_norm = " ".join(tokens)
     texto = _texto_busqueda(tokens)
     compacto = "".join(tokens)
+    dominio = _dominio(tuple(str(c) for c in contexto)) if contexto else None
+    vecinas = {t for c in (contexto or ()) for t in normalizar_nombre(c).split()}
     resultado: Optional[str] = None
     ganador: Optional[_Patron] = None
     con_datos = False  # True si el texto incluye valores de la columna (no se tocan sus llaves {})
+    curado = False  # True si la frase viene de una regla específica (no se reemplaza por una genérica)
+    es_pct = False
     valores = _muestra(serie, ejemplos)
+    binaria = _binaria(serie) if serie is not None else None
     if serie is not None:
         unicos = int(serie.nunique(dropna=True)) if unicos is None else unicos
         filas = len(serie) if filas is None else filas
@@ -1018,12 +1564,28 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
         base = f"Columna sin nombre descriptivo ({n_q}); su significado debe confirmarse con la fuente de datos."
         resultado = base + (" " + pista if pista else "")
         con_datos = bool(pista)
+        curado = True
 
     # Indicador Sí/No por prefijo (es_frecuente, has_children, tiene_deuda).
     if resultado is None and len(tokens) >= 2 and tokens[0] in _PREFIJO_BOOLEANO:
         resto = _traducir_tokens(tokens[1:])
-        resultado = (f"Indicador Sí/No: señala si el registro cumple «{resto}»; "
-                     "confirmar cómo se codifican Sí y No.")
+        verbo = _VERBO_PREFIJO.get(tokens[0], "cumple")
+        cierre = "" if serie is not None else "; confirmar cómo se codifican Sí y No"
+        resultado = f"Indicador Sí/No: señala si el registro {verbo} «{_con_tildes(resto)}»{cierre}."
+        curado = True
+
+    # Porcentajes por nombre (comision_pct, asistencia_pct, porcentaje_descuento).
+    if resultado is None and len(tokens) >= 2 and (tokens[-1] == "porcentaje" or tokens[0] == "porcentaje"):
+        resto = [t for t in tokens if t not in ("porcentaje", "de", "del")]
+        if resto:
+            resultado, curado, es_pct = f"Porcentaje de {_con_tildes(_traducir_tokens(resto))}.", True, True
+
+    # Frases con sentido propio (RR. HH., logística, salud, educación, finanzas, sensores...) y nombres
+    # de una sola palabra ambiguos. Se leen según el rubro de la tabla.
+    if resultado is None:
+        especifico = _buscar_especifico(texto, compacto, texto_norm, dominio, tipo)
+        if especifico:
+            resultado, curado = especifico, True
 
     # Versión original o normalizada de otro campo.
     if resultado is None:
@@ -1074,9 +1636,7 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
 
     # Nombres compuestos de seguros y de analítica de clientes (antes de los identificadores para que
     # «adjuster_id» o «agent_id» digan quién es, no solo «Identificador de adjuster»).
-    curado = False
     if resultado is None and tokens in (["state"], ["estado"]) and contexto:
-        vecinas = {t for c in contexto for t in normalizar_nombre(c).split()}
         if vecinas & {"city", "ciudad", "country", "pais", "postal", "zip", "cp", "address", "direccion",
                       "municipio", "province", "provincia", "region"}:
             resultado, curado = ("Estado, provincia o región donde se ubica el registro; conviene homologar sus "
@@ -1089,6 +1649,7 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
     # Identificadores.
     if resultado is None and not conteo_plural:
         resultado = _descripcion_identificador(tokens, texto, rol, es_llave)
+        curado = resultado is not None
 
     # «nota» es un puntaje si es numérica y un comentario si es texto.
     if resultado is None and tipo in ("Entero", "Decimal") and _p("nota", "nota final").search(texto):
@@ -1114,6 +1675,7 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
                         else:
                             resultado = frase
                         break
+                curado = True
 
     # Fechas.
     es_fecha_por_nombre = bool(_NOMBRE_DE_FECHA.search(texto_norm) or _NOMBRE_DE_FECHA.en_compacto(compacto))
@@ -1127,23 +1689,29 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
         if encontrado:
             resultado = encontrado[1]
         else:
-            base_fecha = _traducir_tokens([t for t in tokens if t not in _PALABRAS_RELLENO_FECHA])
-            if base_fecha:
-                resultado = f"Fecha de «{base_fecha}»."
-            else:
-                resultado = "Fecha y hora del registro." if "hora" in tokens or "time" in tokens else "Fecha del registro."
+            base_fecha = _con_tildes(_traducir_tokens([t for t in tokens if t not in _PALABRAS_RELLENO_FECHA]))
+            con_hora = bool({"timestamp", "datetime", "hora", "time"} & set(tokens)) or _tiene_hora(serie)
+            cabeza = "Fecha y hora" if con_hora else "Fecha"
+            resultado = f"{cabeza} de «{base_fecha}»." if base_fecha else f"{cabeza} del registro."
+        curado = True
 
     # Conteos por registro (n_reclamos, num_hijos, cantidad_visitas...).
     if resultado is None and tipo in ("Entero", "Decimal"):
         marcas = {"n", "num", "numero", "nro", "conteo", "count", "nbr"}
         if "number" in tokens and "of" in tokens:  # number_of_policies
             marcas = marcas | {"number"}
-        base = _traducir_tokens([t for t in tokens if t not in marcas and t not in ("de", "del", "of", "total",
-                                                                                      "cantidad")])
+        palabras_base = [t for t in tokens if t not in marcas and t not in ("de", "del", "of", "total", "cantidad")]
+        ventana = None
+        if len(palabras_base) >= 3 and palabras_base[-1] in ("meses", "dias", "anios") and palabras_base[-2].isdigit():
+            ventana = f"en los últimos {palabras_base[-2]} {_con_tildes(palabras_base[-1])}"
+            palabras_base = palabras_base[:-2]
+        base = _con_tildes(_traducir_tokens(palabras_base))
         if any(t in marcas for t in tokens) and base:
-            resultado = f"Cantidad de {base} por registro."
+            resultado = f"Cantidad de {base} por registro" + (f" {ventana}." if ventana else ".")
+            curado = True
         elif any(t in ("total", "cantidad") for t in tokens) and base and not _buscar(base, base.replace(" ", "")):
-            resultado = f"Cantidad de {base} por registro."
+            resultado = f"Cantidad de {base} por registro" + (f" {ventana}." if ventana else ".")
+            curado = True
 
     # Forma de pago: método (PayPal, transferencia) o periodicidad (mensual, anual), según el contenido.
     if resultado is None and _p("forma pago", "metodo pago", "medio pago", "tipo pago").search(texto):
@@ -1152,10 +1720,12 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
             resultado = _GLOSARIO[_indice_por_palabra("periodicidad")][1]
         else:
             resultado = "Forma o método con que se realizó el pago."
+        curado = True
 
-    # «order_status» -> «Estado del pedido» (solo si la palabra de contexto y la cabeza son conocidas).
+    # «order_status» -> «Estado del pedido»; «tipo_contrato» -> «Tipo del contrato» (solo si la palabra de
+    # contexto y la cabeza son conocidas).
     if resultado is None:
-        resultado = _componer(tokens)
+        resultado = _componer(tokens) or _componer_es(tokens)
         curado = resultado is not None
 
     # Glosario general por nombre.
@@ -1163,6 +1733,13 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
         encontrado = _buscar(texto, compacto)
         if encontrado:
             ganador, resultado = encontrado
+            palabras = set(ganador.palabras)
+            # «aprobado» / «solicitado» son de seguros solo si la tabla habla de reclamos.
+            if palabras & {"aprobado", "solicitado"} and dominio != "seguros" \
+                    and not vecinas & {"reclamo", "reclamos", "claim", "claims", "siniestro", "poliza", "policy"}:
+                lado, otro = ("aprobado", "solicitado") if "aprobado" in palabras else ("solicitado", "aprobado")
+                resultado = (f"Valor {lado} registrado ({{n}}); no equivale al valor {otro} y no deben "
+                             "mezclarse como una sola cifra.")
 
     # Pista desde el contenido cuando el nombre no dijo nada.
     es_pista = False
@@ -1171,25 +1748,54 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
         if pista:
             resultado, es_pista, con_datos = pista, True, True
 
+    # Un campo con solo dos valores Sí/No se describe como indicador, salvo que el glosario ya sea más preciso.
+    if binaria and not curado and not es_pista and resultado is not None and not resultado.startswith((
+            "Indicador", "Sexo o género", "Estado o situación", "Estado civil", "Periodicidad", "Parece")):
+        resultado = f"Indicador Sí/No de {n_q}: señala si el registro cumple esa condición."
+        con_datos, ganador = True, None
+
     # Por tipo de dato.
+    es_fallback = False
     if resultado is None:
         resultado = _DESCRIPCION_POR_TIPO.get(tipo, "Dato de {n}.")
+        es_fallback = True
 
     if not con_datos:
         resultado = resultado.replace("{n}", n_q)
     resultado = _primera_mayuscula(resultado)
     if resultado and resultado[-1] not in ".!?":
         resultado += "."
+    if es_fallback and tokens and all(len(t) <= 4 for t in tokens) and tipo != "Vacío":
+        resultado += " Nombre abreviado: confirmar su significado con la fuente de datos."
 
     # A qué se refiere el campo: «nombre_cliente» -> «Corresponde al cliente.»
     if ganador is not None and len(tokens) >= 2 and "Corresponde" not in resultado:
         sustantivo = _entidad(texto, excluir=ganador.palabras, para_componer=True)
+        if sustantivo == "póliza o contrato":
+            sustantivo = "póliza" if (dominio == "seguros" or _p("poliza", "policy").search(texto)) else "contrato"
         if sustantivo:
             resultado += f" Corresponde {_a_la_entidad(sustantivo)}."
 
     # Matices del nombre: bruto/neto, unitario, mensual, estimado, unidad de medida...
     if not es_pista:
         for frase in _calificadores(texto_norm, norm_base):
+            if frase in resultado:
+                continue
+            if frase.startswith("Se expresa en "):
+                unidad = frase[len("Se expresa en "):-1].split(" (")[0].lower()
+                if unidad in resultado.lower() or (unidad == "porcentaje" and es_pct):
+                    continue
+                # La unidad ya se conoce: sobra pedir que se confirme.
+                resultado = re.sub(r";? confirmar (?:la|su) unidad de medida\.?", "", resultado).rstrip(" ;")
+                if resultado and resultado[-1] not in ".!?":
+                    resultado += "."
+                resultado = re.sub(r"; confirmar (?:si es |si está en )?[^.;]*°C o °F\.?", "", resultado)
+            resultado += " " + frase
+
+    # Lo que dicen los datos: escala, formato, valores, unicidad, cadencia, vacíos.
+    if serie is not None:
+        for frase in _detalle_datos(serie, tipo, rol, es_llave, es_pct or bool(
+                _p("porcentaje", "percent", "pct").search(texto_norm)), texto_norm, binaria):
             if frase not in resultado:
                 resultado += " " + frase
 
