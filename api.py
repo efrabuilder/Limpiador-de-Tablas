@@ -28,7 +28,7 @@ import io
 import json
 import uuid
 import zipfile
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -47,7 +47,8 @@ from data_cleaner import flujos_guiados as FG
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
 from data_cleaner.exportador_m import generar_editor_m_puro
-from data_cleaner.loaders import load_excel, load_table, load_excel_hojas, leer_tabla_subida, tabla_a_bytes
+from data_cleaner.loaders import (load_csv, load_excel, load_table, load_tablas, leer_tabla_subida, tabla_a_bytes,
+                                  es_archivo_csv, es_archivo_excel)
 from data_cleaner.exporters import exportar_sql
 from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo, generar_script_crear_base_datos
 from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES, formato_fecha_python, formato_fecha_m
@@ -111,11 +112,17 @@ class LimpiezaOut(BaseModel):
 def _leer_upload(archivo: UploadFile) -> pd.DataFrame:
     nombre = (archivo.filename or "").lower()
     contenido = archivo.file.read()
-    if nombre.endswith(".csv"):
-        return pd.read_csv(io.BytesIO(contenido))
-    if nombre.endswith((".xlsx", ".xls")):
-        return load_excel(io.BytesIO(contenido))
-    raise HTTPException(status_code=400, detail="Formato no soportado. Use .csv, .xlsx o .xls.")
+    buffer = io.BytesIO(contenido)
+    buffer.name = nombre
+    if es_archivo_csv(nombre):
+        return load_csv(buffer)
+    if es_archivo_excel(nombre):
+        try:
+            return load_excel(buffer)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"No se pudo leer el Excel: {exc}")
+    raise HTTPException(status_code=400, detail="Formato no soportado. Use CSV, TXT, TSV o Excel "
+                                                "(.xlsx, .xlsm, .xls, .xlsb, .ods).")
 
 
 @app.get("/")
@@ -711,7 +718,8 @@ def exportar_sql_endpoint(resultado_id: str, body: ExportarSqlIn):
 
 @app.post("/modelo-sql", response_model=AplicarModeloSqlOut)
 def modelo_sql_endpoint(
-    archivo: UploadFile = File(..., description="Excel con las hojas del modelo (una tabla por hoja)."),
+    archivo: UploadFile = File(..., description="Excel (cualquier tipo) con las hojas del modelo, o un CSV (una tabla)."),
+    archivos_adicionales: Optional[List[UploadFile]] = File(None, description="Más CSV/Excel (cada CSV es una tabla)."),
     modelo: str = Form(
         ..., description='JSON con el modelo: {"nombre_tabla": {"hoja": "...", '
                           '"clave_primaria": "...", "claves_foraneas": [{"columna": "...", '
@@ -737,10 +745,14 @@ def modelo_sql_endpoint(
     if not isinstance(modelo_dict, dict) or not modelo_dict:
         raise HTTPException(status_code=400, detail="modelo debe ser un objeto JSON no vacío (tabla -> definición).")
 
-    contenido = archivo.file.read()
+    entradas = []
+    for subido in [archivo] + list(archivos_adicionales or []):
+        buffer = io.BytesIO(subido.file.read())
+        buffer.name = subido.filename or ""
+        entradas.append((buffer.name, buffer))
     hojas_necesarias = sorted({definicion.get("hoja") for definicion in modelo_dict.values()})
     try:
-        hojas_cargadas = load_excel_hojas(io.BytesIO(contenido), hojas=hojas_necesarias)
+        hojas_cargadas = load_tablas(entradas, hojas=hojas_necesarias)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"No se pudo leer el Excel: {exc}")
 
