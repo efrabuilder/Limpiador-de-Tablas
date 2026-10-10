@@ -67,6 +67,19 @@ from .negocio import (  # noqa: F401  (se reexportan: otras partes de la app los
 COLUMNAS_EDITABLES = ("Descripción", COLUMNA_ORIGEN, COLUMNA_JUSTIFICACION, COLUMNA_CLASIFICACION, COLUMNA_MODELO)
 
 NOMBRE_TECNICO = "diccionario_datos.xlsx"
+NOMBRE_TECNICO_CSV = "diccionario_datos.csv"
+
+# Formatos en que se puede bajar el diccionario tecnico: Excel (revisar y editar a mano), CSV (legible
+# por maquina: catalogos de datos, Power BI, control de versiones) o los dos.
+FORMATOS_TECNICO = ("xlsx", "csv", "ambos")
+
+
+def nombre_tecnico_de(formato: str = "xlsx") -> str:
+    """Nombre del archivo tecnico al que remite el documento de alcance. Si se entregan los dos
+    formatos se enlaza el CSV, que es el archivo maquina-legible del diccionario."""
+    if formato not in FORMATOS_TECNICO:
+        raise ValueError(f"formato del diccionario tecnico invalido: '{formato}' (use xlsx, csv o ambos)")
+    return NOMBRE_TECNICO if formato == "xlsx" else NOMBRE_TECNICO_CSV
 
 # Descripciones que se pueden adelantar sin adivinar: el rol las deja claras.
 _DESCRIPCION_POR_ROL = {
@@ -525,6 +538,16 @@ def diccionario_tecnico_excel(df: pd.DataFrame, diccionario: pd.DataFrame, resum
         dar_formato(escritor.sheets["Resumen"])
         dar_formato(escritor.sheets["Leyenda"])
     return buffer.getvalue()
+
+
+def diccionario_tecnico_csv(df: pd.DataFrame, diccionario: pd.DataFrame,
+                            tokens=TOKENS_NULOS_BASE) -> bytes:
+    """CSV del diccionario tecnico («diccionario_datos.csv»): las mismas columnas y filas que la hoja
+    «Diccionario tecnico» del Excel (una fila por campo), en UTF-8 con BOM, separado por comas y sin
+    formato. Es el archivo legible por maquina: se puede cargar en un catalogo de datos o importar a
+    Power BI para que las descripciones aparezcan al pasar el cursor sobre cada campo."""
+    tecnica = tabla_tecnica(df, diccionario, tokens)
+    return tecnica.to_csv(index=False).encode("utf-8-sig")
 
 
 # --------------------------------------------------------------------------
