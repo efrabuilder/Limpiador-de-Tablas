@@ -15,18 +15,20 @@ COMO USARLO:
 """
 import pandas as pd
 from data_cleaner.exportador_m import generar_editor_m_puro
+from data_cleaner.loaders import load_csv, load_excel
 
 # -----------------------------------------------------------------------------
 # CONFIGURACION: ajuste segun su archivo y como quiere corregir cada cosa.
 # -----------------------------------------------------------------------------
-ARCHIVO_ENTRADA = "Jardineria_Datos_X.xlsx"   # su archivo .xlsx o .csv
+ARCHIVO_ENTRADA = "Jardineria_Datos_X.xlsx"   # su archivo CSV o cualquier Excel
 HOJA = "Ventas_Jardineria"                     # nombre de la hoja (None si es .csv)
 NOMBRE_PASO_ANTERIOR = "Tipo de columna cambiado"  # el paso de Power Query que entrega la tabla
 
-if ARCHIVO_ENTRADA.lower().endswith(".csv"):
-    df = pd.read_csv(ARCHIVO_ENTRADA)
+# Acepta CSV/TXT/TSV y cualquier Excel (.xlsx, .xlsm, .xls, .xlsb, .ods)
+if ARCHIVO_ENTRADA.lower().endswith((".csv", ".txt", ".tsv", ".tab")):
+    df = load_csv(ARCHIVO_ENTRADA)
 else:
-    df = pd.read_excel(ARCHIVO_ENTRADA, sheet_name=HOJA)
+    df = load_excel(ARCHIVO_ENTRADA, sheet_name=HOJA)
 
 codigo_m = generar_editor_m_puro(
     df,
