@@ -23,8 +23,13 @@ estandarizar -> fechas en un solo formato -> unir valores equivalentes
 nulos validos con una misma palabra, «No indica» por defecto).
 
 Cada guardado deja, ademas de la tabla y el script, los dos documentos del
-diccionario: el tecnico (diccionario_datos.xlsx) y el documento de alcance
-(Word, si esta instalado python-docx), mas el Excel basico de siempre.
+diccionario: el tecnico (diccionario_datos.xlsx, .csv o los dos, a eleccion con
+`formato_diccionario`) y el documento de alcance (Word, si esta instalado
+python-docx), mas el Excel basico de siempre.
+
+Opcionales: `fecha_partes` agrega columnas de mes y anio a las fechas ya
+estandarizadas, y `ejecutar_eda` / `guardar_eda` dan el EDA estadistico (describe,
+correlacion y boxplots) de cualquier tabla.
 """
 from __future__ import annotations
 
@@ -36,6 +41,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 from . import diccionario_datos as DD
+from . import eda as ED
 from . import limpieza_guiada as LG
 from . import merge_tablas as MT
 from .loaders import leer_tabla_subida, listar_hojas, tabla_a_bytes
@@ -231,6 +237,27 @@ def reglas_sugeridas(df_base: pd.DataFrame, tokens: Sequence[str],
     return LG.tabla_de_reglas(df_base, tokens, palabra).fillna("").to_dict("records")
 
 
+def _agregar_fecha_partes(df: pd.DataFrame, config: Dict, traducir, fecha_partes: Sequence[str],
+                          con_mes: bool, con_anio: bool):
+    """Valida las columnas pedidas contra las fechas estandarizadas del config y agrega mes y anio.
+    Solo se derivan columnas que pasaron por el paso «Fechas en un solo formato»: asi se conoce
+    su formato y el mes no se confunde con el dia."""
+    if not (con_mes or con_anio):
+        raise ValueError("fecha_partes necesita al menos mes o año.")
+    fechas = config.get("fechas") or {}
+    estandarizadas = [c for c in fechas.get("columnas", []) if c in df.columns]
+    if not estandarizadas:
+        raise ValueError("Para sacar mes y año primero hay que estandarizar al menos una columna de fecha "
+                         "(opción de fechas de la limpieza).")
+    pedidas = estandarizadas if list(fecha_partes) in (["*"], ["todas"]) else traducir(fecha_partes,
+                                                                                         "columnas de mes y año")
+    fuera = [c for c in pedidas if c not in estandarizadas]
+    if fuera:
+        raise ValueError(f"No se puede sacar mes y año de {', '.join(fuera)}: no está entre las columnas de fecha "
+                         f"estandarizadas ({', '.join(estandarizadas)}).")
+    return LG.paso_fecha_partes(df, pedidas, fechas.get("formato", "%Y-%m-%d"), con_mes, con_anio)
+
+
 def ejecutar_limpieza_guiada(df: pd.DataFrame, config: Dict,
                              ajustes: Optional[Dict[str, Dict[str, str]]] = None,
                              nombre_archivo: str = "tabla.csv",
@@ -240,7 +267,10 @@ def ejecutar_limpieza_guiada(df: pd.DataFrame, config: Dict,
                              equivalencias: Optional[List[Dict]] = None,
                              asegurar_sin_vacios: bool = True,
                              numeros_cierre: str = "mediana",
-                             incluir_fechas_cierre: bool = True) -> ResultadoLimpiezaGuiada:
+                             incluir_fechas_cierre: bool = True,
+                             fecha_partes: Optional[Sequence[str]] = None,
+                             fecha_partes_mes: bool = True,
+                             fecha_partes_anio: bool = True) -> ResultadoLimpiezaGuiada:
     """Pasos globales + union de valores equivalentes + una regla de nulos por
     columna (la sugerida, salvo que `ajustes` indique otra) + cierre sin vacios +
     auditoria final + script de pandas. Es el mismo recorrido de la app web.
@@ -253,6 +283,10 @@ def ejecutar_limpieza_guiada(df: pd.DataFrame, config: Dict,
     - asegurar_sin_vacios: tras las reglas, rellena lo que sobre: texto y fechas con
       `palabra`; numeros con la mediana, 0 (numeros_cierre='cero') o la palabra
       (numeros_cierre='palabra', la columna pasa a texto).
+    - fecha_partes: columnas de fecha (ya estandarizadas en `config['fechas']`) de las que se agregan
+      «<col>_mes» y «<col>_anio» al final de la limpieza; ['*'] = todas las estandarizadas. None = ninguna.
+      `fecha_partes_mes` / `fecha_partes_anio` eligen cuales de las dos crear. Donde la fecha esta
+      vacia, mes y anio quedan vacios (no se rellenan).
     """
     if numeros_cierre not in ("mediana", "cero", "palabra"):
         raise ValueError("numeros_cierre debe ser 'mediana', 'cero' o 'palabra'")
@@ -294,6 +328,12 @@ def ejecutar_limpieza_guiada(df: pd.DataFrame, config: Dict,
         for r in paso_cierre.reglas or []:  # el diccionario debe decir lo que se hizo
             por_columna[r["columna"]] = {**por_columna.get(r["columna"], {}), **r}
         reglas = list(por_columna.values())
+
+    if fecha_partes:
+        df_final, paso_partes = _agregar_fecha_partes(df_final, config, traducir, fecha_partes,
+                                                      fecha_partes_mes, fecha_partes_anio)
+        pasos_reglas.append(paso_partes)
+        reglas = reglas + list(paso_partes.reglas or [])
 
     pasos = pasos_globales + pasos_reglas
     return ResultadoLimpiezaGuiada(
@@ -344,30 +384,45 @@ def generar_documentos_diccionario(df: pd.DataFrame, nombre: str, reglas: Option
                                    textos: Optional[Dict[str, str]] = None,
                                    etapas: Optional[List[tuple]] = None,
                                    controles_extra: Optional[List[tuple]] = None,
-                                   pendientes_extra: Optional[List[tuple]] = None
+                                   pendientes_extra: Optional[List[tuple]] = None,
+                                   formato_tecnico: str = "xlsx"
                                    ) -> Dict[str, Optional[bytes]]:
-    """Las tres salidas del diccionario, en bytes: {'basico': Excel de siempre, 'tecnico': diccionario
-    tecnico (Excel), 'alcance': documento de alcance (Word) o None si falta python-docx}."""
+    """Las salidas del diccionario, en bytes: {'basico': Excel de siempre, 'tecnico': diccionario
+    tecnico (Excel), 'tecnico_csv': diccionario tecnico (CSV), 'alcance': documento de alcance (Word) o
+    None si falta python-docx}.
+
+    `formato_tecnico` elige el diccionario tecnico: 'xlsx' (por defecto), 'csv' o 'ambos'. La salida
+    que no se pidio queda en None. El documento de alcance enlaza al archivo que se entrega (el CSV si
+    se pidieron los dos)."""
+    nombre_tecnico = DD.nombre_tecnico_de(formato_tecnico)  # valida el formato antes de trabajar
     diccionario, resumen, excel = generar_diccionario(df, nombre, reglas, origenes, fuentes, eliminadas, llaves,
                                                       cruces)
     try:
         documento = generar_documento_alcance(
             df, diccionario, nombre, fuentes, cruces, eliminadas, textos, etapas, controles_extra,
-            pendientes_extra)
+            pendientes_extra, nombre_tecnico=nombre_tecnico)
     except ImportError:  # sin python-docx no hay documento de alcance
         documento = None
-    return {"basico": excel, "tecnico": generar_diccionario_tecnico(df, diccionario, resumen),
+    con_excel, con_csv = formato_tecnico in ("xlsx", "ambos"), formato_tecnico in ("csv", "ambos")
+    return {"basico": excel,
+            "tecnico": generar_diccionario_tecnico(df, diccionario, resumen) if con_excel else None,
+            "tecnico_csv": generar_diccionario_tecnico(df, diccionario, resumen, "csv") if con_csv else None,
             "alcance": documento}
 
 
 def _guardar_diccionarios(carpeta: str, nombre_excel: str, base_documento: str, df: pd.DataFrame,
                           nombre: str, **argumentos) -> Dict[str, str]:
-    """Escribe los tres archivos del diccionario: el Excel basico, el diccionario tecnico
-    (diccionario_datos.xlsx, el que enlaza el documento de alcance) y el documento de alcance en
-    Word (se omite si falta python-docx). `argumentos`: los de generar_documentos_diccionario."""
+    """Escribe los archivos del diccionario: el Excel basico, el diccionario tecnico
+    (diccionario_datos.xlsx y/o diccionario_datos.csv segun `formato_tecnico`, que enlaza el documento
+    de alcance) y el documento de alcance en Word (se omite si falta python-docx). `argumentos`: los de
+    generar_documentos_diccionario."""
     documentos = generar_documentos_diccionario(df, nombre, **argumentos)
-    rutas = {"diccionario": _escribir(os.path.join(carpeta, nombre_excel), documentos["basico"]),
-             "diccionario_tecnico": _escribir(os.path.join(carpeta, DD.NOMBRE_TECNICO), documentos["tecnico"])}
+    rutas = {"diccionario": _escribir(os.path.join(carpeta, nombre_excel), documentos["basico"])}
+    if documentos["tecnico"] is not None:
+        rutas["diccionario_tecnico"] = _escribir(os.path.join(carpeta, DD.NOMBRE_TECNICO), documentos["tecnico"])
+    if documentos["tecnico_csv"] is not None:
+        rutas["diccionario_tecnico_csv"] = _escribir(os.path.join(carpeta, DD.NOMBRE_TECNICO_CSV),
+                                                     documentos["tecnico_csv"])
     if documentos["alcance"] is not None:
         rutas["documento_alcance"] = _escribir(
             os.path.join(carpeta, f"documento_alcance_{base_documento}.docx"), documentos["alcance"])
@@ -392,12 +447,16 @@ def argumentos_diccionario_limpieza(resultado: "ResultadoLimpiezaGuiada",
 
 def guardar_limpieza_guiada(resultado: ResultadoLimpiezaGuiada, carpeta: str,
                             formato: str = "csv",
-                            textos_alcance: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+                            textos_alcance: Optional[Dict[str, str]] = None,
+                            formato_diccionario: str = "xlsx",
+                            incluir_eda: bool = False) -> Dict[str, str]:
     """Guarda tabla limpia, script de pandas y los diccionarios en `carpeta`
     (Excel basico, diccionario tecnico y documento de alcance en Word).
     `textos_alcance` rellena el documento de alcance (proyecto, autor, proposito,
     conclusion, alcance, unidad_analisis, preparacion, recomendacion,
-    fuentes_documentales). Devuelve {tipo: ruta}."""
+    fuentes_documentales). `formato_diccionario`: formato del diccionario tecnico
+    ('xlsx', 'csv' o 'ambos'). `incluir_eda`: guarda tambien el EDA estadistico de la
+    tabla limpia (CSV, PNG y script). Devuelve {tipo: ruta}."""
     os.makedirs(carpeta, exist_ok=True)
     base = f"{nombre_base(resultado.nombre_archivo)}_limpio"
     rutas = _guardar_tabla(resultado.df, carpeta, base, formato)
@@ -405,7 +464,9 @@ def guardar_limpieza_guiada(resultado: ResultadoLimpiezaGuiada, carpeta: str,
     argumentos = argumentos_diccionario_limpieza(resultado, textos_alcance)
     nombre = argumentos.pop("nombre")
     rutas.update(_guardar_diccionarios(carpeta, f"diccionario_{base}.xlsx", base, resultado.df, nombre,
-                                       **argumentos))
+                                       formato_tecnico=formato_diccionario, **argumentos))
+    if incluir_eda:
+        rutas.update(_guardar_eda_de_tabla(resultado.df, carpeta, base, formato, resultado.tokens))
     return rutas
 
 
@@ -579,16 +640,22 @@ def argumentos_diccionario_merge(resultado: ResultadoMerge,
 
 def guardar_merge(resultado: ResultadoMerge, carpeta: str, base: str = "resultado_merge",
                   formato: str = "csv",
-                  textos_alcance: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+                  textos_alcance: Optional[Dict[str, str]] = None,
+                  formato_diccionario: str = "xlsx",
+                  incluir_eda: bool = False) -> Dict[str, str]:
     """Guarda la tabla unida, el script de pandas y los diccionarios (Excel basico,
-    diccionario tecnico y documento de alcance en Word, con las llaves de union)."""
+    diccionario tecnico y documento de alcance en Word, con las llaves de union).
+    `formato_diccionario`: 'xlsx', 'csv' o 'ambos'. `incluir_eda`: guarda tambien el EDA
+    estadistico de la tabla maestra."""
     os.makedirs(carpeta, exist_ok=True)
     rutas = _guardar_tabla(resultado.df, carpeta, base, formato)
     rutas["script"] = _escribir(os.path.join(carpeta, f"{base}_script.py"), resultado.script)
     argumentos = argumentos_diccionario_merge(resultado, textos_alcance)
     nombre = argumentos.pop("nombre")
     rutas.update(_guardar_diccionarios(carpeta, "diccionario_tabla_maestra.xlsx", "tabla_maestra", resultado.df,
-                                       nombre, **argumentos))
+                                       nombre, formato_tecnico=formato_diccionario, **argumentos))
+    if incluir_eda:
+        rutas.update(_guardar_eda_de_tabla(resultado.df, carpeta, base, formato))
     return rutas
 
 
@@ -618,22 +685,29 @@ def generar_diccionario(df: pd.DataFrame, nombre: str, reglas: Optional[List[Dic
 
 def guardar_diccionario(df: pd.DataFrame, carpeta: str, nombre: str,
                         fuentes: Optional[List[str]] = None,
-                        textos_alcance: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """Guarda en `carpeta` el diccionario de una tabla en sus tres salidas: el Excel basico
-    (diccionario_<nombre>.xlsx), el diccionario tecnico (diccionario_datos.xlsx) y el documento de
+                        textos_alcance: Optional[Dict[str, str]] = None,
+                        formato_diccionario: str = "xlsx") -> Dict[str, str]:
+    """Guarda en `carpeta` el diccionario de una tabla en sus salidas: el Excel basico
+    (diccionario_<nombre>.xlsx), el diccionario tecnico (diccionario_datos.xlsx y/o
+    diccionario_datos.csv, segun `formato_diccionario`: 'xlsx', 'csv' o 'ambos') y el documento de
     alcance en Word (se omite si falta python-docx). Devuelve {tipo: ruta}."""
     os.makedirs(carpeta, exist_ok=True)
     base = nombre_base(nombre)
     return _guardar_diccionarios(carpeta, f"diccionario_{base}.xlsx", base, df, nombre,
-                                 fuentes=fuentes, textos=textos_alcance)
+                                 fuentes=fuentes, textos=textos_alcance, formato_tecnico=formato_diccionario)
 
 
 def generar_diccionario_tecnico(df: pd.DataFrame, diccionario: pd.DataFrame,
-                                resumen: pd.DataFrame) -> bytes:
-    """Excel del diccionario tecnico («diccionario_datos.xlsx»): una fila por campo con
-    tipo nativo, tipo sugerido y limites logicos, mas resumen y leyenda. Se puede
-    importar a Power BI o a un catalogo de datos."""
-    return DD.diccionario_tecnico_excel(df, diccionario, resumen)
+                                resumen: pd.DataFrame, formato: str = "xlsx") -> bytes:
+    """Diccionario tecnico en bytes. formato='xlsx' (por defecto): Excel («diccionario_datos.xlsx»), una
+    fila por campo con tipo nativo, tipo sugerido y limites logicos, mas resumen y leyenda.
+    formato='csv': el mismo detalle por campo en CSV («diccionario_datos.csv»), legible por maquina.
+    Los dos se pueden importar a Power BI o a un catalogo de datos."""
+    if formato == "csv":
+        return DD.diccionario_tecnico_csv(df, diccionario)
+    if formato == "xlsx":
+        return DD.diccionario_tecnico_excel(df, diccionario, resumen)
+    raise ValueError(f"formato invalido: '{formato}' (use 'xlsx' o 'csv'; para los dos, llame dos veces)")
 
 
 def generar_documento_alcance(df: pd.DataFrame, diccionario: pd.DataFrame, nombre: str,
@@ -643,11 +717,65 @@ def generar_documento_alcance(df: pd.DataFrame, diccionario: pd.DataFrame, nombr
                               textos: Optional[Dict[str, str]] = None,
                               etapas: Optional[List[tuple]] = None,
                               controles_extra: Optional[List[tuple]] = None,
-                              pendientes_extra: Optional[List[tuple]] = None) -> bytes:
+                              pendientes_extra: Optional[List[tuple]] = None,
+                              nombre_tecnico: str = DD.NOMBRE_TECNICO) -> bytes:
     """Documento de alcance y diccionario ejecutivo en Word (bytes). Lo calculado
     sale solo; `textos` trae lo que solo sabe la persona (proyecto, autor, proposito,
     conclusion, alcance, unidad_analisis, preparacion, recomendacion,
-    fuentes_documentales). Lanza ImportError si falta python-docx."""
+    fuentes_documentales). `nombre_tecnico`: archivo del diccionario tecnico al que remite
+    (diccionario_datos.xlsx o diccionario_datos.csv). Lanza ImportError si falta python-docx."""
     return DD.documento_alcance_docx(
-        df, diccionario, nombre, fuentes, cruces, eliminadas, textos=textos, etapas=etapas,
-        controles_extra=controles_extra, pendientes_extra=pendientes_extra)
+        df, diccionario, nombre, fuentes, cruces, eliminadas, nombre_tecnico=nombre_tecnico, textos=textos,
+        etapas=etapas, controles_extra=controles_extra, pendientes_extra=pendientes_extra)
+
+
+# =============================================================================
+# EDA estadistico
+# =============================================================================
+
+def ejecutar_eda(df: pd.DataFrame, tokens_extra: Optional[Sequence[str]] = None, metodo: str = "pearson",
+                 umbral: float = ED.UMBRAL_CORRELACION, factor_iqr: float = ED.FACTOR_IQR) -> ED.ResultadoEDA:
+    """EDA estadistico de una tabla: descriptivos, atipicos (regla del IQR) y matriz de correlacion. No
+    modifica la tabla. `tokens_extra`: textos que cuentan como nulo ademas del vacio (None = la lista base
+    de la limpieza guiada)."""
+    return ED.analizar_eda(df, tokens_nulos(tokens_extra), metodo, umbral, factor_iqr)
+
+
+def guardar_eda(resultado: ED.ResultadoEDA, carpeta: str, base: str = "tabla",
+                nombre_archivo: Optional[str] = None) -> Dict[str, str]:
+    """Guarda el EDA en `carpeta`: CSV de descriptivos, atipicos y correlacion, PNG de boxplots y de la
+    matriz, y el script de pandas + seaborn que lo repite. Devuelve {tipo: ruta}."""
+    return ED.guardar_eda(resultado, carpeta, base, nombre_archivo)
+
+
+def _guardar_eda_de_tabla(df: pd.DataFrame, carpeta: str, base: str, formato: str,
+                          tokens: Optional[Sequence[str]] = None) -> Dict[str, str]:
+    """EDA de la tabla recien guardada (`formato`: csv, xlsx o ambos); el script lee la tabla guardada."""
+    extension = "xlsx" if formato == "xlsx" else "csv"
+    try:
+        resultado = ED.analizar_eda(df, tuple(tokens) if tokens else tokens_nulos(None))
+    except ValueError:  # tabla vacia: no hay nada que explorar
+        return {}
+    return ED.guardar_eda(resultado, carpeta, base, f"{base}.{extension}")
+
+
+def eda_a_dict(resultado: ED.ResultadoEDA) -> Dict:
+    """El EDA listo para JSON (sin DataFrames): descriptivos, atipicos, correlacion y pares."""
+    def registros(tabla: Optional[pd.DataFrame], indice: bool = False) -> List[Dict]:
+        if tabla is None or tabla.empty:
+            return []
+        tabla = tabla.reset_index() if indice else tabla
+        return tabla.astype(object).where(tabla.notna(), None).to_dict("records")
+
+    corr = resultado.correlacion
+    return {
+        "filas": resultado.filas, "metodo": resultado.metodo, "umbral": resultado.umbral,
+        "factor_iqr": resultado.factor_iqr, "avisos": list(resultado.avisos),
+        "excluidas": dict(resultado.excluidas),
+        "numerico": registros(resultado.numerico, True), "categorico": registros(resultado.categorico),
+        "atipicos": registros(resultado.atipicos),
+        "correlacion": {"columnas": list(corr.columns), "valores": corr.astype(object).where(corr.notna(), None)
+                        .values.tolist()} if corr is not None else None,
+        "pares_correlacionados": registros(resultado.pares),
+        "lectura": ED.LECTURA_EDA,
+    }
