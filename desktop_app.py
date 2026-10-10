@@ -26,7 +26,8 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, exportar,
 )
-from data_cleaner.loaders import load_excel, load_excel_hojas
+from data_cleaner.loaders import (load_excel, load_tablas, listar_hojas, listar_tablas, es_archivo_excel,
+                                  patrones_para_dialogo)
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
@@ -328,13 +329,13 @@ class LimpiadorApp(tk.Tk):
     def abrir_archivo(self) -> None:
         ruta = filedialog.askopenfilename(
             title="Seleccionar archivo",
-            filetypes=[("CSV / Excel", "*.csv *.xlsx *.xls"), ("Todos", "*.*")],
+            filetypes=[("CSV / cualquier Excel", patrones_para_dialogo()), ("Todos", "*.*")],
         )
         if not ruta:
             return
         try:
-            if ruta.lower().endswith((".xlsx", ".xls", ".xlsm")):
-                hojas = pd.ExcelFile(ruta).sheet_names
+            if es_archivo_excel(ruta):
+                hojas = listar_hojas(ruta)
                 if len(hojas) == 1:
                     df = load_excel(ruta, sheet_name=hojas[0])
                 else:
@@ -656,14 +657,15 @@ class LimpiadorApp(tk.Tk):
         hacia otras hojas del modelo, muestra un diagrama y aplica todo en
         la base de datos (ver data_cleaner/modelo_sql.py).
         """
-        ruta = filedialog.askopenfilename(
-            title="Seleccionar Excel para el modelo",
-            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")],
+        ruta = filedialog.askopenfilenames(
+            title="Seleccionar Excel (cualquier tipo) o CSV para el modelo",
+            filetypes=[("CSV / cualquier Excel", patrones_para_dialogo()), ("Todos", "*.*")],
         )
         if not ruta:
             return
+        ruta = list(ruta)
         try:
-            hojas_disponibles = pd.ExcelFile(ruta).sheet_names
+            hojas_disponibles = listar_tablas(ruta)
         except Exception as exc:
             messagebox.showerror("Error al leer el archivo", str(exc))
             return
@@ -702,7 +704,7 @@ class LimpiadorApp(tk.Tk):
                 messagebox.showwarning("Sin hojas", "Elija al menos una hoja.")
                 return
             try:
-                hojas_cargadas = load_excel_hojas(ruta, hojas=seleccion)
+                hojas_cargadas = load_tablas(ruta, hojas=seleccion)
             except Exception as exc:
                 messagebox.showerror("Error al cargar", str(exc))
                 return
