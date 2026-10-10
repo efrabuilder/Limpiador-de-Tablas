@@ -9,9 +9,10 @@ detallado y exporta el archivo limpio.
 Uso:
     python main.py                 -> modo interactivo (recomendado); pregunta qué hacer:
                                       limpieza clásica, limpieza guiada de nulos,
-                                      merge (unir dos tablas) o diccionario de datos
+                                      merge (unir dos tablas), diccionario de datos
+                                      o EDA estadístico
     python main.py --demo          -> corre con datos de ejemplo, sin preguntas
-    python main.py --modo guiada   -> salta el menú (clasica | guiada | merge | diccionario)
+    python main.py --modo guiada   -> salta el menú (clasica | guiada | merge | diccionario | eda)
 """
 from __future__ import annotations
 import os
@@ -23,6 +24,7 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, imprimir_resumen_consola, exportar,
 )
+from data_cleaner import eda as ED
 from data_cleaner import flujos_guiados as FG
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
@@ -32,7 +34,8 @@ MODOS = {
     "clasica": "Limpieza de una tabla (detecta y corrige problemas de calidad)",
     "guiada": "Limpieza guiada de nulos (diagnóstico + una regla por columna)",
     "merge": "Merge (unir dos tablas con revisión de llaves)",
-    "diccionario": "Diccionario de datos de una tabla",
+    "diccionario": "Diccionario de datos de una tabla (técnico en Excel o CSV)",
+    "eda": "EDA estadístico (describe, correlación y atípicos con boxplots)",
 }
 
 OPCIONES_ACCION = {
@@ -194,6 +197,24 @@ def _pedir_formato_salida() -> str:
     return preguntar("\n¿En qué formato desea la tabla resultante?", ["csv", "xlsx", "ambos"], defecto="csv")
 
 
+def _pedir_formato_diccionario() -> str:
+    return preguntar("\n¿En qué formato desea el diccionario técnico?", ["xlsx", "csv", "ambos"], defecto="xlsx")
+
+
+def _pedir_incluir_eda() -> bool:
+    return preguntar("\n¿Guardar también el EDA estadístico (descriptivos, correlación y boxplots)?",
+                     ["si", "no"], defecto="no") == "si"
+
+
+def _pedir_mes_anio(config: dict):
+    """['*'] si el usuario quiere mes y año de las fechas estandarizadas; None si no hay fechas o dice que no."""
+    fechas = (config.get("fechas") or {}).get("columnas", [])
+    if not fechas:
+        return None
+    pregunta = f"\n¿Sacar columnas de mes y año de las fechas ({', '.join(fechas)})?"
+    return ["*"] if preguntar(pregunta, ["si", "no"], defecto="no") == "si" else None
+
+
 def flujo_limpieza_guiada(args) -> None:
     df, ruta, hoja = _pedir_tabla("la tabla", args.input)
 
@@ -231,15 +252,20 @@ def flujo_limpieza_guiada(args) -> None:
                 break
             ajustes_txt.append(linea)
 
+    fecha_partes = _pedir_mes_anio(config)
     resultado = FG.ejecutar_limpieza_guiada(
-        df, config, FG.parsear_ajustes_reglas(ajustes_txt), nombre_archivo=ruta, hoja=hoja)
+        df, config, FG.parsear_ajustes_reglas(ajustes_txt), nombre_archivo=ruta, hoja=hoja,
+        fecha_partes=fecha_partes)
     aud = resultado.auditoria
     print("\n--- Auditoría final ---")
     print(f"  Filas: {aud['filas_antes']} → {aud['filas_despues']} · "
           f"Celdas nulas: {aud['nulos_antes']} → {aud['nulos_despues']} · Duplicados: {aud['duplicados_despues']}")
     if len(aud["nulos_restantes"]):
         print("  Nulos que quedan:\n" + aud["nulos_restantes"].to_string())
-    _imprimir_rutas(FG.guardar_limpieza_guiada(resultado, args.outdir, _pedir_formato_salida()))
+    formato_tabla = _pedir_formato_salida()
+    _imprimir_rutas(FG.guardar_limpieza_guiada(
+        resultado, args.outdir, formato_tabla, formato_diccionario=_pedir_formato_diccionario(),
+        incluir_eda=_pedir_incluir_eda()))
 
 
 def flujo_merge(args) -> None:
@@ -275,21 +301,44 @@ def flujo_merge(args) -> None:
     print(f"  A con pareja: {aud['semaforo']} {aud['pct_filas_con_pareja']}%")
     for aviso in aud["advertencias"]:
         print(f"  ⚠ {aviso}")
-    _imprimir_rutas(FG.guardar_merge(resultado, args.outdir, formato=_pedir_formato_salida()))
+    formato_tabla = _pedir_formato_salida()
+    _imprimir_rutas(FG.guardar_merge(
+        resultado, args.outdir, formato=formato_tabla, formato_diccionario=_pedir_formato_diccionario(),
+        incluir_eda=_pedir_incluir_eda()))
 
 
 def flujo_diccionario(args) -> None:
     df, ruta, _ = _pedir_tabla("la tabla", args.input)
     nombre = preguntar("Nombre de la tabla maestra:", defecto=FG.nombre_base(ruta))
-    _, _, excel = FG.generar_diccionario(df, nombre, fuentes=[ruta])
-    os.makedirs(args.outdir, exist_ok=True)
-    destino = os.path.join(args.outdir, f"diccionario_{FG.nombre_base(nombre)}.xlsx")
-    with open(destino, "wb") as archivo:
-        archivo.write(excel)
-    _imprimir_rutas({"diccionario": destino})
+    formato = _pedir_formato_diccionario()
+    rutas = FG.guardar_diccionario(df, args.outdir, nombre, fuentes=[ruta], formato_diccionario=formato)
+    if "documento_alcance" not in rutas:
+        print("⚠ No se generó el documento de alcance: instale python-docx (pip install python-docx).")
+    _imprimir_rutas(rutas)
 
 
-FLUJOS_GUIADOS = {"guiada": flujo_limpieza_guiada, "merge": flujo_merge, "diccionario": flujo_diccionario}
+def flujo_eda(args) -> None:
+    df, ruta, _ = _pedir_tabla("la tabla (normalmente ya limpia)", args.input)
+    metodo = preguntar("\nMétodo de correlación:", list(ED.METODOS_CORRELACION), defecto="pearson")
+    resultado = FG.ejecutar_eda(df, metodo=metodo)
+    for aviso in resultado.avisos:
+        print(f"  ⚠ {aviso}")
+    if len(resultado.numerico):
+        print("\n--- Estadísticos descriptivos ---\n" + resultado.numerico.to_string())
+        print("\n--- Atípicos (regla del IQR) ---\n" + resultado.atipicos.to_string(index=False))
+    if len(resultado.pares):
+        print(f"\n--- Pares con |correlación| >= {resultado.umbral} ---\n" + resultado.pares.to_string(index=False))
+    elif resultado.correlacion is not None:
+        print(f"\nNingún par llega a |correlación| >= {resultado.umbral}.")
+    if resultado.excluidas:
+        print("\nFuera del análisis numérico: " + ", ".join(f"{c} ({m})" for c, m in resultado.excluidas.items()))
+    print("\n" + ED.LECTURA_EDA)
+    if preguntar("\n¿Guardar CSV, gráficos y script del EDA?", ["si", "no"], defecto="si") == "si":
+        _imprimir_rutas(FG.guardar_eda(resultado, args.outdir, FG.nombre_base(ruta), ruta))
+
+
+FLUJOS_GUIADOS = {"guiada": flujo_limpieza_guiada, "merge": flujo_merge, "diccionario": flujo_diccionario,
+                  "eda": flujo_eda}
 
 
 def correr_flujo_guiado(modo: str, args) -> None:
