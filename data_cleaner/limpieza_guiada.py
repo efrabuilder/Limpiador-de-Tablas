@@ -16,7 +16,8 @@ orden del notebook LimpiezadeDatos.ipynb:
     9. Regla de nulos por columna (rellenar, mediana, eliminar fila...)
    10. Asegurar que no queden vacios: los nulos validos se rellenan con una sola
        palabra elegida («No indica» por defecto); numeros con mediana, 0 o la palabra
-   11. Auditoria final (antes / despues)
+   11. Mes y anio de las fechas (columnas derivadas, opcional)
+   12. Auditoria final (antes / despues)
 
 Reusa los patrones de patrones.py para reconocer el rol de cada columna
 (id, email, telefono, fecha, coordenada, numerica, texto) y sugerir una
@@ -248,6 +249,21 @@ def unificar_fechas(serie, formato="%Y-%m-%d", dia_primero=True):
     return fechas.dt.strftime(formato).astype(object).where(fechas.notna(), np.nan)
 
 
+def extraer_mes_anio(serie, formato="%Y-%m-%d"):
+    """Devuelve (mes, anio) de una columna de fechas escritas como texto con `formato` (la salida de
+    unificar_fechas; si trae hora, se ignora). El mes va de 1 a 12. Ambas son enteros que admiten
+    vacios: donde la fecha es nula o no se puede leer (por ejemplo «No indica»), mes y anio quedan
+    vacios, sin inventar un valor."""
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        fechas = serie
+    else:
+        base = formato.split(" %H")[0]  # el formato sin la hora
+        largo = len(pd.Timestamp(2000, 12, 28).strftime(base))
+        texto = serie.astype("string").str.strip().str.slice(0, largo)
+        fechas = pd.to_datetime(texto, format=base, errors="coerce")
+    return fechas.dt.month.astype("Int64"), fechas.dt.year.astype("Int64")
+
+
 def decimales_de(serie, maximo=6):
     """Cuantos decimales usan los datos de la serie (de 0 a `maximo`). Sirve para
     redondear lo que se calcula (media, mediana) y no dejar ruido como 9.942499999999999."""
@@ -380,7 +396,8 @@ def rellenar_restantes(df, columnas_texto, columnas_numericas, numeros="mediana"
 
 # Orden en que se copian al script generado (cada una puede usar las anteriores).
 _FUNCIONES_SCRIPT = (es_nulo, a_numero, parsear_coordenada, nombres_snake,
-                     limpiar_texto, unificar_fechas, decimales_de, aplicar_regla, rellenar_restantes)
+                     limpiar_texto, unificar_fechas, extraer_mes_anio, decimales_de, aplicar_regla,
+                     rellenar_restantes)
 
 
 # =============================================================================
@@ -860,6 +877,43 @@ def paso_fechas(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-%m-%d"
                       f'{fmt!r}, {dia_primero!r})')
     return df, Paso("Fechas en un solo formato", "\n".join(lineas), "\n".join(codigo),
                     advertencia="\n".join(avisos))
+
+
+def paso_fecha_partes(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-%m-%d",
+                      mes: bool = True, anio: bool = True) -> Tuple[pd.DataFrame, Paso]:
+    """Agrega columnas de mes (1-12) y anio a partir de columnas de fecha que ya estan en un solo
+    `formato` (paso_fechas). Para la columna «fecha_venta» crea «fecha_venta_mes» y
+    «fecha_venta_anio» justo a su derecha. Donde la fecha esta vacia o no se pudo leer, mes y
+    anio quedan vacios (nunca se rellenan: una mediana de meses no tiene sentido). Si la columna
+    nueva ya existe, esa se salta y se avisa."""
+    df = df.copy()
+    lineas, codigo, avisos, reglas = [], [], [], []
+    for col in columnas:
+        if col not in df.columns:
+            continue
+        nuevas = [(f"{col}_mes", "mes (1-12)", 0)] * bool(mes) + [(f"{col}_anio", "año", 1)] * bool(anio)
+        repetidas = [n for n, _, _ in nuevas if n in df.columns]
+        if repetidas:
+            avisos.append(f"«{col}»: ya existe {', '.join(repetidas)}; no se volvió a crear.")
+            continue
+        mes_serie, anio_serie = extraer_mes_anio(df[col], formato)
+        valores = {f"{col}_mes": mes_serie, f"{col}_anio": anio_serie}
+        sin_leer = int((valores[nuevas[0][0]].isna() & df[col].notna()).sum())
+        codigo.append(f'_mes, _anio = extraer_mes_anio(df["{col}"], {formato!r})')
+        posicion = df.columns.get_loc(col) + 1
+        for nombre, etiqueta, indice in nuevas:
+            df.insert(posicion, nombre, valores[nombre])
+            codigo.append(f'df.insert({posicion}, "{nombre}", {"_mes" if indice == 0 else "_anio"})')
+            posicion += 1
+            reglas.append({"columna": nombre, "regla": "dejar",
+                           "descripcion": f"Columna derivada: {etiqueta} de «{col}»; queda vacía donde la fecha no se pudo leer"})
+        lineas.append(f"{col}: se crearon {', '.join(n for n, _, _ in nuevas)}"
+                      + (f"; {sin_leer} filas sin fecha válida (vacías o «No indica») dejaron mes y año vacíos"
+                         if sin_leer else ""))
+    if not lineas and not avisos:
+        return df, Paso("Mes y año de las fechas", "No había columnas de fecha para derivar.", "")
+    return df, Paso("Mes y año de las fechas", "\n".join(lineas) or "No se creó ninguna columna.",
+                    "\n".join(codigo), advertencia="\n".join(avisos), reglas=reglas)
 
 
 # En columnas con nombres de personas no se sugieren uniones por tipeo («Marta» y «Martha» pueden ser dos personas).
