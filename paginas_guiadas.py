@@ -24,7 +24,8 @@ import streamlit as st
 from data_cleaner import diccionario_datos as DD
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
-from data_cleaner.loaders import leer_tabla_subida, listar_hojas, tabla_a_bytes, es_archivo_excel
+from data_cleaner.loaders import (leer_tabla_subida, listar_hojas, tabla_a_bytes, es_archivo_excel,
+                                  tipos_para_selector)
 
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -79,8 +80,9 @@ def _auditoria_cacheado(_antes, firma_antes, _despues, firma_despues, tokens):
 
 
 @st.cache_data(show_spinner="Armando el diccionario…", max_entries=4)
-def _diccionario_cacheado(_df, firma, reglas, origenes, llaves):
-    return DD.construir_diccionario(_df, reglas, origenes, llaves=llaves)
+def _diccionario_cacheado(_df, firma, reglas, origenes, llaves, nombre, fuentes, cruces):
+    return DD.construir_diccionario(_df, reglas, origenes, llaves=llaves, nombre_tabla=nombre,
+                                    fuentes=fuentes, cruces=cruces)
 
 
 @st.cache_data(show_spinner=False, max_entries=4)
@@ -147,7 +149,7 @@ def _cargar_tabla(prefijo: str, titulo: str, extras: dict = None):
         return {"df": df, "nombre": nombre, "hoja": None,
                 "clave": f"{prefijo}:{origen}:{len(df)}:{df.shape[1]}"}
 
-    archivo = st.file_uploader("Archivo", type=["csv", "xlsx", "xlsm", "xls"],
+    archivo = st.file_uploader("Archivo", type=tipos_para_selector(),
                                key=f"{prefijo}_archivo")
     if archivo is None:
         st.info("Suba un archivo para continuar.")
@@ -251,13 +253,13 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
     el diccionario técnico (Excel, para ingenieros y Power BI) y el documento de alcance
     (Word, para quien decide)."""
     st.subheader("📘 Diccionario de datos de la tabla maestra")
-    st.caption("Tipo, completitud, valores únicos y rango salen de los datos, y la descripción se "
-               "redacta sola a partir del nombre, el tipo y el tratamiento de cada campo (revísela y "
-               "corríjala si hace falta). La justificación de negocio y la clasificación ejecutiva las "
-               "escribe usted: es lo que más le sirve a quien decide.")
+    st.caption("Tipo, completitud, valores únicos y rango salen de los datos. La descripción, el origen, la "
+               "justificación de negocio, la clasificación ejecutiva y el modelo de datos se llenan solos "
+               "para cada campo a partir de su nombre, su contenido y la tabla: revíselos y corríjalos "
+               "si conoce un matiz del negocio que los datos no muestran.")
     nombre = st.text_input("Nombre de la tabla maestra", value=nombre_defecto, key=f"{prefijo}_dic_nombre")
     firma = _firma(df)
-    base = _diccionario_cacheado(df, firma, reglas, origenes, llaves).copy()
+    base = _diccionario_cacheado(df, firma, reglas, origenes, llaves, nombre, fuentes, cruces).copy()
     base[DD.COLUMNA_CLASIFICACION] = base[DD.COLUMNA_CLASIFICACION].replace("", None)  # celda vacía del selector
     fijas = [c for c in base.columns if c not in DD.COLUMNAS_EDITABLES]
     editado = st.data_editor(
@@ -265,12 +267,14 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
         key=f"{prefijo}_dic_{hash((nombre_defecto, tuple(df.columns), len(df)))}",
         column_config={
             "Descripción": st.column_config.TextColumn("Descripción", width="large"),
+            "Origen": st.column_config.TextColumn("Origen", width="large"),
             "Justificación de negocio": st.column_config.TextColumn("Justificación de negocio",
                                                                     width="large"),
+            DD.COLUMNA_MODELO: st.column_config.TextColumn(DD.COLUMNA_MODELO, width="large"),
             DD.COLUMNA_CLASIFICACION: st.column_config.SelectboxColumn(
                 DD.COLUMNA_CLASIFICACION, options=list(DD.CLASIFICACIONES), width="medium",
-                help="Marque los KPIs, las variables calculadas o transformadas y las llaves: "
-                     "son las únicas variables que explica el documento de alcance."),
+                help="KPI, variable transformada y llave son las variables que explica el documento de "
+                     "alcance. Atributo descriptivo y metadato de control quedan en el diccionario técnico."),
         },
     )
     editado[DD.COLUMNA_CLASIFICACION] = editado[DD.COLUMNA_CLASIFICACION].fillna("")
