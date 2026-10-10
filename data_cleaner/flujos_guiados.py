@@ -348,7 +348,8 @@ def generar_documentos_diccionario(df: pd.DataFrame, nombre: str, reglas: Option
                                    ) -> Dict[str, Optional[bytes]]:
     """Las tres salidas del diccionario, en bytes: {'basico': Excel de siempre, 'tecnico': diccionario
     tecnico (Excel), 'alcance': documento de alcance (Word) o None si falta python-docx}."""
-    diccionario, resumen, excel = generar_diccionario(df, nombre, reglas, origenes, fuentes, eliminadas, llaves)
+    diccionario, resumen, excel = generar_diccionario(df, nombre, reglas, origenes, fuentes, eliminadas, llaves,
+                                                      cruces)
     try:
         documento = generar_documento_alcance(
             df, diccionario, nombre, fuentes, cruces, eliminadas, textos, etapas, controles_extra,
@@ -537,7 +538,8 @@ def diagnostico_a_dict(diagnostico: Dict) -> Dict:
 
 
 def origenes_de_columnas(resultado: ResultadoMerge) -> Dict[str, str]:
-    """De que tabla viene cada columna del resultado (para el diccionario)."""
+    """De que tabla viene cada columna del resultado (para el diccionario). El diccionario completa el
+    nombre del archivo de cada tabla con los cruces que se le pasan."""
     return {c: ("Auditoría del merge" if c == "_merge" else
                 "Tabla A" if c in resultado.columnas_a else "Tabla B")
             for c in resultado.df.columns}
@@ -598,15 +600,18 @@ def generar_diccionario(df: pd.DataFrame, nombre: str, reglas: Optional[List[Dic
                         origenes: Optional[Dict[str, str]] = None,
                         fuentes: Optional[List[str]] = None,
                         eliminadas: Optional[List[str]] = None,
-                        llaves: Optional[Sequence[str]] = None
+                        llaves: Optional[Sequence[str]] = None,
+                        cruces: Optional[List[Dict]] = None
                         ) -> Tuple[pd.DataFrame, pd.DataFrame, bytes]:
     """(diccionario, resumen, excel). Tipo, completitud y rangos salen de los
     datos; la descripcion se redacta sola (nombre, tipo, origen y tratamiento) y se puede
-    reescribir; la justificacion y la clasificacion ejecutiva (KPI, variable
-    transformada o llave) quedan para completarlas (las celdas vacias salen
-    resaltadas en el Excel). `llaves`: columnas usadas para unir tablas;
-    sin ellas se toman como llaves las de rol identificador."""
-    diccionario = DD.construir_diccionario(df, reglas, origenes, llaves=llaves)
+    reescribir. El origen, la justificacion de negocio, la clasificacion ejecutiva (KPI,
+    variable transformada, llave, atributo descriptivo o metadato de control) y el modelo de
+    datos tambien salen llenos para cualquier tabla (ver negocio.py) y se pueden reescribir.
+    `llaves`: columnas usadas para unir tablas; sin ellas se toman como llaves las de rol
+    identificador. `cruces`: uniones hechas (para el origen y el modelo de datos)."""
+    diccionario = DD.construir_diccionario(df, reglas, origenes, llaves=llaves, nombre_tabla=nombre,
+                                           fuentes=fuentes, cruces=cruces)
     resumen = DD.resumen_tabla(df, nombre, diccionario, fuentes, eliminadas)
     return diccionario, resumen, DD.diccionario_a_excel(diccionario, resumen)
 
