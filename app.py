@@ -25,7 +25,8 @@ from data_cleaner import (
     exportar_reporte_excel,
     exportar,
 )
-from data_cleaner.loaders import load_excel, load_excel_hojas
+from data_cleaner.loaders import (load_csv, load_excel, load_tablas, listar_hojas, listar_tablas,
+                                  es_archivo_excel, tipos_para_selector, EXTENSIONES_TABLA)
 from paginas_guiadas import pagina_limpieza_guiada, pagina_merge, seccion_diccionario  # secciones nuevas
 from data_cleaner.diccionario_datos import reglas_desde_registro
 from data_cleaner.cleaner import ACCIONES_VALIDAS  # noqa: F401 (referencia)
@@ -150,13 +151,18 @@ def _pagina_modelo_datos() -> None:
     )
 
     archivo_modelo = st.file_uploader(
-        "Excel con las hojas a modelar", type=["xlsx", "xls"], key="archivo_modelo",
+        "Excel (cualquier tipo) con las hojas a modelar, o uno o varios CSV (cada CSV es una tabla)",
+        type=tipos_para_selector(), key="archivo_modelo", accept_multiple_files=True,
     )
-    if archivo_modelo is None:
-        st.info("Suba un archivo Excel para empezar.")
+    if not archivo_modelo:
+        st.info("Suba un archivo Excel o CSV para empezar.")
         return
 
-    hojas_disponibles = pd.ExcelFile(archivo_modelo).sheet_names
+    try:
+        hojas_disponibles = listar_tablas(list(archivo_modelo))
+    except Exception as exc:
+        st.error(f"No se pudo leer el archivo: {exc}")
+        return
     hojas_elegidas = st.multiselect(
         "Hojas a incluir en el modelo (una tabla por hoja)",
         hojas_disponibles, default=hojas_disponibles, key="hojas_modelo",
@@ -165,8 +171,7 @@ def _pagina_modelo_datos() -> None:
         st.info("Elija al menos una hoja.")
         return
 
-    archivo_modelo.seek(0)
-    hojas_cargadas = load_excel_hojas(archivo_modelo, hojas=hojas_elegidas)
+    hojas_cargadas = load_tablas(list(archivo_modelo), hojas=hojas_elegidas)
 
     st.divider()
     st.subheader("1. Definir cada tabla")
@@ -380,11 +385,11 @@ with st.sidebar:
     origen = st.radio("Fuente", ["Archivo (CSV / Excel)", "Base de datos SQL", "Datos de ejemplo"], index=0)
 
     if origen == "Archivo (CSV / Excel)":
-        archivo = st.file_uploader("Seleccione un archivo", type=["csv", "xlsx", "xls"])
+        archivo = st.file_uploader("Seleccione un archivo", type=tipos_para_selector())
         if archivo is not None:
             try:
-                if archivo.name.lower().endswith(".csv"):
-                    df_cargado = pd.read_csv(archivo)
+                if not es_archivo_excel(archivo.name):  # CSV / TXT / TSV
+                    df_cargado = load_csv(archivo)
                     clave_fuente = archivo.name
                 else:
                     # Cada hoja de un Excel puede ser una tabla distinta
@@ -393,7 +398,7 @@ with st.sidebar:
                     # que no existen entre sí y genera NaN falsos. Se pide
                     # elegir una hoja específica; "todas concatenadas" solo
                     # tiene sentido si de verdad es la misma tabla repartida.
-                    hojas_disponibles = pd.ExcelFile(archivo).sheet_names
+                    hojas_disponibles = listar_hojas(archivo)
                     if len(hojas_disponibles) == 1:
                         hoja_elegida = hojas_disponibles[0]
                     else:
@@ -832,7 +837,7 @@ if st.session_state.get("df_limpio") is not None:
     # ----------------------------------------------------------------------
     st.divider()
     _fuente = st.session_state.nombre_fuente.split("::")
-    _nombre_tabla = _fuente[0] if _fuente[0].lower().endswith((".csv", ".xlsx", ".xls")) else _fuente[-1]
+    _nombre_tabla = _fuente[0] if _fuente[0].lower().endswith(EXTENSIONES_TABLA) else _fuente[-1]
     seccion_diccionario(
         df_limpio, "cl", f"{_nombre_tabla.rsplit('.', 1)[0]}_limpio",
         reglas=reglas_desde_registro(st.session_state.registro),
