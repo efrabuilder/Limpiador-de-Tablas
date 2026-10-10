@@ -9,6 +9,10 @@ Las dos secciones nuevas de la app (Streamlit):
     - pagina_merge(): unir dos tablas con chequeo de llaves y auditoria
       (ver data_cleaner/merge_tablas.py)
 
+Despues de limpiar o unir, seccion_eda() muestra el EDA estadistico (descriptivos,
+correlacion y boxplots; ver data_cleaner/eda.py) y seccion_diccionario() deja bajar el
+diccionario tecnico en Excel, CSV o los dos.
+
 Las dos aceptan CSV y Excel, y si el libro tiene varias hojas se elige la
 hoja. Se llaman desde app.py segun el modo elegido en la barra lateral.
 """
@@ -22,6 +26,7 @@ import pandas as pd
 import streamlit as st
 
 from data_cleaner import diccionario_datos as DD
+from data_cleaner import eda as ED
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
 from data_cleaner.loaders import (leer_tabla_subida, listar_hojas, tabla_a_bytes, es_archivo_excel,
@@ -29,6 +34,7 @@ from data_cleaner.loaders import (leer_tabla_subida, listar_hojas, tabla_a_bytes
 
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+MIME_CSV = "text/csv"
 
 
 # --------------------------------------------------------------------------
@@ -96,11 +102,34 @@ def _tecnico_cacheado(_df, firma, editado, resumen):
 
 
 @st.cache_data(show_spinner=False, max_entries=4)
+def _tecnico_csv_cacheado(_df, firma, editado):
+    return DD.diccionario_tecnico_csv(_df, editado)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
 def _alcance_cacheado(_df, firma, editado, nombre, fuentes, cruces, eliminadas, textos, etapas,
-                      controles_extra, pendientes_extra):
-    return DD.documento_alcance_docx(_df, editado, nombre, fuentes, cruces, eliminadas, textos=textos,
+                      controles_extra, pendientes_extra, nombre_tecnico=DD.NOMBRE_TECNICO):
+    return DD.documento_alcance_docx(_df, editado, nombre, fuentes, cruces, eliminadas,
+                                     nombre_tecnico=nombre_tecnico, textos=textos,
                                      etapas=etapas, controles_extra=controles_extra,
                                      pendientes_extra=pendientes_extra)
+
+
+@st.cache_data(show_spinner="Calculando el EDA…", max_entries=4)
+def _eda_cacheado(_df, firma, tokens, metodo, umbral, factor):
+    return ED.analizar_eda(_df, tokens, metodo, umbral, factor)
+
+
+@st.cache_data(show_spinner="Dibujando los boxplots…", max_entries=8)
+def _png_boxplots_cacheado(_num, firma, columnas):
+    figura = ED.figura_boxplots(_num, list(columnas))
+    return ED.figura_a_png(figura) if figura is not None else None
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _png_correlacion_cacheado(_corr, firma, metodo):
+    figura = ED.figura_correlacion(_corr)
+    return ED.figura_a_png(figura) if figura is not None else None
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -245,13 +274,16 @@ def _boton_enviar_a_clasica(df: pd.DataFrame, nombre: str, al_enviar, prefijo: s
               help="Cambia al modo «Limpieza de una tabla» con esta tabla ya cargada.")
 
 
+ETIQUETAS_FORMATO_TECNICO = {"xlsx": "Excel (.xlsx)", "csv": "CSV (.csv)", "ambos": "Los dos"}
+
+
 def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reglas=None,
                          origenes=None, fuentes=None, eliminadas=None, llaves=None,
                          cruces=None, etapas=None, controles_extra=None, advertencias=None) -> None:
     """Diccionario de datos de la tabla maestra. Se completan la descripción, la justificación
     y la clasificación ejecutiva de cada campo, y se descargan los dos documentos:
-    el diccionario técnico (Excel, para ingenieros y Power BI) y el documento de alcance
-    (Word, para quien decide)."""
+    el diccionario técnico (Excel o CSV, a elección, para ingenieros y Power BI) y el
+    documento de alcance (Word, para quien decide)."""
     st.subheader("📘 Diccionario de datos de la tabla maestra")
     st.caption("Tipo, completitud, valores únicos y rango salen de los datos. La descripción, el origen, la "
                "justificación de negocio, la clasificación ejecutiva y el modelo de datos se llenan solos "
@@ -314,21 +346,34 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
     pendientes_extra += [("Advertencia del cruce", str(av)) for av in (advertencias or [])]
 
     st.markdown("**Descargar el diccionario en el formato que necesite**")
+    formato_tecnico = st.radio(
+        "Formato del diccionario técnico", list(ETIQUETAS_FORMATO_TECNICO), horizontal=True,
+        format_func=ETIQUETAS_FORMATO_TECNICO.get, key=f"{prefijo}_dic_formato_tecnico",
+        help="Excel: para revisar y editar a mano (trae resumen y leyenda). CSV: archivo plano legible por "
+             "máquina, para catálogos de datos, Power BI o control de versiones. El documento de alcance "
+             "enlaza al CSV si baja los dos.")
+    nombre_tecnico = DD.nombre_tecnico_de(formato_tecnico)
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.caption("**Técnico (Excel)** · una fila por campo, con tipos nativos y límites lógicos, más "
+        st.caption("**Técnico** · una fila por campo, con tipos nativos y límites lógicos. El Excel suma "
                    "resumen y leyenda. Para ingenieros, catálogos de datos y Power BI.")
-        st.download_button("⬇️ Diccionario técnico (Excel)",
-                           _tecnico_cacheado(df, firma, editado, resumen),
-                           file_name=DD.NOMBRE_TECNICO, mime=MIME_XLSX,
-                           key=f"{prefijo}_dic_descarga_tecnico", use_container_width=True)
+        if formato_tecnico in ("xlsx", "ambos"):
+            st.download_button("⬇️ Diccionario técnico (Excel)",
+                               _tecnico_cacheado(df, firma, editado, resumen),
+                               file_name=DD.NOMBRE_TECNICO, mime=MIME_XLSX,
+                               key=f"{prefijo}_dic_descarga_tecnico", use_container_width=True)
+        if formato_tecnico in ("csv", "ambos"):
+            st.download_button("⬇️ Diccionario técnico (CSV)",
+                               _tecnico_csv_cacheado(df, firma, editado),
+                               file_name=DD.NOMBRE_TECNICO_CSV, mime=MIME_CSV,
+                               key=f"{prefijo}_dic_descarga_tecnico_csv", use_container_width=True)
     with c2:
         st.caption("**Ejecutivo (Word)** · documento de alcance: arquitectura final, llaves de unión y "
-                   "solo las variables críticas. Remite al Excel técnico para el detalle.")
+                   "solo las variables críticas. Remite al diccionario técnico para el detalle.")
         try:
             documento = _alcance_cacheado(
                 df, firma, editado, nombre, fuentes, cruces, eliminadas, textos, etapas,
-                controles_extra, pendientes_extra)
+                controles_extra, pendientes_extra, nombre_tecnico)
         except ImportError:
             st.info("Para generar el documento de alcance instale python-docx: `pip install python-docx`.")
         else:
@@ -343,7 +388,98 @@ def seccion_diccionario(df: pd.DataFrame, prefijo: str, nombre_defecto: str, reg
                            file_name=f"diccionario_{_nombre_base(nombre)}.xlsx", mime=MIME_XLSX,
                            key=f"{prefijo}_dic_descarga", use_container_width=True)
     st.caption(f"Para entregar, use los dos primeros juntos y en la misma carpeta: el documento de alcance enlaza a "
-               f"«{DD.NOMBRE_TECNICO}».")
+               f"«{nombre_tecnico}».")
+
+
+# --------------------------------------------------------------------------
+# EDA estadistico
+# --------------------------------------------------------------------------
+
+def seccion_eda(df: pd.DataFrame, prefijo: str, nombre: str, tokens=None) -> None:
+    """EDA estadístico de la tabla ya limpia (o unida): descriptivos, matriz de correlación y atípicos
+    con boxplots. Solo mide: no cambia la tabla. Descarga los resultados y el script que los repite."""
+    st.subheader("📊 EDA estadístico")
+    st.caption("La exploración matemática que se hace en Python antes de abrir Power BI: cómo se distribuyen "
+               "los números, qué variables se mueven juntas y qué valores se salen de lo normal.")
+    tokens = tuple(tokens) if tokens else LG.TOKENS_NULOS_BASE
+    o1, o2, o3 = st.columns(3)
+    metodo = o1.selectbox("Método de correlación", list(ED.METODOS_CORRELACION), key=f"{prefijo}_eda_metodo",
+                          help="Pearson mide relación lineal; Spearman y Kendall van por rangos y se "
+                               "alteran menos con los atípicos.")
+    umbral = o2.slider("Avisar desde |correlación| ≥", 0.5, 0.99, ED.UMBRAL_CORRELACION, 0.01,
+                       key=f"{prefijo}_eda_umbral")
+    factor = o3.selectbox("Regla de atípicos (factor del IQR)", [1.5, 3.0], key=f"{prefijo}_eda_factor",
+                          format_func={1.5: "1.5 · estándar (el del boxplot)", 3.0: "3.0 · solo extremos"}.get)
+    firma = _firma(df)
+    try:
+        r = _eda_cacheado(df, firma, tokens, metodo, umbral, factor)
+    except ValueError as exc:
+        st.info(str(exc))
+        return
+    for aviso in r.avisos:
+        st.info(aviso)
+
+    pestanas = st.tabs(["Descriptivos", "Correlación", "Atípicos y boxplots"])
+    with pestanas[0]:
+        if len(r.numerico):
+            st.markdown("**Columnas numéricas** (equivale a `describe()`; la asimetría muy lejos de 0 avisa de "
+                        "colas largas)")
+            st.dataframe(r.numerico)
+        if len(r.categorico):
+            with st.expander("Columnas de texto y otras (valores únicos y más frecuente)"):
+                st.dataframe(r.categorico, hide_index=True)
+        if r.excluidas:
+            st.caption("Fuera del análisis numérico: " + ", ".join(f"{c} ({m})" for c, m in r.excluidas.items()))
+    with pestanas[1]:
+        if r.correlacion is None:
+            st.info("Hace falta al menos dos columnas numéricas para calcular correlaciones.")
+        else:
+            png = _png_correlacion_cacheado(r.correlacion, (firma, metodo, umbral), metodo)
+            if png:
+                st.image(png)
+            if len(r.pares):
+                st.warning(f"{len(r.pares)} pares con |correlación| ≥ {umbral}: pueden ser columnas casi repetidas "
+                           "(total, subtotal, cantidad × precio) o una relación real. Una correlación alta no "
+                           "prueba que una variable cause la otra.")
+                st.dataframe(r.pares, hide_index=True)
+            else:
+                st.success(f"Ningún par llega a |correlación| ≥ {umbral}.")
+    with pestanas[2]:
+        if r.atipicos.empty:
+            st.info("No hay columnas numéricas para buscar atípicos.")
+        else:
+            con_atipicos = int((r.atipicos["n_atipicos"] > 0).sum())
+            st.markdown(f"**{con_atipicos} de {len(r.atipicos)} columnas** tienen valores fuera de "
+                        f"[Q1 − {factor}·IQR, Q3 + {factor}·IQR].")
+            st.dataframe(r.atipicos, hide_index=True)
+            elegidas = st.multiselect("Columnas a dibujar", list(r.tabla_numerica.columns),
+                                      default=list(r.atipicos.loc[r.atipicos["n_atipicos"] > 0, "columna"])[
+                                          :ED.MAX_BOXPLOTS] or list(r.tabla_numerica.columns)[:6],
+                                      max_selections=ED.MAX_BOXPLOTS, key=f"{prefijo}_eda_cols_box")
+            png_box = (_png_boxplots_cacheado(r.tabla_numerica, (firma, tuple(tokens)), tuple(elegidas))
+                       if elegidas else None)
+            if png_box:
+                st.image(png_box)
+            st.info(ED.LECTURA_EDA)
+
+    st.markdown("**Descargar el EDA**")
+    base = _nombre_base(nombre)
+    d1, d2, d3, d4 = st.columns(4)
+    if len(r.numerico):
+        d1.download_button("⬇️ Descriptivos (CSV)", r.numerico.to_csv().encode("utf-8-sig"),
+                           file_name=f"eda_{base}_describe.csv", mime=MIME_CSV, key=f"{prefijo}_eda_dl_desc",
+                           use_container_width=True)
+        d2.download_button("⬇️ Atípicos (CSV)", r.atipicos.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"eda_{base}_atipicos.csv", mime=MIME_CSV, key=f"{prefijo}_eda_dl_atip",
+                           use_container_width=True)
+    if r.correlacion is not None:
+        d3.download_button("⬇️ Correlación (CSV)", r.correlacion.to_csv().encode("utf-8-sig"),
+                           file_name=f"eda_{base}_correlacion.csv", mime=MIME_CSV,
+                           key=f"{prefijo}_eda_dl_corr", use_container_width=True)
+    d4.download_button("⬇️ Script del EDA", ED.generar_script_eda(f"{base}.csv", metodo, umbral, factor),
+                       file_name=f"eda_{base}_script.py", mime="text/x-python", key=f"{prefijo}_eda_dl_py",
+                       use_container_width=True,
+                       help="Repite este EDA con pandas y seaborn sobre la tabla limpia que guardó.")
 
 
 # --------------------------------------------------------------------------
@@ -469,6 +605,21 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
                                   help="Para «05/01/2025»: marcado = 5 de enero; sin marcar = 1 de mayo. "
                                        "Si el día es mayor a 12 (ej. 31/01/2025) no hay duda.")
 
+    cols_partes, con_mes, con_anio = [], True, True
+    if cols_fechas:
+        cols_partes = st.multiselect(
+            "Sacar mes y año de estas fechas (opcional)", cols_fechas, default=[],
+            key=f"lg_cols_partes_{sufijo}",
+            help="Crea «<columna>_mes» (1-12) y «<columna>_anio» al lado de la fecha, para agrupar por período "
+                 "sin armar columnas a mano. Se calculan al final de la limpieza; donde la fecha quede vacía, "
+                 "mes y año también quedan vacíos (no se rellenan).")
+        if cols_partes:
+            q1, q2 = st.columns(2)
+            con_mes = q1.checkbox("Mes (1-12)", value=True, key=f"lg_partes_mes_{sufijo}")
+            con_anio = q2.checkbox("Año", value=True, key=f"lg_partes_anio_{sufijo}")
+            if not (con_mes or con_anio):
+                st.warning("Marque al menos mes o año para crear las columnas.")
+
     config = {
         "tokens": tokens, "nombres_snake": snake, "vacios_a_nan": vacios,
         "texto": {"columnas": cols_texto, "minusculas": minus, "espacios": espacios,
@@ -587,6 +738,10 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
                 for r in paso_cierre.reglas or []:  # el diccionario debe decir lo que se hizo
                     por_columna[r["columna"]] = {**por_columna.get(r["columna"], {}), **r}
                 reglas = list(por_columna.values())
+            if cols_partes and (con_mes or con_anio):  # al final: así mes y año no se rellenan con una mediana
+                df_final, paso_partes = LG.paso_fecha_partes(df_final, cols_partes, formato_fecha, con_mes, con_anio)
+                pasos_reglas.append(paso_partes)
+                reglas = reglas + list(paso_partes.reglas or [])
         except ValueError as exc:
             st.error(str(exc))
         else:
@@ -634,6 +789,8 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     _botones_descarga(resultado["df"], base_nombre, script, "lg")
     _boton_enviar_a_clasica(resultado["df"], f"{base_nombre}.csv", al_enviar_a_clasica, "lg")
     st.caption("Esta tabla también está disponible como Tabla A en la sección «Merge».")
+
+    seccion_eda(resultado["df"], "lg", base_nombre, resultado["tokens"])
 
     reglas_aplicadas = resultado.get("reglas") or []
     eliminadas = [r["columna"] for r in reglas_aplicadas
@@ -835,6 +992,8 @@ def pagina_merge(al_enviar_a_clasica=None) -> None:
     _boton_enviar_a_clasica(resultado["df"], "resultado_merge.csv", al_enviar_a_clasica, "m")
     st.button("Usar este resultado como Tabla A de otro merge", on_click=_usar_resultado_como_a,
               key="m_encadenar")
+
+    seccion_eda(resultado["df"], "m", "tabla_maestra")
 
     origenes = {c: ("Auditoría del merge" if c == "_merge" else
                     "Tabla A" if c in df_a.columns else "Tabla B") for c in resultado["df"].columns}
