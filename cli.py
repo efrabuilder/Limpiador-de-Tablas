@@ -32,6 +32,7 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, exportar,
 )
+from data_cleaner import eda as ED
 from data_cleaner import flujos_guiados as FG
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
@@ -790,6 +791,17 @@ def limpieza_guiada_cmd(
         "(con palabra la columna pasa a texto)."),
     fechas_cierre: bool = typer.Option(
         True, "--fechas-cierre/--no-fechas-cierre", help="Incluir las fechas en el cierre sin vacíos."),
+    mes_anio: Optional[str] = typer.Option(
+        None, "--mes-anio",
+        help="Fechas de las que sacar columnas «<col>_mes» y «<col>_anio» (coma-separadas; '*' = todas las "
+             "estandarizadas con --fechas). Se crean al final y quedan vacías donde la fecha no se pudo leer."),
+    mes: bool = typer.Option(True, "--mes/--no-mes", help="Con --mes-anio: crear la columna de mes (1-12)."),
+    anio: bool = typer.Option(True, "--anio/--no-anio", help="Con --mes-anio: crear la columna de año."),
+    formato_diccionario: str = typer.Option(
+        "xlsx", "--formato-diccionario",
+        help="Formato del diccionario técnico: xlsx, csv o ambos (el documento de alcance enlaza al CSV si hay dos)."),
+    eda: bool = typer.Option(False, "--eda/--no-eda",
+                             help="Guardar también el EDA estadístico (descriptivos, correlación y boxplots)."),
     proyecto: str = typer.Option("", "--proyecto", help="Nombre del proyecto, para el documento de alcance."),
     autor: str = typer.Option("", "--autor", help="Autor(a), para el documento de alcance."),
     regla: List[str] = typer.Option(
@@ -826,7 +838,8 @@ def limpieza_guiada_cmd(
 
         resultado = FG.ejecutar_limpieza_guiada(
             df, config, ajustes, nombre_archivo=input, hoja=hoja, palabra=palabra, unir_equivalentes=unir_equivalentes,
-            asegurar_sin_vacios=cierre, numeros_cierre=numeros_cierre, incluir_fechas_cierre=fechas_cierre)
+            asegurar_sin_vacios=cierre, numeros_cierre=numeros_cierre, incluir_fechas_cierre=fechas_cierre,
+            fecha_partes=_lista_o_none(mes_anio) or None, fecha_partes_mes=mes, fecha_partes_anio=anio)
         for paso in resultado.pasos:
             console.print(f"• [bold]{paso.titulo}[/bold]: {paso.detalle}")
         for aviso in resultado.avisos:
@@ -839,7 +852,8 @@ def limpieza_guiada_cmd(
         if len(auditoria["nulos_restantes"]):
             _imprimir_dataframe(auditoria["nulos_restantes"].reset_index(), "Nulos que quedan")
         _imprimir_rutas(FG.guardar_limpieza_guiada(resultado, outdir, formato_salida,
-                                                   textos_alcance={"proyecto": proyecto, "autor": autor}))
+                                                   textos_alcance={"proyecto": proyecto, "autor": autor},
+                                                   formato_diccionario=formato_diccionario, incluir_eda=eda))
 
 
 @app.command("merge")
@@ -867,6 +881,11 @@ def merge_cmd(
     outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
     formato_salida: str = typer.Option("csv", "--formato-salida", help="csv, xlsx o ambos."),
     solo_diagnostico: bool = typer.Option(False, "--solo-diagnostico", help="Solo revisa las llaves, sin unir."),
+    formato_diccionario: str = typer.Option(
+        "xlsx", "--formato-diccionario",
+        help="Formato del diccionario técnico: xlsx, csv o ambos (el documento de alcance enlaza al CSV si hay dos)."),
+    eda: bool = typer.Option(False, "--eda/--no-eda",
+                             help="Guardar también el EDA estadístico de la tabla maestra."),
     proyecto: str = typer.Option("", "--proyecto", help="Nombre del proyecto, para el documento de alcance."),
     autor: str = typer.Option("", "--autor", help="Autor(a), para el documento de alcance."),
 ):
@@ -906,7 +925,8 @@ def merge_cmd(
         for aviso in aud["advertencias"]:
             console.print(f"[yellow]⚠ {aviso}[/yellow]")
         _imprimir_rutas(FG.guardar_merge(resultado, outdir, formato=formato_salida,
-                                         textos_alcance={"proyecto": proyecto, "autor": autor}))
+                                         textos_alcance={"proyecto": proyecto, "autor": autor},
+                                         formato_diccionario=formato_diccionario, incluir_eda=eda))
 
 
 @app.command("diccionario")
@@ -915,22 +935,63 @@ def diccionario_cmd(
     hoja: Optional[str] = typer.Option(None, "--hoja", help="Hoja del libro Excel (si tiene varias)."),
     nombre: Optional[str] = typer.Option(None, "--nombre", help="Nombre de la tabla maestra (por defecto, el del archivo)."),
     outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
+    formato_diccionario: str = typer.Option(
+        "xlsx", "--formato-diccionario",
+        help="Formato del diccionario técnico: xlsx, csv o ambos (el documento de alcance enlaza al CSV si hay dos)."),
     proyecto: str = typer.Option("", "--proyecto", help="Nombre del proyecto, para el documento de alcance."),
     autor: str = typer.Option("", "--autor", help="Autor(a), para el documento de alcance."),
 ):
-    """Diccionario de datos en sus tres salidas: Excel básico (Resumen y Diccionario), diccionario técnico
-    (diccionario_datos.xlsx, una fila por campo con tipos y límites) y documento de alcance en Word (necesita
-    python-docx). Tipo, completitud, valores únicos y rango salen de los datos; las descripciones se redactan
+    """Diccionario de datos en sus salidas: Excel básico (Resumen y Diccionario), diccionario técnico
+    (diccionario_datos.xlsx y/o diccionario_datos.csv a elección con --formato-diccionario, una fila por campo
+    con tipos y límites) y documento de alcance en Word (necesita python-docx). Tipo, completitud, valores únicos y rango salen de los datos; las descripciones se redactan
     solas y se pueden reescribir; la justificación de negocio queda resaltada para completarla."""
     with _errores_de_usuario():
         df = FG.leer_tabla_guiada(input, hoja=hoja)
         tabla = nombre or FG.nombre_base(input)
         rutas = FG.guardar_diccionario(df, outdir, tabla, fuentes=[input],
-                                       textos_alcance={"proyecto": proyecto, "autor": autor})
+                                       textos_alcance={"proyecto": proyecto, "autor": autor},
+                                       formato_diccionario=formato_diccionario)
         if "documento_alcance" not in rutas:
             console.print("[yellow]⚠ No se generó el documento de alcance: instale python-docx "
                           "(pip install python-docx).[/yellow]")
         _imprimir_rutas(rutas)
+
+
+@app.command("eda")
+def eda_cmd(
+    input: str = typer.Option(..., "--input", "-i", help="Tabla (CSV/Excel), normalmente ya limpia."),
+    hoja: Optional[str] = typer.Option(None, "--hoja", help="Hoja del libro Excel (si tiene varias)."),
+    outdir: str = typer.Option("salida", "--outdir", "-o", help="Carpeta de salida."),
+    metodo: str = typer.Option("pearson", "--metodo", help="Correlación: " + ", ".join(ED.METODOS_CORRELACION) + "."),
+    umbral: float = typer.Option(ED.UMBRAL_CORRELACION, "--umbral",
+                                 help="Avisar de los pares con |correlación| a partir de este valor."),
+    factor_iqr: float = typer.Option(ED.FACTOR_IQR, "--factor-iqr",
+                                     help="Atípicos: fuera de Q1 - f·IQR y Q3 + f·IQR (1.5 estándar, 3 solo extremos)."),
+    tokens_extra: Optional[str] = typer.Option(
+        None, "--tokens-extra", help="Textos que cuentan como nulo además de la celda vacía (coma-separados)."),
+    sin_archivos: bool = typer.Option(False, "--sin-archivos", help="Solo mostrar el EDA, sin guardar nada."),
+):
+    """EDA estadístico: descriptivos (describe), matriz de correlación y atípicos con boxplots (regla del IQR).
+    Solo mide, no modifica la tabla: si un atípico es un error de captura, corríjalo en el script de limpieza
+    (no en Power BI) para que sea reproducible. Guarda CSV, PNG y un script de pandas + seaborn."""
+    with _errores_de_usuario():
+        df = FG.leer_tabla_guiada(input, hoja=hoja, como_texto=False)
+        console.print(f"Tabla cargada: [bold]{len(df)}[/bold] filas x [bold]{len(df.columns)}[/bold] columnas.")
+        resultado = FG.ejecutar_eda(df, _lista_o_none(tokens_extra), metodo, umbral, factor_iqr)
+        for aviso in resultado.avisos:
+            console.print(f"[yellow]⚠ {aviso}[/yellow]")
+        if len(resultado.numerico):
+            _imprimir_dataframe(resultado.numerico.reset_index(), "Estadísticos descriptivos")
+            _imprimir_dataframe(resultado.atipicos, f"Atípicos (IQR x {factor_iqr})")
+        if len(resultado.pares):
+            _imprimir_dataframe(resultado.pares, f"Pares con |correlación| ≥ {umbral}")
+        elif resultado.correlacion is not None:
+            console.print(f"Ningún par llega a |correlación| ≥ {umbral}.")
+        if resultado.excluidas:
+            console.print("Fuera del análisis numérico: " + ", ".join(f"{c} ({m})" for c, m in resultado.excluidas.items()))
+        console.print(f"\n[dim]{ED.LECTURA_EDA}[/dim]")
+        if not sin_archivos:
+            _imprimir_rutas(FG.guardar_eda(resultado, outdir, FG.nombre_base(input), input))
 
 
 if __name__ == "__main__":
