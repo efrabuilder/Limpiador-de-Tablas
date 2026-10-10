@@ -662,8 +662,11 @@ class VentanaDiccionario(_VentanaBase):
 
         botones = ttk.Frame(self, padding=(8, 8, 8, 0))
         botones.pack(fill="x")
-        ttk.Button(botones, text="💾 Técnico (Excel)...",
+        self.var_formato_tecnico = tk.StringVar(value="xlsx")
+        ttk.Button(botones, text="💾 Diccionario técnico...",
                    command=lambda: self._ejecutar(self._guardar_tecnico)).pack(side="left")
+        ttk.Radiobutton(botones, text="Excel", value="xlsx", variable=self.var_formato_tecnico).pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(botones, text="CSV", value="csv", variable=self.var_formato_tecnico).pack(side="left", padx=(4, 0))
         ttk.Button(botones, text="💾 Documento de alcance (Word)...",
                    command=lambda: self._ejecutar(self._guardar_alcance)).pack(side="left", padx=8)
         ttk.Button(botones, text="💾 Excel básico...",
@@ -671,7 +674,7 @@ class VentanaDiccionario(_VentanaBase):
         ttk.Label(self, text="Tipo, completitud, valores únicos y rango salen de los datos y la descripción se "
                              "redacta sola (puede reescribirla en el Excel básico); la justificación de negocio y la "
                              "clasificación ejecutiva (KPI, variable transformada o llave) quedan en blanco para completarlas. El documento de alcance enlaza al "
-                             f"técnico: guarde los dos en la misma carpeta (el técnico se llama «{DD.NOMBRE_TECNICO}»).",
+                             f"técnico: guarde los dos en la misma carpeta (el técnico se llama «{DD.NOMBRE_TECNICO}» en Excel o «{DD.NOMBRE_TECNICO_CSV}» en CSV, según el formato elegido).",
                   foreground="gray", wraplength=960).pack(anchor="w", padx=8, pady=6)
         self.tabla = _crear_tabla(self)
         self.tabla.master.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -717,15 +720,20 @@ class VentanaDiccionario(_VentanaBase):
 
     def _guardar_tecnico(self) -> None:
         self._asegurar_generado()
-        contenido = FG.generar_diccionario_tecnico(self.df, self.diccionario, self.resumen)
-        self._guardar_bytes(contenido, ".xlsx", "Excel", DD.NOMBRE_TECNICO)
+        formato = self.var_formato_tecnico.get()
+        contenido = FG.generar_diccionario_tecnico(self.df, self.diccionario, self.resumen, formato)
+        if formato == "csv":
+            self._guardar_bytes(contenido, ".csv", "CSV", DD.NOMBRE_TECNICO_CSV)
+        else:
+            self._guardar_bytes(contenido, ".xlsx", "Excel", DD.NOMBRE_TECNICO)
 
     def _guardar_alcance(self) -> None:
         self._asegurar_generado()
         textos = {"proyecto": self.var_proyecto.get(), "autor": self.var_autor.get()}
         try:
             contenido = FG.generar_documento_alcance(
-                self.df, self.diccionario, self._nombre_tabla(), [self.nombre], textos=textos)
+                self.df, self.diccionario, self._nombre_tabla(), [self.nombre], textos=textos,
+                nombre_tecnico=DD.nombre_tecnico_de(self.var_formato_tecnico.get()))
         except ImportError:
             raise ValueError("Para generar el documento de alcance instale python-docx: pip install python-docx")
         self._guardar_bytes(contenido, ".docx", "Word",
