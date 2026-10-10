@@ -8,9 +8,46 @@ import re
 import pandas as pd
 
 
-def load_csv(path: str, **kwargs) -> pd.DataFrame:
-    """Carga un archivo CSV a un DataFrame."""
-    return pd.read_csv(path, **kwargs)
+# -----------------------------------------------------------------------------
+# Formatos aceptados en toda la app (web, escritorio, CLI, API y scripts).
+# -----------------------------------------------------------------------------
+
+EXTENSIONES_EXCEL = (".xlsx", ".xlsm", ".xltx", ".xltm", ".xls", ".xlsb", ".ods")
+EXTENSIONES_CSV = (".csv", ".txt", ".tsv", ".tab")
+EXTENSIONES_TABLA = EXTENSIONES_CSV + EXTENSIONES_EXCEL
+
+# Motores de pandas para leer cada formato, en el orden en que se prueban.
+_MOTORES_POR_EXTENSION = {
+    ".xlsx": ("openpyxl",), ".xlsm": ("openpyxl",), ".xltx": ("openpyxl",), ".xltm": ("openpyxl",),
+    ".xls": ("xlrd", "openpyxl"), ".xlsb": ("pyxlsb",), ".ods": ("odf",),
+}
+_PAQUETE_POR_MOTOR = {"xlrd": "xlrd", "pyxlsb": "pyxlsb", "odf": "odfpy", "openpyxl": "openpyxl"}
+
+
+def tipos_para_selector(incluir_csv: bool = True, incluir_excel: bool = True) -> list:
+    """Extensiones sin punto para st.file_uploader(type=...): ['csv', 'txt', 'xlsx', ...]."""
+    extensiones = (EXTENSIONES_CSV if incluir_csv else ()) + (EXTENSIONES_EXCEL if incluir_excel else ())
+    return [e.lstrip(".") for e in extensiones]
+
+
+def patrones_para_dialogo(incluir_csv: bool = True, incluir_excel: bool = True) -> str:
+    """Patrones para tkinter filedialog: '*.csv *.txt *.xlsx ...'."""
+    extensiones = (EXTENSIONES_CSV if incluir_csv else ()) + (EXTENSIONES_EXCEL if incluir_excel else ())
+    return " ".join(f"*{e}" for e in extensiones)
+
+
+def load_csv(path, **kwargs) -> pd.DataFrame:
+    """Carga un CSV (o TXT/TSV) a un DataFrame. Detecta solo la codificación (utf-8 con o sin BOM, utf-16,
+    cp1252, latin-1) y el separador (coma, punto y coma, tabulador o barra vertical), salvo que se pase `sep`.
+    `path` puede ser una ruta, un archivo abierto o un archivo subido."""
+    texto = _leer_texto_csv(path)
+    if "sep" not in kwargs and "delimiter" not in kwargs:
+        texto, kwargs["sep"] = _texto_y_separador(texto)
+    try:
+        return pd.read_csv(io.StringIO(texto), **kwargs)
+    except pd.errors.ParserError:  # filas con más celdas que el encabezado: el motor flexible las acepta
+        kwargs.pop("low_memory", None)
+        return pd.read_csv(io.StringIO(texto), engine="python", **kwargs)
 
 
 # -----------------------------------------------------------------------------
@@ -87,6 +124,12 @@ def _limpiar_columnas_sin_nombre(df: pd.DataFrame) -> pd.DataFrame:
         nombre = "" if pd.isna(col) else str(col).strip()
         sin_nombre = nombre == "" or re.match(r'^unnamed:\s*\d+$', nombre, re.IGNORECASE)
         nuevas_columnas.append(f"Columna_sin_nombre_{i + 1}" if sin_nombre else nombre)
+    vistos: dict = {}
+    for i, nombre in enumerate(nuevas_columnas):  # encabezados repetidos: «precio», «precio_2», «precio_3»
+        veces = vistos.get(nombre, 0) + 1
+        vistos[nombre] = veces
+        if veces > 1:
+            nuevas_columnas[i] = f"{nombre}_{veces}"
     df.columns = nuevas_columnas
     columnas_vacias_sin_nombre = [
         c for c in df.columns
@@ -140,11 +183,13 @@ def load_excel(path, sheet_name=None, detectar_encabezado: bool = True, **kwargs
     kwargs (se respeta lo que pida quien llama, igual que antes de este
     parámetro).
     """
+    if es_archivo_csv(_nombre_de(path)):  # un CSV en lugar de un libro: se lee como tabla de una sola hoja
+        return load_csv(path)
     if "header" in kwargs:
         detectar_encabezado = False
 
     if not detectar_encabezado:
-        hojas = pd.read_excel(path, sheet_name=sheet_name, **kwargs)
+        hojas = _read_excel(path, sheet_name=sheet_name, **kwargs)
         if isinstance(hojas, dict):
             if not hojas:
                 return pd.DataFrame()
@@ -156,7 +201,7 @@ def load_excel(path, sheet_name=None, detectar_encabezado: bool = True, **kwargs
             return pd.concat(marcos, ignore_index=True, sort=False)
         return hojas
 
-    crudos = pd.read_excel(path, sheet_name=sheet_name, header=None, **kwargs)
+    crudos = _read_excel(path, sheet_name=sheet_name, header=None, **kwargs)
 
     if not isinstance(crudos, dict):
         return _procesar_hoja_cruda(crudos)
@@ -183,19 +228,68 @@ def load_excel_hojas(path, hojas=None, detectar_encabezado: bool = True, **kwarg
 
     Devuelve un diccionario {nombre_hoja: DataFrame}, aplicando la misma
     deteccion de titulo/notas/columnas sin nombre que load_excel (ver
-    detectar_encabezado).
+    detectar_encabezado). Si `path` es un CSV, devuelve {nombre_del_archivo: DataFrame}
+    (una sola «hoja»).
     """
+    if es_archivo_csv(_nombre_de(path)):
+        return {nombre_tabla_de(path): load_csv(path)}
     if "header" in kwargs:
         detectar_encabezado = False
 
     if not detectar_encabezado:
-        crudos = pd.read_excel(path, sheet_name=hojas, **kwargs)
+        crudos = _read_excel(path, sheet_name=hojas, **kwargs)
         return crudos if isinstance(crudos, dict) else {hojas: crudos}
 
-    crudos = pd.read_excel(path, sheet_name=hojas, header=None, **kwargs)
+    crudos = _read_excel(path, sheet_name=hojas, header=None, **kwargs)
     if not isinstance(crudos, dict):
         crudos = {hojas: crudos}
     return {nombre: _procesar_hoja_cruda(df) for nombre, df in crudos.items()}
+
+
+def load_tablas(origenes, hojas=None, detectar_encabezado: bool = True) -> dict:
+    """Carga varias tablas como DataFrames SEPARADOS desde cualquier mezcla de archivos: de cada Excel
+    (.xlsx, .xlsm, .xls, .xlsb, .ods...) sus hojas, y de cada CSV/TXT/TSV una tabla con el nombre del archivo.
+    `origenes`: una ruta, un archivo subido, o una lista de ellos (también pares (nombre, archivo)).
+    `hojas`: nombres a conservar (None = todas). Si dos archivos traen una hoja con el mismo nombre, se
+    distinguen como «archivo__hoja». Devuelve {nombre: DataFrame}."""
+    lista = origenes if isinstance(origenes, (list, tuple)) else [origenes]
+    pares = [(o[0], o[1]) if isinstance(o, tuple) else (None, o) for o in lista]
+    por_archivo = []
+    for nombre, origen in pares:
+        nombre = _nombre_de(origen, nombre)
+        if es_archivo_csv(nombre):
+            marcos = {nombre_tabla_de(origen, nombre): load_csv(origen)}
+        else:
+            marcos = load_excel_hojas(origen, hojas=None, detectar_encabezado=detectar_encabezado)
+        por_archivo.append((nombre_tabla_de(origen, nombre), marcos))
+    repetidos = {h for i, (_, m) in enumerate(por_archivo) for h in m
+                 if any(h in m2 for j, (_, m2) in enumerate(por_archivo) if j != i)}
+    salida = {}
+    for archivo, marcos in por_archivo:
+        for hoja, df in marcos.items():
+            salida[f"{archivo}__{hoja}" if hoja in repetidos else hoja] = df
+    if hojas is not None:
+        faltan = [h for h in hojas if h not in salida]
+        if faltan:
+            raise ValueError(f"No se encontraron estas hojas o tablas: {', '.join(map(str, faltan))}. "
+                             f"Disponibles: {', '.join(map(str, salida))}")
+        salida = {h: salida[h] for h in hojas}
+    return salida
+
+
+def listar_tablas(origenes) -> list:
+    """Nombres de las tablas que trae cada archivo (hojas de un Excel, o el nombre de un CSV), con el mismo
+    criterio de nombres que load_tablas."""
+    lista = origenes if isinstance(origenes, (list, tuple)) else [origenes]
+    pares = [(o[0], o[1]) if isinstance(o, tuple) else (None, o) for o in lista]
+    por_archivo = []
+    for nombre, origen in pares:
+        nombre = _nombre_de(origen, nombre)
+        hojas = [nombre_tabla_de(origen, nombre)] if es_archivo_csv(nombre) else listar_hojas(origen, nombre)
+        por_archivo.append((nombre_tabla_de(origen, nombre), hojas))
+    repetidos = {h for i, (_, m) in enumerate(por_archivo) for h in m
+                 if any(h in m2 for j, (_, m2) in enumerate(por_archivo) if j != i)}
+    return [f"{archivo}__{h}" if h in repetidos else h for archivo, hojas in por_archivo for h in hojas]
 
 
 # -----------------------------------------------------------------------------
@@ -220,22 +314,125 @@ def _nombre_de(origen, nombre=None) -> str:
     return str(getattr(origen, "name", origen))
 
 
+def nombre_tabla_de(origen, nombre=None) -> str:
+    """Nombre de una tabla a partir de su archivo: 'datos/ventas 2025.csv' -> 'ventas 2025'."""
+    base = re.split(r"[\\/]", _nombre_de(origen, nombre))[-1]
+    return base.rsplit(".", 1)[0] if "." in base else base
+
+
 def es_archivo_excel(nombre: str) -> bool:
-    return str(nombre).lower().endswith((".xlsx", ".xlsm", ".xls"))
+    """True para cualquier tipo de Excel: .xlsx, .xlsm, .xltx, .xltm, .xls, .xlsb y .ods."""
+    return str(nombre).lower().endswith(EXTENSIONES_EXCEL)
 
 
 def es_archivo_csv(nombre: str) -> bool:
-    return str(nombre).lower().endswith((".csv", ".txt"))
+    """True para .csv, .txt, .tsv y .tab."""
+    return str(nombre).lower().endswith(EXTENSIONES_CSV)
 
 
-def listar_hojas(origen) -> list:
-    """Nombres de las hojas de un libro Excel, en el orden del libro.
-    Para un CSV no hay hojas, asi que devuelve una lista vacia."""
+def es_archivo_tabla(nombre: str) -> bool:
+    return es_archivo_excel(nombre) or es_archivo_csv(nombre)
+
+
+def _extension(nombre: str) -> str:
+    nombre = str(nombre).lower()
+    return "." + nombre.rsplit(".", 1)[-1] if "." in nombre else ""
+
+
+def _bytes_de(origen) -> bytes:
+    if isinstance(origen, bytes):
+        return origen
+    if isinstance(origen, str):
+        with open(origen, "rb") as archivo:
+            return archivo.read()
+    if hasattr(origen, "getvalue"):
+        return origen.getvalue()
+    origen.seek(0)
+    return origen.read()
+
+
+def _sin_formato_excel(origen) -> bool:
+    """True si el archivo no es un libro de Excel real (los «.xls» de algunos sistemas son HTML o texto)."""
+    crudo = _bytes_de(origen)[:8]
+    return not (crudo.startswith(b"PK") or crudo.startswith(b"\xd0\xcf\x11\xe0"))
+
+
+def _leer_como_texto(origen, sheet_name=0, **kwargs):
+    """Plan B para un «Excel» que en realidad es una página HTML o un texto separado: lo lee como tabla.
+    Devuelve un DataFrame (o un dict {nombre: DataFrame} si sheet_name es None, como pd.read_excel)."""
+    texto = _leer_texto_csv(origen)
+    if re.search(r"<\s*table", texto, re.I):
+        tablas = pd.read_html(io.StringIO(texto))
+        if "header" in kwargs and kwargs["header"] is None:  # crudo: el encabezado pasa a ser la primera fila
+            tablas = [pd.concat([pd.DataFrame([list(t.columns)]), t.set_axis(range(t.shape[1]), axis=1)],
+                                ignore_index=True) for t in tablas]
+        marcos = {f"Tabla{i + 1}": t for i, t in enumerate(tablas)}
+    else:
+        texto, separador = _texto_y_separador(texto)
+        marcos = {"Hoja1": pd.read_csv(io.StringIO(texto), sep=separador, header=kwargs.get("header", 0))}
+    if sheet_name is None:
+        return marcos
+    if isinstance(sheet_name, (list, tuple)):
+        return {h: marcos[h] for h in sheet_name if h in marcos}
+    if isinstance(sheet_name, int):
+        return list(marcos.values())[sheet_name]
+    return marcos[sheet_name]
+
+
+def _read_excel(origen, sheet_name=0, **kwargs):
+    """pd.read_excel que abre cualquier tipo de Excel: elige el motor según la extensión (.xls con xlrd,
+    .xlsb con pyxlsb, .ods con odfpy, el resto con openpyxl), prueba los demás si el archivo no es lo que
+    dice su extensión y, si ni siquiera es un libro (HTML o texto con extensión .xls), lo lee como tabla."""
     nombre = _nombre_de(origen)
+    extension = _extension(nombre)
+    motores = list(_MOTORES_POR_EXTENSION.get(extension, ())) or ["openpyxl", "xlrd", "pyxlsb", "odf"]
+    motores += [m for m in ("openpyxl", "xlrd", "pyxlsb", "odf") if m not in motores] + [None]
+    ultimo = None
+    for motor in motores:
+        try:
+            fuente = (io.BytesIO(_bytes_de(origen)) if (motor == "openpyxl" or motor is None)
+                      else _como_buffer(origen))
+            return pd.read_excel(fuente, sheet_name=sheet_name, engine=motor, **kwargs)
+        except ImportError as exc:
+            ultimo = ImportError(f"Para leer este tipo de Excel instale «{_PAQUETE_POR_MOTOR.get(motor, motor)}»: "
+                                 f"pip install {_PAQUETE_POR_MOTOR.get(motor, motor)}") if motor else exc
+        except ValueError as exc:
+            if "Worksheet named" in str(exc) or "Worksheet index" in str(exc) or "not found" in str(exc).lower() \
+                    and "sheet" in str(exc).lower():
+                raise
+            ultimo = exc
+        except Exception as exc:  # motor equivocado para este archivo: se prueba el siguiente
+            ultimo = exc
+    if _sin_formato_excel(origen):
+        try:
+            return _leer_como_texto(origen, sheet_name, **kwargs)
+        except Exception as exc:
+            ultimo = exc
+    raise ValueError(f"No se pudo leer el archivo de Excel «{nombre}»: {ultimo}")
+
+
+def listar_hojas(origen, nombre=None) -> list:
+    """Nombres de las hojas de un libro Excel (cualquier tipo), en el orden del libro.
+    Para un CSV no hay hojas, asi que devuelve una lista vacia."""
+    nombre = _nombre_de(origen, nombre)
     if not es_archivo_excel(nombre):
         return []
-    with pd.ExcelFile(_como_buffer(origen)) as libro:
-        return list(libro.sheet_names)
+    extension = _extension(nombre)
+    motores = list(_MOTORES_POR_EXTENSION.get(extension, ())) + [m for m in ("openpyxl", "xlrd", "pyxlsb", "odf")]
+    ultimo = None
+    for motor in dict.fromkeys(motores):
+        try:
+            fuente = io.BytesIO(_bytes_de(origen)) if motor == "openpyxl" else _como_buffer(origen)
+            with pd.ExcelFile(fuente, engine=motor) as libro:
+                return list(libro.sheet_names)
+        except Exception as exc:
+            ultimo = exc
+    if _sin_formato_excel(origen):
+        try:
+            return list(_leer_como_texto(origen, None, header=None))
+        except Exception as exc:
+            ultimo = exc
+    raise ValueError(f"No se pudo abrir el archivo de Excel «{nombre}»: {ultimo}")
 
 
 def _valor_a_texto(v) -> str:
@@ -283,7 +480,7 @@ def leer_tabla_subida(origen, nombre=None, hoja=None, como_texto: bool = True,
     nombre = _nombre_de(origen, nombre)
 
     if es_archivo_excel(nombre):
-        hojas = listar_hojas(origen)
+        hojas = listar_hojas(origen, nombre)
         if hoja is None:
             if len(hojas) != 1:
                 raise ValueError("El libro tiene varias hojas: indique cual leer.")
@@ -293,29 +490,39 @@ def leer_tabla_subida(origen, nombre=None, hoja=None, como_texto: bool = True,
         return tabla_a_texto(df) if como_texto else df
 
     # CSV: se decodifica el texto y se detecta el separador mirando el encabezado
-    texto = _leer_texto_csv(origen)
-    opciones = {"sep": _detectar_separador(texto)}
+    texto, separador = _texto_y_separador(_leer_texto_csv(origen))
+    opciones = {"sep": separador}
     if como_texto:
         opciones.update(dtype=str, keep_default_na=False)
     try:
-        return pd.read_csv(io.StringIO(texto), **opciones)
+        try:
+            return pd.read_csv(io.StringIO(texto), **opciones)
+        except pd.errors.ParserError:
+            return pd.read_csv(io.StringIO(texto), engine="python", **opciones)
     except Exception as exc:
         raise ValueError(f"No se pudo leer el CSV: {exc}") from exc
 
 
 def _leer_texto_csv(origen) -> str:
-    """Contenido del CSV como texto: prueba utf-8 (con o sin BOM) y, si no
-    se puede, latin-1 (que nunca falla)."""
-    buffer = _como_buffer(origen)
-    if isinstance(buffer, str):
-        with open(buffer, "rb") as archivo:
-            crudo = archivo.read()
-    else:
-        crudo = buffer.read()
-    try:
-        return crudo.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return crudo.decode("latin-1")
+    """Contenido del CSV como texto: reconoce utf-8 (con o sin BOM), utf-16 (los «Texto Unicode» de Excel),
+    cp1252 y, si nada de eso, latin-1 (que nunca falla)."""
+    crudo = _bytes_de(origen)
+    if crudo.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return crudo.decode("utf-16")
+    for codificacion in ("utf-8-sig", "cp1252"):
+        try:
+            return crudo.decode(codificacion)
+        except UnicodeDecodeError:
+            continue
+    return crudo.decode("latin-1")
+
+
+def _texto_y_separador(texto: str):
+    """(texto, separador). Respeta la línea «sep=;» que Excel pone al inicio de algunos CSV (y la quita)."""
+    lineas = texto.splitlines(keepends=True)
+    if lineas and re.match(r"^sep=.$", lineas[0].strip(), re.I):
+        return "".join(lineas[1:]), lineas[0].strip()[4]
+    return texto, _detectar_separador(texto)
 
 
 def _detectar_separador(texto: str) -> str:
@@ -366,20 +573,23 @@ def load_sql(connection_string: str, query: str = None, table_name: str = None) 
 def load_table(path_or_conn: str, kind: str = "auto", **kwargs) -> pd.DataFrame:
     """
     Punto de entrada único: detecta o recibe el tipo de fuente ('csv', 'excel', 'sql')
-    y delega en el loader correspondiente.
+    y delega en el loader correspondiente. Acepta CSV/TXT/TSV y cualquier Excel
+    (.xlsx, .xlsm, .xls, .xlsb, .ods...); si `kind` no coincide con la extensión
+    del archivo, manda la extensión.
     """
+    if kind in ("auto", "csv", "excel") and isinstance(path_or_conn, str):
+        if es_archivo_csv(path_or_conn):
+            kind = "csv"
+        elif es_archivo_excel(path_or_conn):
+            kind = "excel"
     if kind == "auto":
         lower = path_or_conn.lower()
-        if lower.endswith(".csv"):
-            kind = "csv"
-        elif lower.endswith((".xlsx", ".xls", ".xlsm")):
-            kind = "excel"
-        elif lower.startswith(("sqlite:", "mysql", "postgresql", "postgres")):
+        if lower.startswith(("sqlite:", "mysql", "postgresql", "postgres", "mssql")):
             kind = "sql"
         else:
             raise ValueError(
-                "No se pudo detectar el tipo de archivo automáticamente. "
-                "Indique kind='csv' | 'excel' | 'sql'."
+                "No se pudo detectar el tipo de archivo automáticamente. Use un archivo "
+                f"{', '.join(EXTENSIONES_TABLA)} o indique kind='csv' | 'excel' | 'sql'."
             )
 
     if kind == "csv":
