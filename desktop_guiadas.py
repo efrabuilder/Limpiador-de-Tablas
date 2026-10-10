@@ -31,7 +31,9 @@ from data_cleaner import flujos_guiados as FG
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
 
-TIPOS_ARCHIVO = [("Tablas (CSV / Excel)", "*.csv *.xlsx *.xlsm *.xls"), ("Todos los archivos", "*.*")]
+from data_cleaner.loaders import patrones_para_dialogo
+
+TIPOS_ARCHIVO = [("Tablas (CSV / cualquier Excel)", patrones_para_dialogo()), ("Todos los archivos", "*.*")]
 FORMATOS_SALIDA = ["csv", "xlsx", "ambos"]
 OPCIONES_NUMEROS = {"mediana": "números → mediana", "cero": "números → 0",
                     "palabra": "números → la palabra (pasan a texto)"}
