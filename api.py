@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import tempfile
 import uuid
 import zipfile
 from typing import Callable, List, Optional
@@ -43,6 +45,7 @@ from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
 from data_cleaner import diccionario_datos as DD
+from data_cleaner import eda as ED
 from data_cleaner import flujos_guiados as FG
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
@@ -874,13 +877,17 @@ def _guardar_guiado(tipo: str, base: str, df: pd.DataFrame, script: str, argumen
     return resultado_id
 
 
-def _documentos_diccionario(datos: dict) -> dict:
-    """{'basico', 'tecnico', 'alcance'} de un resultado guardado (se calcula una vez y se recuerda)."""
-    if "documentos" not in datos:
+def _documentos_diccionario(datos: dict, formato_tecnico: str = "xlsx") -> dict:
+    """{'basico', 'tecnico', 'tecnico_csv', 'alcance'} de un resultado guardado (se calcula una vez por
+    formato del diccionario tecnico —xlsx, csv o ambos— y se recuerda). El documento de alcance enlaza al
+    archivo tecnico del formato elegido."""
+    guardados = datos.setdefault("documentos", {})
+    if formato_tecnico not in guardados:
         argumentos = dict(datos["argumentos"])
         nombre = argumentos.pop("nombre")
-        datos["documentos"] = _o_400(FG.generar_documentos_diccionario, datos["df"], nombre, **argumentos)
-    return datos["documentos"]
+        guardados[formato_tecnico] = _o_400(FG.generar_documentos_diccionario, datos["df"], nombre,
+                                            formato_tecnico=formato_tecnico, **argumentos)
+    return guardados[formato_tecnico]
 
 
 @app.post("/limpieza-guiada/diagnostico")
@@ -931,6 +938,11 @@ def limpieza_guiada_endpoint(
     cierre: bool = Form(True, description="Al final, rellenar los nulos válidos que sobren (cierre sin vacíos)."),
     numeros_cierre: str = Form("mediana", description="mediana | cero | palabra (números que sigan vacíos)."),
     fechas_cierre: bool = Form(True, description="Incluir las fechas en el cierre sin vacíos."),
+    mes_anio: Optional[str] = Form(None, description="Fechas de las que sacar «<col>_mes» y «<col>_anio», "
+                                   "coma-separadas ('*' = todas las estandarizadas con `fechas`). Se crean al "
+                                   "final y quedan vacías donde la fecha no se pudo leer."),
+    mes: bool = Form(True, description="Con mes_anio: crear la columna de mes (1-12)."),
+    anio: bool = Form(True, description="Con mes_anio: crear la columna de año."),
     proyecto: str = Form("", description="Proyecto, para el documento de alcance."),
     autor: str = Form("", description="Autor(a), para el documento de alcance."),
     reglas: str = Form("", description='JSON {"columna": "regla[:parametro]"}. Ej: '
@@ -955,7 +967,8 @@ def limpieza_guiada_endpoint(
                      [f"{k}={v}" for k, v in _json_dict(reglas, "reglas").items()])
     resultado = _o_400(FG.ejecutar_limpieza_guiada, df, config, ajustes, nombre_archivo=nombre, hoja=hoja,
                        palabra=palabra, unir_equivalentes=unir_equivalentes, asegurar_sin_vacios=cierre,
-                       numeros_cierre=numeros_cierre, incluir_fechas_cierre=fechas_cierre)
+                       numeros_cierre=numeros_cierre, incluir_fechas_cierre=fechas_cierre,
+                       fecha_partes=_lista_o_none(mes_anio) or None, fecha_partes_mes=mes, fecha_partes_anio=anio)
 
     base = f"{FG.nombre_base(nombre)}_limpio"
     resultado_id = _guardar_guiado("limpieza", base, resultado.df, resultado.script,
@@ -1039,27 +1052,65 @@ def merge_endpoint(
     })
 
 
+def _respuesta_eda(df: pd.DataFrame, base: str, nombre_archivo: str, tokens_extra: Optional[List[str]] = None,
+                   metodo: str = "pearson", umbral: float = ED.UMBRAL_CORRELACION,
+                   factor_iqr: float = ED.FACTOR_IQR) -> StreamingResponse:
+    """Zip con el EDA estadístico de `df`: CSV de descriptivos, atípicos y correlación, PNG de boxplots y de la
+    matriz, y el script de pandas + seaborn que lo repite."""
+    resultado = _o_400(FG.ejecutar_eda, df, tokens_extra, metodo, umbral, factor_iqr)
+    with tempfile.TemporaryDirectory() as carpeta:
+        rutas = FG.guardar_eda(resultado, carpeta, base, nombre_archivo)
+        archivos = {}
+        for ruta in rutas.values():
+            with open(ruta, "rb") as f:
+                archivos[os.path.basename(ruta)] = f.read()
+    return _respuesta_zip(archivos, f"eda_{base}.zip")
+
+
 MEDIA_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TIPOS_DICCIONARIO = ("basico", "tecnico", "alcance", "todos")
 
 
+def _validar_formato_diccionario(formato: str) -> str:
+    if formato not in DD.FORMATOS_TECNICO:
+        raise HTTPException(status_code=400,
+                            detail=f"formato_diccionario debe ser uno de: {', '.join(DD.FORMATOS_TECNICO)}.")
+    return formato
+
+
+def _respuesta_zip(archivos: dict, nombre_zip: str) -> StreamingResponse:
+    """Zip con {nombre_archivo: bytes o texto}."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for nombre, contenido in archivos.items():
+            zf.writestr(nombre, contenido)
+    return StreamingResponse(io.BytesIO(buffer.getvalue()), media_type="application/zip",
+                             headers={"Content-Disposition": f'attachment; filename="{nombre_zip}"'})
+
+
 def _respuesta_diccionario(documentos: dict, base: str, tipo: str) -> StreamingResponse:
-    """Devuelve el diccionario pedido: basico (Excel), tecnico (Excel), alcance (Word) o todos (zip)."""
+    """Devuelve el diccionario pedido: basico (Excel), tecnico (Excel, CSV o zip con los dos, segun lo que
+    se haya generado), alcance (Word) o todos (zip con todo lo generado)."""
+    tecnicos = {nombre: contenido for nombre, contenido in (
+        (DD.NOMBRE_TECNICO, documentos.get("tecnico")), (DD.NOMBRE_TECNICO_CSV, documentos.get("tecnico_csv")))
+        if contenido is not None}
     if tipo == "todos":
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(f"diccionario_{base}.xlsx", documentos["basico"])
-            zf.writestr(DD.NOMBRE_TECNICO, documentos["tecnico"])
-            if documentos["alcance"] is not None:
-                zf.writestr(f"documento_alcance_{base}.docx", documentos["alcance"])
-        return StreamingResponse(io.BytesIO(buffer.getvalue()), media_type="application/zip",
-                                 headers={"Content-Disposition": f'attachment; filename="diccionarios_{base}.zip"'})
+        archivos = {f"diccionario_{base}.xlsx": documentos["basico"], **tecnicos}
+        if documentos["alcance"] is not None:
+            archivos[f"documento_alcance_{base}.docx"] = documentos["alcance"]
+        return _respuesta_zip(archivos, f"diccionarios_{base}.zip")
     if tipo == "alcance" and documentos["alcance"] is None:
         raise HTTPException(status_code=501, detail="Falta python-docx para generar el documento de alcance "
                                                     "(pip install python-docx).")
+    if tipo == "tecnico":
+        if len(tecnicos) > 1:  # los dos formatos van juntos en un zip
+            return _respuesta_zip(tecnicos, f"diccionario_tecnico_{base}.zip")
+        nombre, contenido = next(iter(tecnicos.items()))
+        media = "text/csv" if nombre.endswith(".csv") else MEDIA_XLSX
+        return StreamingResponse(io.BytesIO(contenido), media_type=media,
+                                 headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
     contenido, media, nombre = {
         "basico": (documentos["basico"], MEDIA_XLSX, f"diccionario_{base}.xlsx"),
-        "tecnico": (documentos["tecnico"], MEDIA_XLSX, DD.NOMBRE_TECNICO),
         "alcance": (documentos["alcance"], MEDIA_DOCX, f"documento_alcance_{base}.docx"),
     }[tipo]
     return StreamingResponse(io.BytesIO(contenido), media_type=media,
@@ -1071,8 +1122,11 @@ def diccionario_endpoint(
     archivo: UploadFile = File(...),
     hoja: Optional[str] = Form(None),
     nombre: Optional[str] = Form(None, description="Nombre de la tabla maestra (por defecto, el del archivo)."),
-    tipo: str = Form("basico", description="basico (Excel de siempre) | tecnico (Excel, una fila por campo) | "
-                                           "alcance (Word) | todos (zip con los tres)."),
+    tipo: str = Form("basico", description="basico (Excel de siempre) | tecnico (una fila por campo) | "
+                                           "alcance (Word) | todos (zip con todo)."),
+    formato_diccionario: str = Form("xlsx", description="Formato del diccionario técnico: xlsx | csv | ambos "
+                                                       "(ambos = zip con los dos). El documento de alcance enlaza "
+                                                       "al CSV si se piden los dos."),
     proyecto: str = Form("", description="Proyecto, para el documento de alcance."),
     autor: str = Form("", description="Autor(a), para el documento de alcance."),
 ):
@@ -1080,32 +1134,64 @@ def diccionario_endpoint(
     solas y la justificación de negocio queda en blanco para completarla."""
     if tipo not in TIPOS_DICCIONARIO:
         raise HTTPException(status_code=400, detail=f"tipo debe ser uno de: {', '.join(TIPOS_DICCIONARIO)}.")
+    _validar_formato_diccionario(formato_diccionario)
     df = _leer_upload_guiado(archivo, hoja)
     tabla = nombre or FG.nombre_base(archivo.filename or "tabla")
     documentos = _o_400(FG.generar_documentos_diccionario, df, tabla, fuentes=[archivo.filename or tabla],
-                        textos={"proyecto": proyecto, "autor": autor})
+                        textos={"proyecto": proyecto, "autor": autor}, formato_tecnico=formato_diccionario)
     return _respuesta_diccionario(documentos, FG.nombre_base(tabla), tipo)
 
 
+@app.post("/eda")
+def eda_endpoint(
+    archivo: UploadFile = File(..., description="Tabla (CSV/Excel), normalmente ya limpia."),
+    hoja: Optional[str] = Form(None, description="Hoja del libro Excel (si tiene varias)."),
+    tokens_extra: Optional[str] = Form(None, description="Textos que cuentan como nulo además de la celda vacía, "
+                                       "coma-separados (por defecto, la lista base de la limpieza guiada)."),
+    metodo: str = Form("pearson", description="Correlación: pearson | spearman | kendall."),
+    umbral: float = Form(ED.UMBRAL_CORRELACION, description="Avisar de los pares con |correlación| desde este valor."),
+    factor_iqr: float = Form(ED.FACTOR_IQR, description="Atípicos fuera de Q1 - f·IQR y Q3 + f·IQR (1.5 estándar)."),
+    descargar: bool = Form(False, description="true = en vez del JSON, un zip con CSV, PNG y el script del EDA."),
+):
+    """EDA estadístico: descriptivos (describe), matriz de correlación y atípicos con la regla del boxplot.
+    Solo mide, no modifica la tabla; un atípico que sea un error se corrige en el script de limpieza."""
+    df = _leer_upload_guiado(archivo, hoja)
+    if descargar:
+        base = FG.nombre_base(archivo.filename or "tabla")
+        return _respuesta_eda(df, base, archivo.filename or f"{base}.csv", _lista_o_none(tokens_extra), metodo,
+                              umbral, factor_iqr)
+    resultado = _o_400(FG.ejecutar_eda, df, _lista_o_none(tokens_extra), metodo, umbral, factor_iqr)
+    return _a_json(FG.eda_a_dict(resultado))
+
+
 @app.get("/descargar-guiado/{resultado_id}/{tipo}")
-def descargar_guiado_endpoint(resultado_id: str, tipo: str, formato: Optional[str] = None):
+def descargar_guiado_endpoint(resultado_id: str, tipo: str, formato: Optional[str] = None,
+                              formato_diccionario: str = "xlsx"):
     """Baja lo generado por /limpieza-guiada o /merge. tipo: datos | script | diccionario (Excel de siempre) |
-    diccionario_tecnico (Excel) | documento_alcance (Word) | diccionarios (zip con los tres).
-    Para 'datos', formato = csv | xlsx (por defecto el elegido al crear el resultado)."""
+    diccionario_tecnico | documento_alcance (Word) | diccionarios (zip con todo) | eda (zip con el EDA
+    estadístico: CSV, PNG y script).
+    Para 'datos', formato = csv | xlsx (por defecto el elegido al crear el resultado).
+    Para el diccionario técnico, el documento de alcance y los diccionarios, formato_diccionario = xlsx | csv |
+    ambos (por defecto xlsx; con ambos, el diccionario técnico sale en un zip con los dos formatos)."""
     if resultado_id not in _RESULTADOS_GUIADOS:
         raise HTTPException(status_code=404, detail="No existe ese resultado (o ya expiró).")
-    if tipo not in ("datos", "script", "diccionario", "diccionario_tecnico", "documento_alcance", "diccionarios"):
+    if tipo not in ("datos", "script", "diccionario", "diccionario_tecnico", "documento_alcance", "diccionarios",
+                    "eda"):
         raise HTTPException(status_code=400, detail="tipo debe ser 'datos', 'script', 'diccionario', "
-                                                    "'diccionario_tecnico', 'documento_alcance' o 'diccionarios'.")
+                                                    "'diccionario_tecnico', 'documento_alcance', 'diccionarios' "
+                                                    "o 'eda'.")
     datos = _RESULTADOS_GUIADOS[resultado_id]
     base = datos["base"]
     if tipo == "script":
         return StreamingResponse(io.BytesIO(datos["script"].encode("utf-8")), media_type="text/x-python",
                                  headers={"Content-Disposition": f'attachment; filename="{base}_script.py"'})
+    if tipo == "eda":
+        return _respuesta_eda(datos["df"], base, f"{base}.{datos.get('formato', 'csv')}")
     if tipo in ("diccionario", "diccionario_tecnico", "documento_alcance", "diccionarios"):
         pedido = {"diccionario": "basico", "diccionario_tecnico": "tecnico", "documento_alcance": "alcance",
                   "diccionarios": "todos"}[tipo]
-        return _respuesta_diccionario(_documentos_diccionario(datos), base, pedido)
+        _validar_formato_diccionario(formato_diccionario)
+        return _respuesta_diccionario(_documentos_diccionario(datos, formato_diccionario), base, pedido)
     formato = formato or datos.get("formato", "csv")
     if formato not in ("csv", "xlsx"):
         raise HTTPException(status_code=400, detail="formato debe ser 'csv' o 'xlsx'.")
