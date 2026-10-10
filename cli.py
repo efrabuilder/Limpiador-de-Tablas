@@ -577,7 +577,7 @@ def generar_m_cmd(
 
 @app.command("modelo-sql")
 def modelo_sql_cmd(
-    input: str = typer.Option(..., "--input", "-i", help="Ruta del Excel con las hojas del modelo."),
+    input: List[str] = typer.Option(..., "--input", "-i", help="Excel (cualquier tipo) con las hojas del modelo, o uno o varios CSV (cada CSV es una tabla). Repita --input para varios archivos."),
     modelo: str = typer.Option(
         ..., "--modelo",
         help='Ruta a un archivo JSON con el modelo: {"nombre_tabla": {"hoja": "...", '
@@ -606,9 +606,10 @@ def modelo_sql_cmd(
         python cli.py modelo-sql --input datos.xlsx --modelo modelo.json \\
             --conexion "mssql+pyodbc://@servidor/base?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes&trusted_connection=yes"
     """
-    if not os.path.exists(input):
-        console.print(f"[red]No existe el archivo: {input}[/red]")
-        raise typer.Exit(code=1)
+    for ruta_entrada in input:
+        if not os.path.exists(ruta_entrada):
+            console.print(f"[red]No existe el archivo: {ruta_entrada}[/red]")
+            raise typer.Exit(code=1)
     if not os.path.exists(modelo):
         console.print(f"[red]No existe el archivo de modelo: {modelo}[/red]")
         raise typer.Exit(code=1)
@@ -616,7 +617,7 @@ def modelo_sql_cmd(
         console.print("[red]--si-existe debe ser 'replace', 'append' o 'fail'[/red]")
         raise typer.Exit(code=2)
 
-    from data_cleaner.loaders import load_excel_hojas
+    from data_cleaner.loaders import load_tablas
     from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo
 
     try:
@@ -631,7 +632,7 @@ def modelo_sql_cmd(
 
     hojas_necesarias = sorted({definicion["hoja"] for definicion in modelo_dict.values()})
     try:
-        hojas_cargadas = load_excel_hojas(input, hojas=hojas_necesarias)
+        hojas_cargadas = load_tablas(input, hojas=hojas_necesarias)
     except Exception as exc:
         console.print(f"[red]No se pudo cargar el Excel: {exc}[/red]")
         raise typer.Exit(code=1)
