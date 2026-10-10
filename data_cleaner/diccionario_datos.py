@@ -10,8 +10,12 @@ para escribir.
 
 Columnas del diccionario:
     N°, Campo, Descripción, Tipo de dato, Rol, Nulos, Completitud %,
-    Valores únicos, Rango o ejemplos, Tratamiento de nulos,
-    Justificación de negocio  (+ Origen si se sabe de qué tabla viene)
+    Valores únicos, Rango o ejemplos, Origen, Tratamiento de nulos,
+    Justificación de negocio, Clasificación ejecutiva, Modelo de datos
+
+Origen, Justificación de negocio, Clasificación ejecutiva y Modelo de datos se llenan solos para
+cualquier tabla (ver negocio.py): salen del nombre del campo, de su contenido y de la tabla. La persona
+puede reescribirlos y lo que escriba se respeta.
 
 Se exporta en dos documentos:
     - Diccionario técnico (Excel, «diccionario_datos.xlsx»): una fila por campo, con tipo
@@ -44,14 +48,23 @@ from .limpieza_guiada import (
 )
 from .patrones import columnas_fecha_por_nombre, tipo_coordenada
 from .descripciones import completar_descripciones, describir_campo
+from .negocio import (  # noqa: F401  (se reexportan: otras partes de la app los usan desde aquí)
+    CLASIFICACION_ATRIBUTO,
+    CLASIFICACION_KPI,
+    CLASIFICACION_LLAVE,
+    CLASIFICACION_METADATO,
+    CLASIFICACION_TRANSFORMADA,
+    CLASIFICACIONES,
+    COLUMNA_CLASIFICACION,
+    COLUMNA_JUSTIFICACION,
+    COLUMNA_MODELO,
+    COLUMNA_ORIGEN,
+    COLUMNAS_NEGOCIO,
+    TRATAMIENTOS_QUE_TRANSFORMAN as _TRATAMIENTOS_QUE_TRANSFORMAN,
+    completar_campos_negocio,
+)
 
-COLUMNA_CLASIFICACION = "Clasificación ejecutiva"
-CLASIFICACION_KPI = "KPI"
-CLASIFICACION_TRANSFORMADA = "Variable transformada"
-CLASIFICACION_LLAVE = "Llave / identificador"
-CLASIFICACIONES = (CLASIFICACION_KPI, CLASIFICACION_TRANSFORMADA, CLASIFICACION_LLAVE)
-
-COLUMNAS_EDITABLES = ("Descripción", "Justificación de negocio", COLUMNA_CLASIFICACION)
+COLUMNAS_EDITABLES = ("Descripción", COLUMNA_ORIGEN, COLUMNA_JUSTIFICACION, COLUMNA_CLASIFICACION, COLUMNA_MODELO)
 
 NOMBRE_TECNICO = "diccionario_datos.xlsx"
 
@@ -195,25 +208,13 @@ def reglas_desde_registro(registro: List[Dict]) -> List[Dict]:
 # Diccionario y resumen
 # --------------------------------------------------------------------------
 
-_TRATAMIENTOS_QUE_TRANSFORMAN = ("Rellenados", "Celdas vacías convertidas", "Se eliminaron")
-
-
-def _clasificacion_inicial(col, rol: str, tratamiento: str, llaves) -> str:
-    """Clasificación ejecutiva sugerida. Los KPIs no se adivinan: los marca la persona."""
-    if str(col).startswith("_revisar_calidad") or col == "_merge" or str(col).endswith("_original"):
-        return ""  # marcas y copias de respaldo: no son variables de negocio
-    es_llave = (col in llaves) if llaves is not None else rol == "id"
-    if es_llave:
-        return CLASIFICACION_LLAVE
-    if str(tratamiento).startswith(_TRATAMIENTOS_QUE_TRANSFORMAN):
-        return CLASIFICACION_TRANSFORMADA
-    return ""
-
-
 def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
                           origenes: Optional[Dict[str, str]] = None,
                           tokens=TOKENS_NULOS_BASE,
-                          llaves: Optional[Sequence[str]] = None) -> pd.DataFrame:
+                          llaves: Optional[Sequence[str]] = None,
+                          nombre_tabla: str = "",
+                          fuentes: Optional[Sequence[str]] = None,
+                          cruces: Optional[Sequence[Dict]] = None) -> pd.DataFrame:
     """Diccionario de datos de `df` (una fila por campo).
     `reglas`: lista [{columna, regla, valor, grupo, nulos}] de la limpieza
     guiada (o [{columna, descripcion}] ya redactadas, ver
@@ -222,11 +223,13 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
     (útil en una tabla maestra que sale de un merge).
     `llaves`: columnas usadas para unir tablas; si no se dan, se toman como
     llaves las de rol identificador.
+    `nombre_tabla`, `fuentes` (archivos u hojas de donde sale la tabla) y `cruces` (uniones hechas) ayudan
+    a redactar el origen y el modelo de datos.
     «Descripción» se redacta sola para todos los campos (nombre, rol, tipo, origen y
     tratamiento; ver descripciones.py) y la persona puede reescribirla.
-    «Justificación de negocio» y «Clasificación ejecutiva» (KPI, variable transformada
-    o llave) quedan para completar; la clasificación se adelanta solo para llaves y
-    para campos con tratamiento de nulos aplicado."""
+    «Origen», «Justificación de negocio», «Clasificación ejecutiva» (KPI, variable transformada, llave,
+    atributo descriptivo o metadato de control) y «Modelo de datos» también se llenan solos para todos los
+    campos (ver negocio.py), con lo que dicen el nombre y los datos de cada columna."""
     por_columna = {r["columna"]: r for r in (reglas or [])}
     cols_fecha = columnas_fecha_por_nombre(df)
     total = max(len(df), 1)
@@ -266,13 +269,14 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
             "Valores únicos": int(serie.nunique(dropna=True)),
             "Rango o ejemplos": resumen_valores(serie, tipo, tokens),
         }
-        if origenes is not None:
-            fila["Origen"] = origenes.get(col, "")
+        fila[COLUMNA_ORIGEN] = ""  # lo redacta completar_campos_negocio con `origenes`, `fuentes` y `cruces`
         fila["Tratamiento de nulos"] = tratamiento
-        fila["Justificación de negocio"] = ""
-        fila[COLUMNA_CLASIFICACION] = _clasificacion_inicial(col, rol, tratamiento, llaves)
+        fila[COLUMNA_JUSTIFICACION] = ""
+        fila[COLUMNA_CLASIFICACION] = ""
+        fila[COLUMNA_MODELO] = ""
         filas.append(fila)
-    return pd.DataFrame(filas)
+    return completar_campos_negocio(pd.DataFrame(filas), df, nombre_tabla, fuentes, llaves, cruces, origenes,
+                                    tokens)
 
 
 def resumen_tabla(df: pd.DataFrame, nombre: str, diccionario: pd.DataFrame,
@@ -281,10 +285,13 @@ def resumen_tabla(df: pd.DataFrame, nombre: str, diccionario: pd.DataFrame,
                   tokens=TOKENS_NULOS_BASE) -> pd.DataFrame:
     """Hoja de resumen: qué es la tabla, cuántos datos tiene y qué tan
     completa está. Devuelve dos columnas: Dato / Valor."""
-    diccionario = completar_descripciones(diccionario, df=df)  # una celda borrada se vuelve a redactar
+    diccionario = completar_campos_negocio(
+        completar_descripciones(diccionario, df=df), df, nombre, fuentes)  # una celda borrada se vuelve a redactar
     celdas = max(df.shape[0] * df.shape[1], 1)
     nulas = int(sum(es_nulo(df[c], tokens).sum() for c in df.columns))
     sin_descripcion = int((diccionario["Descripción"].fillna("").astype(str).str.strip() == "").sum())
+    sin_negocio = int(sum((diccionario[c].fillna("").astype(str).str.strip() == "").sum()
+                          for c in COLUMNAS_NEGOCIO))
     filas = [
         ("Tabla maestra", nombre),
         ("Fecha de generación", datetime.now().strftime("%Y-%m-%d %H:%M")),
@@ -299,6 +306,8 @@ def resumen_tabla(df: pd.DataFrame, nombre: str, diccionario: pd.DataFrame,
     if columnas_eliminadas:
         filas.append(("Columnas eliminadas por nulos", ", ".join(columnas_eliminadas)))
     filas.append(("Campos sin descripción", f"{sin_descripcion} de {len(diccionario)}"))
+    filas.append(("Celdas de negocio sin llenar (origen, justificación, clasificación, modelo)",
+                  f"{sin_negocio} de {len(diccionario) * len(COLUMNAS_NEGOCIO)}"))
     return pd.DataFrame(filas, columns=["Dato", "Valor"])
 
 
@@ -341,9 +350,9 @@ def diccionario_a_excel(diccionario: pd.DataFrame, resumen: pd.DataFrame) -> byt
         hoja = escritor.sheets["Diccionario"]
         dar_formato(hoja, {"N°": 5, "Campo": 24, "Descripción": 40, "Tipo de dato": 14, "Rol": 20,
                            "Nulos": 10, "Completitud %": 13, "Valores únicos": 11,
-                           "Rango o ejemplos": 38, "Origen": 22, "Tratamiento de nulos": 34,
-                           "Justificación de negocio": 44, COLUMNA_CLASIFICACION: 22},
-                    columnas_pendientes=("Descripción",))
+                           "Rango o ejemplos": 38, "Origen": 34, "Tratamiento de nulos": 34,
+                           "Justificación de negocio": 60, COLUMNA_CLASIFICACION: 22, COLUMNA_MODELO: 46},
+                    columnas_pendientes=("Descripción",) + COLUMNAS_NEGOCIO)
         hoja.auto_filter.ref = hoja.dimensions
     return buffer.getvalue()
 
@@ -361,13 +370,13 @@ COLUMNAS_TECNICO = (
     "orden", "nombre_campo", "descripcion", "tipo_dato_nativo", "tipo_dato_sugerido",
     "tipo_semantico", "rol", "es_llave", "acepta_nulos", "nulos", "completitud_pct",
     "valores_unicos", "valor_minimo", "valor_maximo", "longitud_maxima", "ejemplos",
-    "origen", "tratamiento_nulos", "justificacion_negocio", "clasificacion_ejecutiva",
+    "origen", "tratamiento_nulos", "justificacion_negocio", "clasificacion_ejecutiva", "modelo_datos",
 )
 
 _LEYENDA = {
     "orden": "Posición del campo en la tabla.",
     "nombre_campo": "Nombre exacto de la columna.",
-    "descripcion": "Qué representa el campo, escrito por quien conoce el negocio.",
+    "descripcion": "Qué representa el campo (redactada a partir del nombre y los datos; se puede reescribir).",
     "tipo_dato_nativo": "Tipo real con el que está guardada la columna (dtype de pandas).",
     "tipo_dato_sugerido": "Tipo recomendado para el modelo (Int64 = entero que admite vacíos).",
     "tipo_semantico": "Tipo en palabras de negocio, según el contenido.",
@@ -381,10 +390,13 @@ _LEYENDA = {
     "valor_maximo": "Límite lógico superior (números y fechas).",
     "longitud_maxima": "Largo máximo del texto (campos de texto).",
     "ejemplos": "Rango, categorías o ejemplos de valores.",
-    "origen": "Tabla de la que viene el campo (si se unieron tablas).",
+    "origen": "De dónde sale el campo: archivo, hoja, tabla, cruce o paso de limpieza que lo generó.",
     "tratamiento_nulos": "Qué se hizo con los vacíos del campo.",
-    "justificacion_negocio": "Por qué el campo importa para el negocio.",
-    "clasificacion_ejecutiva": "KPI, variable transformada o llave (la que explica el documento de alcance).",
+    "justificacion_negocio": "Por qué el campo importa para el negocio, con los datos reales de la columna.",
+    "clasificacion_ejecutiva": "KPI, variable transformada, llave, atributo descriptivo o metadato de control "
+                               "(las tres primeras son las que explica el documento de alcance).",
+    "modelo_datos": "Papel del campo en un modelo analítico: llave primaria o foránea, medida y cómo se agrega, "
+                    "atributo de dimensión, tiempo o fuera del modelo.",
 }
 
 
@@ -423,9 +435,9 @@ def tabla_tecnica(df: pd.DataFrame, diccionario: pd.DataFrame, tokens=TOKENS_NUL
     """Tabla del diccionario técnico: una fila por campo, con nombres de columna en minúsculas
     y sin espacios; tipo nativo (dtype real), tipo sugerido para el modelo, límites lógicos
     (mínimo, máximo, longitud máxima), completitud y las descripciones del diccionario."""
-    diccionario = completar_descripciones(diccionario, df=df)  # garantiza que ningún campo salga sin descripción
+    diccionario = completar_campos_negocio(  # garantiza que ningún campo salga sin descripción ni datos de negocio
+        completar_descripciones(diccionario, df=df), df)
     filas = []
-    tiene_origen = "Origen" in diccionario.columns
     for i, col in enumerate(df.columns):
         d = diccionario.iloc[i] if len(diccionario) == len(df.columns) else \
             diccionario[diccionario["Campo"] == col].iloc[0]
@@ -455,10 +467,11 @@ def tabla_tecnica(df: pd.DataFrame, diccionario: pd.DataFrame, tokens=TOKENS_NUL
             "valor_maximo": maximo,
             "longitud_maxima": longitud,
             "ejemplos": d["Rango o ejemplos"],
-            "origen": d["Origen"] if tiene_origen else "",
+            "origen": d[COLUMNA_ORIGEN],
             "tratamiento_nulos": d["Tratamiento de nulos"],
             "justificacion_negocio": d["Justificación de negocio"],
             "clasificacion_ejecutiva": clasif,
+            "modelo_datos": d[COLUMNA_MODELO],
         })
     return pd.DataFrame(filas, columns=list(COLUMNAS_TECNICO)).fillna("")
 
@@ -478,8 +491,8 @@ def diccionario_tecnico_excel(df: pd.DataFrame, diccionario: pd.DataFrame, resum
               "tipo_dato_sugerido": 18, "tipo_semantico": 15, "rol": 20, "es_llave": 10,
               "acepta_nulos": 12, "nulos": 9, "completitud_pct": 14, "valores_unicos": 14,
               "valor_minimo": 16, "valor_maximo": 16, "longitud_maxima": 14, "ejemplos": 38,
-              "origen": 20, "tratamiento_nulos": 34, "justificacion_negocio": 44,
-              "clasificacion_ejecutiva": 22, "Dato": 32, "Valor": 70, "columna": 26, "significado": 80}
+              "origen": 34, "tratamiento_nulos": 34, "justificacion_negocio": 60,
+              "clasificacion_ejecutiva": 22, "modelo_datos": 46, "Dato": 32, "Valor": 70, "columna": 26, "significado": 80}
 
     def dar_formato(hoja, pendientes=()):
         nombres = [c.value for c in hoja[1]]
@@ -506,7 +519,8 @@ def diccionario_tecnico_excel(df: pd.DataFrame, diccionario: pd.DataFrame, resum
         resumen.to_excel(escritor, sheet_name="Resumen", index=False)
         leyenda.to_excel(escritor, sheet_name="Leyenda", index=False)
         hoja = escritor.sheets["Diccionario técnico"]
-        dar_formato(hoja, pendientes=("descripcion",))
+        dar_formato(hoja, pendientes=("descripcion", "origen", "justificacion_negocio",
+                                      "clasificacion_ejecutiva", "modelo_datos"))
         hoja.auto_filter.ref = hoja.dimensions
         dar_formato(escritor.sheets["Resumen"])
         dar_formato(escritor.sheets["Leyenda"])
@@ -681,7 +695,8 @@ def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, nombre: 
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
 
-    diccionario = completar_descripciones(diccionario, df=df)  # ningún campo queda «pendiente de describir»
+    diccionario = completar_campos_negocio(  # ningún campo queda «pendiente de describir» ni sin datos de negocio
+        completar_descripciones(diccionario, df=df), df, nombre, fuentes, cruces=cruces)
     textos = {k: str(v).strip() for k, v in (textos or {}).items() if v and str(v).strip()}
     proyecto = textos.get("proyecto", "Proyecto de análisis de datos")
     total, filas_df = len(diccionario), len(df)
@@ -782,14 +797,16 @@ def documento_alcance_docx(df: pd.DataFrame, diccionario: pd.DataFrame, nombre: 
         partes = ["Llave."]
         if une:
             partes.append(f"Une {une[0]['tabla_a']} con {une[0]['tabla_b']}.")
-        partes += [descripcion(r), f"{_pct(r['Completitud %'])} con dato; {unicidad(campo)}."]
+        partes += [descripcion(r), f"{_pct(r['Completitud %'])} con dato; {unicidad(campo)}.",
+                   _frase(r[COLUMNA_MODELO])]
         filas_vars.append([campo, " ".join(partes)])
     for _, r in kpis.iterrows():
         filas_vars.append([r["Campo"], " ".join(x for x in (
-            "KPI.", descripcion(r), _frase(r["Justificación de negocio"])) if x)])
+            "KPI.", descripcion(r), _frase(r["Justificación de negocio"]), _frase(r[COLUMNA_MODELO])) if x)])
     for _, r in transformadas.iterrows():
         filas_vars.append([r["Campo"], " ".join(x for x in (
-            "Variable transformada.", descripcion(r), _frase(r["Tratamiento de nulos"])) if x)])
+            "Variable transformada.", descripcion(r), _frase(r["Tratamiento de nulos"]),
+            _frase(r["Justificación de negocio"])) if x)])
     if filas_vars:
         _tabla_word(doc, ["Variable o llave", "Significado y función ejecutiva"], filas_vars, [4.5, 12.0])
     else:
