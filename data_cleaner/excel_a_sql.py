@@ -18,12 +18,13 @@ COMO USARLO:
        contenido en https://dreampuf.github.io/GraphvizOnline para verlo,
        o ábralo con Graphviz si lo tiene instalado.
 """
-from data_cleaner.loaders import load_excel_hojas
+from data_cleaner.loaders import load_tablas
 from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo
 
 # -----------------------------------------------------------------------------
 # CONFIGURACION
 # -----------------------------------------------------------------------------
+# Cualquier Excel (.xlsx, .xls, .xlsb, .ods...), un CSV, o una lista de archivos (cada CSV es una tabla).
 ARCHIVO_EXCEL = "mi_archivo.xlsx"
 
 # Cadena de conexion SQLAlchemy. Ejemplo SQL Server con autenticacion de
@@ -83,7 +84,7 @@ MODELO = {
 
 if __name__ == "__main__":
     hojas_necesarias = sorted({definicion["hoja"] for definicion in MODELO.values()})
-    hojas_cargadas = load_excel_hojas(ARCHIVO_EXCEL, hojas=hojas_necesarias)
+    hojas_cargadas = load_tablas(ARCHIVO_EXCEL, hojas=hojas_necesarias)
 
     print(f"Hojas cargadas: {', '.join(hojas_necesarias)}\n")
 
