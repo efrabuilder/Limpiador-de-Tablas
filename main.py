@@ -100,8 +100,8 @@ def cargar_interactivo() -> tuple[pd.DataFrame, str]:
     tipo = preguntar("", ["csv", "excel", "sql"], defecto="csv")
 
     if tipo in ("csv", "excel"):
-        ruta = preguntar(f"Ingrese la ruta del archivo {tipo.upper()}:")
-        df = load_table(ruta, kind=tipo)
+        ruta = preguntar(f"Ingrese la ruta del archivo {tipo.upper()} (sirve CSV/TXT o cualquier Excel):")
+        df = load_table(ruta, kind=tipo)  # la extensión manda sobre el tipo elegido
         return df, ruta
     else:
         conn = preguntar("Ingrese el connection string "
@@ -305,7 +305,7 @@ def correr_flujo_guiado(modo: str, args) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Limpiador de tablas con detección de atípicos.")
     parser.add_argument("--demo", action="store_true", help="Ejecuta con datos de ejemplo, sin preguntas.")
-    parser.add_argument("--input", help="Ruta del archivo de entrada (csv/xlsx).")
+    parser.add_argument("--input", help="Ruta del archivo de entrada (CSV, TXT o cualquier Excel: xlsx, xlsm, xls, xlsb, ods).")
     parser.add_argument("--outdir", default="salida", help="Carpeta de salida.")
     parser.add_argument("--modo", choices=list(MODOS), default=None,
                         help="Qué hacer, sin pasar por el menú: " + ", ".join(MODOS) + ".")
