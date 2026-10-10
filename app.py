@@ -339,7 +339,7 @@ with st.sidebar:
     st.header("Modo")
     MODO_APP = st.radio(
         "¿Qué quiere hacer?",
-        ["🧹 Limpieza de una tabla", "🩺 Limpieza guiada (nulos)", "🔗 Merge (unir dos tablas)",
+        ["🩺 Limpieza guiada (nulos)", "🧹 Limpieza de una tabla", "🔗 Merge (unir dos tablas)",
          "🗂️ Modelo de datos (estrella / copo de nieve)"],
         index=0, key="modo_app",
     )
