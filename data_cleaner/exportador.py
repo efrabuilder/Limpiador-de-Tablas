@@ -1400,10 +1400,15 @@ def _main_cli():
         print("Uso: python limpiador_universal_generado.py archivo.csv")
         return
     ruta = sys.argv[1]
-    if ruta.lower().endswith((".xlsx", ".xls", ".xlsm")):
-        df = pd.read_excel(ruta)
-    else:
-        df = pd.read_csv(ruta)
+    extension = ruta.lower().rsplit(".", 1)[-1]
+    if extension in ("xlsx", "xlsm", "xltx", "xltm", "xls", "xlsb", "ods"):
+        motor = {"xlsb": "pyxlsb", "ods": "odf", "xls": "xlrd"}.get(extension)
+        df = pd.read_excel(ruta, engine=motor)
+    else:  # CSV, TXT o TSV: detecta separador y codificación
+        try:
+            df = pd.read_csv(ruta, sep=None, engine="python", encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            df = pd.read_csv(ruta, sep=None, engine="python", encoding="latin-1")
 
     df_limpio, df_reporte = limpiar_tabla(
         df, ACCION_FALTANTE, ACCION_DUPLICADO, ACCION_ATIPICO, ACCION_TIPO_INVALIDO,
