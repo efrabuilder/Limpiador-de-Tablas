@@ -33,7 +33,8 @@ from data_cleaner.exportador import (
 )
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.patrones import PAISES_TELEFONO_DISPONIBLES, FORMATOS_FECHA_DISPONIBLES, FORMATO_FECHA_POR_DEFECTO, formato_fecha_python, formato_fecha_m
-from desktop_guiadas import VentanaDiccionario, VentanaLimpiezaGuiada, VentanaMerge
+from desktop_guiadas import (VentanaAuditoria, VentanaDiccionario, VentanaEDA, VentanaLimpiezaGuiada,
+                             VentanaMerge)
 from data_cleaner.modelo_sql import (
     aplicar_modelo_sql, es_tabla_hecho, generar_script_crear_base_datos,
 )
@@ -201,8 +202,9 @@ class LimpiadorApp(tk.Tk):
         ttk.Button(barra, text="📞 Teléfono...", command=self.configurar_telefono).pack(side="left", padx=(10, 0))
         ttk.Button(barra, text="🔍 Analizar", command=self.analizar_tabla).pack(side="left", padx=10)
 
-        guiadas = ttk.Frame(self, padding=(10, 0, 10, 6))
-        guiadas.pack(fill="x")
+        # La limpieza guiada va primero (arriba de la barra clásica), como en el menú de la app web.
+        guiadas = ttk.Frame(self, padding=(10, 8, 10, 0))
+        guiadas.pack(fill="x", before=barra)
         ttk.Label(guiadas, text="Herramientas guiadas:").pack(side="left")
         ttk.Button(guiadas, text="🩺 Limpieza guiada de nulos...",
                    command=lambda: VentanaLimpiezaGuiada(self)).pack(side="left", padx=(8, 0))
@@ -210,6 +212,10 @@ class LimpiadorApp(tk.Tk):
                    command=lambda: VentanaMerge(self)).pack(side="left", padx=(6, 0))
         ttk.Button(guiadas, text="📘 Diccionario de datos...",
                    command=lambda: VentanaDiccionario(self)).pack(side="left", padx=(6, 0))
+        ttk.Button(guiadas, text="📊 EDA estadístico...",
+                   command=lambda: VentanaEDA(self)).pack(side="left", padx=(6, 0))
+        ttk.Button(guiadas, text="🔍 Auditoría previa...",
+                   command=lambda: VentanaAuditoria(self)).pack(side="left", padx=(6, 0))
 
         # --- Panel central dividido: vista previa arriba, config abajo ---
         panel = ttk.PanedWindow(self, orient="vertical")
