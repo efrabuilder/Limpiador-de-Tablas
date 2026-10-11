@@ -2,12 +2,15 @@
 """
 desktop_guiadas.py
 ==================
-Las tres herramientas nuevas de la interfaz de escritorio (Tkinter), cada una
-en su propia ventana:
+Las herramientas guiadas de la interfaz de escritorio (Tkinter), cada una
+en su propia ventana (la limpieza guiada va primero, como en el menu de la app web):
 
     - VentanaLimpiezaGuiada: diagnostico de nulos, estandarizacion (con fechas
       en un solo formato y union de valores equivalentes), una regla por
       columna y cierre sin vacios (ver data_cleaner/limpieza_guiada.py)
+    - VentanaEDA / VentanaAuditoria: EDA estadistico (describe, correlacion, atipicos y boxplots)
+      y checklist de auditoria previa (tamano, tipos, nulos, duplicados, valores imposibles)
+      (ver data_cleaner/eda.py y data_cleaner/auditoria_previa.py)
     - VentanaMerge: unir dos tablas con revision de llaves y auditoria
       (ver data_cleaner/merge_tablas.py)
     - VentanaDiccionario: diccionario de datos en sus tres salidas: Excel basico,
@@ -26,7 +29,9 @@ from tkinter import ttk, filedialog, messagebox
 
 import pandas as pd
 
+from data_cleaner import auditoria_previa as AP
 from data_cleaner import diccionario_datos as DD
+from data_cleaner import eda as ED
 from data_cleaner import flujos_guiados as FG
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
@@ -125,6 +130,40 @@ def _abrir_tabla(parent) -> tuple[pd.DataFrame, str, str | None] | None:
     return FG.leer_tabla_guiada(ruta, hoja=hoja), ruta, hoja
 
 
+def _texto_auditoria(auditoria: AP.AuditoriaPrevia) -> str:
+    """El checklist de auditoría y su detalle, en texto plano para una ventana."""
+    partes = ["Checklist de auditoría (antes de limpiar)", AP.checklist_a_texto(auditoria), "",
+              "2. Tipos de dato (lo que Python leyó vs lo esperado)", auditoria.tipos.to_string(index=False)]
+    if len(auditoria.nulos):
+        partes += ["", "3. Nulos por columna", auditoria.nulos.to_string(index=False)]
+    if auditoria.duplicados:
+        partes += ["", f"4. Filas duplicadas (ejemplos de {auditoria.duplicados})",
+                   auditoria.ejemplos_duplicados.head(10).to_string()]
+    if len(auditoria.imposibles):
+        partes += ["", "5. Valores imposibles", auditoria.imposibles.to_string(index=False)]
+    if len(auditoria.formulas):
+        partes += ["", "5. Totales que no coinciden con la fórmula", auditoria.formulas.to_string(index=False)]
+    if len(auditoria.describe):
+        partes += ["", "5. Distribución de los números (describe)", auditoria.describe.to_string()]
+    return "\n".join(partes)
+
+
+def _texto_eda(resultado: ED.ResultadoEDA) -> str:
+    """El EDA estadístico en texto plano para una ventana."""
+    partes = list(f"⚠ {aviso}" for aviso in resultado.avisos)
+    if len(resultado.numerico):
+        partes += ["Estadísticos descriptivos (describe)", resultado.numerico.to_string(), "",
+                   f"Atípicos (regla del IQR x {resultado.factor_iqr})", resultado.atipicos.to_string(index=False), ""]
+    if len(resultado.pares):
+        partes += [f"Pares con |correlación| >= {resultado.umbral}", resultado.pares.to_string(index=False), ""]
+    elif resultado.correlacion is not None:
+        partes += [f"Ningún par llega a |correlación| >= {resultado.umbral}.", ""]
+    if resultado.excluidas:
+        partes += ["Fuera del análisis numérico: " + ", ".join(f"{c} ({m})" for c, m in resultado.excluidas.items()), ""]
+    partes.append(ED.LECTURA_EDA)
+    return "\n".join(partes)
+
+
 class _VentanaBase(tk.Toplevel):
     def __init__(self, app, titulo: str, geometria: str):
         super().__init__(app)
@@ -211,6 +250,10 @@ class VentanaLimpiezaGuiada(_VentanaBase):
         self.pestanas = ttk.Notebook(self)
         self.pestanas.pack(fill="both", expand=True, padx=8, pady=8)
 
+        marco_auditoria = ttk.Frame(self.pestanas, padding=6)
+        self.pestanas.add(marco_auditoria, text="0. Auditoría inicial")
+        self.texto_auditoria = tk.Text(marco_auditoria, state="disabled", wrap="word")
+        self.texto_auditoria.pack(fill="both", expand=True)
         self.tabla_diag = _crear_tabla(self.pestanas)
         self.pestanas.add(self.tabla_diag.master, text="1. Diagnóstico")
         self._construir_estandarizar()
@@ -223,6 +266,14 @@ class VentanaLimpiezaGuiada(_VentanaBase):
         self.var_formato = tk.StringVar(value="csv")
         ttk.Combobox(abajo, textvariable=self.var_formato, values=FORMATOS_SALIDA, width=7,
                      state="readonly").pack(side="left", padx=(14, 4))
+        ttk.Label(abajo, text="Diccionario:").pack(side="left", padx=(8, 2))
+        self.var_formato_dic = tk.StringVar(value="xlsx")
+        ttk.Combobox(abajo, textvariable=self.var_formato_dic, values=list(DD.FORMATOS_TECNICO), width=6,
+                     state="readonly").pack(side="left")
+        self.var_incluir_eda = tk.BooleanVar(value=False)
+        ttk.Checkbutton(abajo, text="con EDA", variable=self.var_incluir_eda).pack(side="left", padx=(8, 0))
+        self.var_incluir_powerbi = tk.BooleanVar(value=True)
+        ttk.Checkbutton(abajo, text="con código Power BI", variable=self.var_incluir_powerbi).pack(side="left", padx=(8, 6))
         ttk.Button(abajo, text="💾 Guardar en carpeta...", command=lambda: self._ejecutar(self._guardar)).pack(side="left")
         ttk.Button(abajo, text="➡️ Enviar a limpieza clásica",
                    command=lambda: self._ejecutar(self._enviar)).pack(side="left", padx=10)
@@ -282,6 +333,46 @@ class VentanaLimpiezaGuiada(_VentanaBase):
         fila += 1
         ttk.Checkbutton(marco, text="Incluir también las fechas (ya están como texto en un solo formato)",
                         variable=self.var_fechas_cierre).grid(row=fila, column=0, columnspan=4, sticky="w")
+        fila += 1
+
+        ttk.Separator(marco, orient="horizontal").grid(row=fila, column=0, columnspan=4, sticky="we", pady=(12, 4))
+        fila += 1
+        ttk.Label(marco, text="Opcionales (borran o cambian datos; quedan escritos en el script):",
+                  font=("TkDefaultFont", 9, "bold")).grid(row=fila, column=0, columnspan=4, sticky="w")
+        fila += 1
+        self.var_fechas_datetime, self.var_mes_anio = tk.BooleanVar(value=False), tk.BooleanVar(value=False)
+        ttk.Checkbutton(marco, text="Dejar las fechas como tipo fecha (datetime) en vez de texto",
+                        variable=self.var_fechas_datetime).grid(row=fila, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(marco, text="Sacar mes y año de las fechas",
+                        variable=self.var_mes_anio).grid(row=fila, column=2, columnspan=2, sticky="w")
+        fila += 1
+        self.var_duplicados, self.var_imposibles = tk.BooleanVar(value=False), tk.BooleanVar(value=False)
+        ttk.Checkbutton(marco, text="Eliminar filas duplicadas",
+                        variable=self.var_duplicados).grid(row=fila, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(marco, text="Corregir valores imposibles (edad fuera de 0-120, negativos)",
+                        variable=self.var_imposibles).grid(row=fila, column=2, columnspan=2, sticky="w")
+        fila += 1
+        self.var_formulas = tk.BooleanVar(value=False)
+        self.var_accion_formulas = tk.StringVar(value=next(iter(LG.ACCIONES_FORMULAS)))
+        ttk.Checkbutton(marco, text="Revisar que el total sea cantidad × precio",
+                        variable=self.var_formulas).grid(row=fila, column=0, columnspan=2, sticky="w")
+        ttk.Label(marco, text="Qué hacer con los que no cuadran").grid(row=fila, column=2, sticky="e", padx=(8, 4))
+        ttk.Combobox(marco, textvariable=self.var_accion_formulas, values=list(LG.ACCIONES_FORMULAS),
+                     state="readonly", width=14).grid(row=fila, column=3, sticky="w")
+        fila += 1
+        self.var_cols_iqr, self.var_filtros = tk.StringVar(), tk.StringVar()
+        self.var_accion = tk.StringVar(value=next(iter(LG.ACCIONES_ATIPICOS)))
+        ttk.Label(marco, text="Atípicos del IQR en estas columnas").grid(row=fila, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(marco, textvariable=self.var_cols_iqr, width=40).grid(row=fila, column=1, sticky="we", pady=(6, 0))
+        ttk.Label(marco, text="Qué hacer con ellos").grid(row=fila, column=2, sticky="e", pady=(6, 0), padx=(8, 4))
+        ttk.Combobox(marco, textvariable=self.var_accion, values=list(LG.ACCIONES_ATIPICOS), state="readonly",
+                     width=14).grid(row=fila, column=3, sticky="w", pady=(6, 0))
+        fila += 1
+        ttk.Label(marco, text="Filtros (ej. ventas>1000, coma-separados)").grid(row=fila, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(marco, textvariable=self.var_filtros, width=70).grid(row=fila, column=1, columnspan=3, sticky="we", pady=(6, 0))
+        fila += 1
+        ttk.Label(marco, text="El filtro ELIMINA las filas que no lo cumplen (también las sin dato en esa columna).",
+                  foreground="gray").grid(row=fila, column=0, columnspan=4, sticky="w")
         fila += 1
 
         ttk.Label(marco, text="Vienen sugeridas según el contenido de cada columna; déjelas vacías para no aplicar el paso.",
@@ -377,12 +468,17 @@ class VentanaLimpiezaGuiada(_VentanaBase):
             numericas=_lista(self.var_cols_num.get()), latitud=self.var_lat.get().strip(),
             longitud=self.var_lon.get().strip(), fechas=_lista(self.var_cols_fecha.get()),
             formato_fecha=LG.FORMATOS_FECHA[self.var_formato_fecha.get()],
-            dia_primero=self.var_dia_primero.get())
+            dia_primero=self.var_dia_primero.get(),
+            eliminar_duplicados=self.var_duplicados.get(), corregir_imposibles=self.var_imposibles.get(),
+            atipicos_iqr=_lista(self.var_cols_iqr.get()) or None, accion_atipicos=self.var_accion.get(),
+            filtros=_lista(self.var_filtros.get()) or None,
+            corregir_formulas=self.var_formulas.get(), accion_formulas=self.var_accion_formulas.get())
 
     def _diagnosticar(self) -> None:
         df = self._exigir_tabla()
         diagnostico = LG.diagnostico_nulos(df, FG.tokens_nulos(self._tokens_extra())).reset_index()
         _llenar_tabla(self.tabla_diag, diagnostico)
+        _escribir_texto(self.texto_auditoria, _texto_auditoria(FG.ejecutar_auditoria_previa(df, self._tokens_extra())))
         self._sugerir_campos()
         self._actualizar_reglas()
         self.pestanas.select(0)
@@ -429,7 +525,9 @@ class VentanaLimpiezaGuiada(_VentanaBase):
         self.resultado = FG.ejecutar_limpieza_guiada(
             self.df, self._config_actual(), ajustes, self.nombre, self.hoja, palabra=self._palabra(),
             unir_equivalentes=self.var_unir.get(), asegurar_sin_vacios=self.var_cierre.get(),
-            numeros_cierre=self._numeros_cierre(), incluir_fechas_cierre=self.var_fechas_cierre.get())
+            numeros_cierre=self._numeros_cierre(), incluir_fechas_cierre=self.var_fechas_cierre.get(),
+            fechas_datetime=self.var_fechas_datetime.get(),
+            fecha_partes=["*"] if self.var_mes_anio.get() else None)
         aud = self.resultado.auditoria
         lineas = [f"• {paso.titulo}: {paso.detalle}" for paso in self.resultado.pasos]
         lineas += ["", f"Filas: {aud['filas_antes']} → {aud['filas_despues']}   ·   "
@@ -442,7 +540,7 @@ class VentanaLimpiezaGuiada(_VentanaBase):
             lineas += ["", "Conviene revisar:"] + [f"⚠ {aviso}" for aviso in self.resultado.avisos]
         _escribir_texto(self.texto_resultado, "\n".join(lineas))
         _llenar_tabla(self.tabla_resultado, self.resultado.df)
-        self.pestanas.select(3)
+        self.pestanas.select(4)
         self.app.tabla_guiada = (self.resultado.df, f"{FG.nombre_base(self.nombre)}_limpio.csv")
 
     def _exigir_resultado(self) -> FG.ResultadoLimpiezaGuiada:
@@ -455,12 +553,97 @@ class VentanaLimpiezaGuiada(_VentanaBase):
         carpeta = filedialog.askdirectory(parent=self, title="Carpeta donde guardar")
         if not carpeta:
             return
-        rutas = FG.guardar_limpieza_guiada(resultado, carpeta, self.var_formato.get())
+        rutas = FG.guardar_limpieza_guiada(resultado, carpeta, self.var_formato.get(),
+                                           formato_diccionario=self.var_formato_dic.get(),
+                                           incluir_eda=self.var_incluir_eda.get(),
+                                           incluir_powerbi=self.var_incluir_powerbi.get())
         messagebox.showinfo("Guardado", "\n".join(f"{t}: {r}" for t, r in rutas.items()), parent=self)
 
     def _enviar(self) -> None:
         resultado = self._exigir_resultado()
         self.app.enviar_a_limpieza_clasica(resultado.df, f"{FG.nombre_base(self.nombre)}_limpio.csv")
+
+
+# --------------------------------------------------------------------------
+# EDA estadistico y auditoria previa
+# --------------------------------------------------------------------------
+
+class _VentanaInforme(_VentanaBase):
+    """Abre una tabla, calcula un informe de solo lectura y lo muestra como texto."""
+    TITULO = ""
+    BOTON = ""
+
+    def __init__(self, app):
+        super().__init__(app, self.TITULO, "1000x700")
+        self.df: pd.DataFrame | None = None
+        self.nombre = ""
+        arriba = ttk.Frame(self, padding=8)
+        arriba.pack(fill="x")
+        ttk.Button(arriba, text="📂 Abrir archivo...", command=lambda: self._ejecutar(self._abrir)).pack(side="left")
+        self.btn_origen = ttk.Button(arriba, text="Usar tabla de la app ▾",
+                                     command=lambda: self._menu_origenes(self.btn_origen, self._cargar))
+        self.btn_origen.pack(side="left", padx=6)
+        self.lbl_archivo = ttk.Label(arriba, text="Ninguna tabla cargada.")
+        self.lbl_archivo.pack(side="left", padx=10)
+        self._opciones(arriba)
+        ttk.Button(arriba, text=self.BOTON, command=lambda: self._ejecutar(self._calcular_y_mostrar)).pack(side="right")
+        self.texto = tk.Text(self, state="disabled", wrap="none")
+        self.texto.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _opciones(self, marco: ttk.Frame) -> None:
+        """Opciones propias de cada informe (por defecto, ninguna)."""
+
+    def _informe(self, df: pd.DataFrame) -> str:
+        raise NotImplementedError
+
+    def _abrir(self) -> None:
+        tabla = _abrir_tabla(self)
+        if tabla is not None:
+            self._cargar(tabla[0], tabla[1])
+
+    def _cargar(self, df: pd.DataFrame, nombre: str) -> None:
+        self.df, self.nombre = df, nombre
+        self.lbl_archivo.config(text=f"{os.path.basename(nombre)}  ({len(df)} filas × {len(df.columns)} cols)")
+        self._calcular_y_mostrar()
+
+    def _calcular_y_mostrar(self) -> None:
+        if self.df is None:
+            raise ValueError("Primero abra una tabla.")
+        _escribir_texto(self.texto, self._informe(self.df))
+
+
+class VentanaAuditoria(_VentanaInforme):
+    TITULO = "Auditoría previa de una tabla"
+    BOTON = "🔍 Auditar"
+
+    def _informe(self, df: pd.DataFrame) -> str:
+        return _texto_auditoria(FG.ejecutar_auditoria_previa(df))
+
+
+class VentanaEDA(_VentanaInforme):
+    TITULO = "EDA estadístico"
+    BOTON = "📊 Calcular EDA"
+
+    def _opciones(self, marco: ttk.Frame) -> None:
+        self.resultado: ED.ResultadoEDA | None = None
+        ttk.Label(marco, text="Correlación:").pack(side="left", padx=(16, 2))
+        self.var_metodo = tk.StringVar(value="pearson")
+        ttk.Combobox(marco, textvariable=self.var_metodo, values=list(ED.METODOS_CORRELACION), width=9,
+                     state="readonly").pack(side="left")
+        ttk.Button(marco, text="💾 Guardar EDA...", command=lambda: self._ejecutar(self._guardar)).pack(side="left", padx=10)
+
+    def _informe(self, df: pd.DataFrame) -> str:
+        self.resultado = FG.ejecutar_eda(df, metodo=self.var_metodo.get())
+        return _texto_eda(self.resultado)
+
+    def _guardar(self) -> None:
+        if self.resultado is None:
+            raise ValueError("Primero calcule el EDA.")
+        carpeta = filedialog.askdirectory(parent=self, title="Carpeta donde guardar el EDA")
+        if not carpeta:
+            return
+        rutas = FG.guardar_eda(self.resultado, carpeta, FG.nombre_base(self.nombre), self.nombre)
+        messagebox.showinfo("Guardado", "\n".join(f"{t}: {r}" for t, r in rutas.items()), parent=self)
 
 
 # --------------------------------------------------------------------------
@@ -506,7 +689,7 @@ class VentanaMerge(_VentanaBase):
         ttk.Label(opciones, text="Ceros a la izquierda hasta (modo codigo)").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Spinbox(opciones, from_=0, to=20, textvariable=self.var_ancho, width=5).grid(row=1, column=1, sticky="w", padx=6)
         ttk.Button(opciones, text="🔍 Revisar llaves", command=lambda: self._ejecutar(self._revisar)).grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
-        self.texto_diag = tk.Text(marco_llaves, height=6, width=60, state="disabled", wrap="word")
+        self.texto_diag = tk.Text(marco_llaves, height=16, width=60, state="disabled", wrap="word")
         self.texto_diag.grid(row=1, column=3, sticky="nsew")
         marco_llaves.columnconfigure(3, weight=1)
 
@@ -563,11 +746,18 @@ class VentanaMerge(_VentanaBase):
             claves_a, claves_b = FG.llaves_sugeridas(self.tablas["a"][0], self.tablas["b"][0])
             _marcar(self.lista_a, claves_a)
             _marcar(self.lista_b, claves_b)
+            _escribir_texto(self.texto_diag, self._texto_auditorias(self.tablas["a"][0], self.tablas["b"][0]))
 
     def _exigir_tablas(self) -> tuple[pd.DataFrame, pd.DataFrame]:
         if not (self.tablas["a"] and self.tablas["b"]):
             raise ValueError("Cargue la tabla A y la tabla B.")
         return self.tablas["a"][0], self.tablas["b"][0]
+
+    def _texto_auditorias(self, df_a: pd.DataFrame, df_b: pd.DataFrame) -> str:
+        """El checklist de cada tabla, antes de cruzarlas."""
+        auditoria_a, auditoria_b = FG.auditar_tablas_merge(df_a, df_b)
+        return ("Auditoría de cada tabla, antes de unir\n"
+                f"Tabla A:\n{AP.checklist_a_texto(auditoria_a)}\nTabla B:\n{AP.checklist_a_texto(auditoria_b)}")
 
     def _revisar(self) -> None:
         df_a, df_b = self._exigir_tablas()
@@ -581,7 +771,8 @@ class VentanaMerge(_VentanaBase):
             lineas.append("⚠ B repite llaves: con «una fila por llave» marcado no se multiplican las filas de A.")
         if len(d["ejemplos_sin_pareja"]):
             lineas.append("Llaves de A sin pareja: " + ", ".join(map(str, d["ejemplos_sin_pareja"].iloc[:, 0].head(8))))
-        _escribir_texto(self.texto_diag, "\n".join(lineas))
+        _escribir_texto(self.texto_diag, self._texto_auditorias(df_a, df_b) + "\n\nRevisión de las llaves\n"
+                        + "\n".join(lineas))
 
     # ---- union ------------------------------------------------------------
     def _unir(self) -> None:
