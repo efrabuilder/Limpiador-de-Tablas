@@ -26,12 +26,14 @@ from typing import Iterator, List, Optional
 
 import typer
 from rich.console import Console
+from typer.core import TyperGroup
 from rich.table import Table
 
 from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, exportar,
 )
+from data_cleaner import auditoria_previa as AP
 from data_cleaner import eda as ED
 from data_cleaner import flujos_guiados as FG
 from data_cleaner import limpieza_guiada as LG
@@ -39,7 +41,17 @@ from data_cleaner import merge_tablas as MT
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES
 
+class GrupoOrdenado(TyperGroup):
+    """Lista los comandos con la limpieza guiada primero y luego el resto, como el menú de la app web."""
+
+    def list_commands(self, ctx):
+        comandos = list(self.commands)
+        primeros = [c for c in ("limpieza-guiada",) if c in comandos]
+        return primeros + [c for c in comandos if c not in primeros]
+
+
 app = typer.Typer(
+    cls=GrupoOrdenado,
     add_completion=False,
     help="Limpiador de Tablas — detección y corrección de calidad de datos por línea de comandos.",
 )
@@ -797,6 +809,35 @@ def limpieza_guiada_cmd(
              "estandarizadas con --fechas). Se crean al final y quedan vacías donde la fecha no se pudo leer."),
     mes: bool = typer.Option(True, "--mes/--no-mes", help="Con --mes-anio: crear la columna de mes (1-12)."),
     anio: bool = typer.Option(True, "--anio/--no-anio", help="Con --mes-anio: crear la columna de año."),
+    fechas_datetime: bool = typer.Option(
+        False, "--fechas-datetime/--fechas-texto",
+        help="Dejar las fechas estandarizadas como tipo fecha (datetime64, como pd.to_datetime) en vez de texto. "
+             "Una fecha vacía queda NaT, no «No indica»."),
+    eliminar_duplicados: bool = typer.Option(
+        False, "--eliminar-duplicados/--conservar-duplicados",
+        help="Quitar las filas idénticas a una anterior (después de estandarizar)."),
+    corregir_imposibles: bool = typer.Option(
+        False, "--corregir-imposibles/--no-corregir-imposibles",
+        help="Corregir valores imposibles (edad fuera de 0-120, precios o cantidades negativos)."),
+    atipicos_iqr: Optional[str] = typer.Option(
+        None, "--atipicos-iqr", help="Columnas (coma-separadas) donde corregir también atípicos del IQR."),
+    factor_iqr: float = typer.Option(1.5, "--factor-iqr", help="Factor del IQR para --atipicos-iqr (1.5 estándar, 3 extremos)."),
+    accion_atipicos: str = typer.Option(
+        "nulo", "--accion-atipicos",
+        help="Qué hacer con imposibles y atípicos: " + ", ".join(LG.ACCIONES_ATIPICOS) + "."),
+    corregir_formulas: bool = typer.Option(
+        False, "--corregir-formulas/--no-corregir-formulas",
+        help="Revisar que el total sea cantidad × precio (- descuento + impuesto + envío), con las columnas que "
+             "detecta la limpieza clásica."),
+    accion_formulas: str = typer.Option(
+        "marcar", "--accion-formulas",
+        help="Qué hacer con los totales que no cuadran: " + ", ".join(LG.ACCIONES_FORMULAS) + "."),
+    sin_powerbi: bool = typer.Option(
+        False, "--sin-powerbi",
+        help="No guardar el código para Power BI (script de Python, M con Python y M puro)."),
+    filtro: List[str] = typer.Option(
+        [], "--filtro", help="Solo se quedan las filas que cumplen TODOS los filtros, ej. ventas>1000 "
+                             "(operadores > >= < <= == !=). Elimina el resto, también las sin dato. Repetible."),
     formato_diccionario: str = typer.Option(
         "xlsx", "--formato-diccionario",
         help="Formato del diccionario técnico: xlsx, csv o ambos (el documento de alcance enlaza al CSV si hay dos)."),
@@ -825,7 +866,15 @@ def limpieza_guiada_cmd(
             espacios=espacios, comillas=comillas, numericas=_lista_o_none(numericas),
             latitud=latitud, longitud=longitud, rango_latitud=_rango(rango_latitud, "--rango-latitud"),
             rango_longitud=_rango(rango_longitud, "--rango-longitud"), fechas=_lista_o_none(fechas),
-            formato_fecha=formato_fecha, dia_primero=dia_primero)
+            formato_fecha=formato_fecha, dia_primero=dia_primero,
+            eliminar_duplicados=eliminar_duplicados, corregir_imposibles=corregir_imposibles,
+            atipicos_iqr=_lista_o_none(atipicos_iqr), factor_iqr=factor_iqr, accion_atipicos=accion_atipicos,
+            filtros=filtro, corregir_formulas=corregir_formulas, accion_formulas=accion_formulas)
+        auditoria = FG.ejecutar_auditoria_previa(df, _lista_o_none(tokens_extra))
+        console.print("\n[bold]Auditoría inicial (checklist, antes de limpiar)[/bold]")
+        console.print(AP.checklist_a_texto(auditoria))
+        if len(auditoria.imposibles):
+            _imprimir_dataframe(auditoria.imposibles, "Valores imposibles encontrados")
         diagnostico = LG.diagnostico_nulos(df, config["tokens"]).reset_index()
         _imprimir_dataframe(diagnostico, "Diagnóstico de nulos y vacíos")
         ajustes = FG.parsear_ajustes_reglas(regla)
@@ -839,7 +888,8 @@ def limpieza_guiada_cmd(
         resultado = FG.ejecutar_limpieza_guiada(
             df, config, ajustes, nombre_archivo=input, hoja=hoja, palabra=palabra, unir_equivalentes=unir_equivalentes,
             asegurar_sin_vacios=cierre, numeros_cierre=numeros_cierre, incluir_fechas_cierre=fechas_cierre,
-            fecha_partes=_lista_o_none(mes_anio) or None, fecha_partes_mes=mes, fecha_partes_anio=anio)
+            fecha_partes=_lista_o_none(mes_anio) or None, fecha_partes_mes=mes, fecha_partes_anio=anio,
+            fechas_datetime=fechas_datetime)
         for paso in resultado.pasos:
             console.print(f"• [bold]{paso.titulo}[/bold]: {paso.detalle}")
         for aviso in resultado.avisos:
@@ -853,7 +903,8 @@ def limpieza_guiada_cmd(
             _imprimir_dataframe(auditoria["nulos_restantes"].reset_index(), "Nulos que quedan")
         _imprimir_rutas(FG.guardar_limpieza_guiada(resultado, outdir, formato_salida,
                                                    textos_alcance={"proyecto": proyecto, "autor": autor},
-                                                   formato_diccionario=formato_diccionario, incluir_eda=eda))
+                                                   formato_diccionario=formato_diccionario, incluir_eda=eda,
+                                                   incluir_powerbi=not sin_powerbi))
 
 
 @app.command("merge")
@@ -896,6 +947,10 @@ def merge_cmd(
         df_a = FG.leer_tabla_guiada(tabla_a, hoja=hoja_a)
         df_b = FG.leer_tabla_guiada(tabla_b, hoja=hoja_b)
         console.print(f"A: [bold]{len(df_a)}[/bold] filas · B: [bold]{len(df_b)}[/bold] filas.")
+        auditoria_a, auditoria_b = FG.auditar_tablas_merge(df_a, df_b)
+        console.print("\n[bold]Auditoría de cada tabla, antes de unir (checklist)[/bold]")
+        console.print(f"[bold]Tabla A[/bold] ({tabla_a})\n{AP.checklist_a_texto(auditoria_a)}")
+        console.print(f"[bold]Tabla B[/bold] ({tabla_b})\n{AP.checklist_a_texto(auditoria_b)}")
         claves_a, claves_b = _lista_o_none(llave_a) or [], _lista_o_none(llave_b) or []
         if not claves_a and not claves_b:
             _imprimir_dataframe(MT.sugerir_llaves(df_a, df_b), "Llaves sugeridas")
@@ -955,6 +1010,32 @@ def diccionario_cmd(
             console.print("[yellow]⚠ No se generó el documento de alcance: instale python-docx "
                           "(pip install python-docx).[/yellow]")
         _imprimir_rutas(rutas)
+
+
+@app.command("auditoria")
+def auditoria_cmd(
+    input: str = typer.Option(..., "--input", "-i", help="Tabla (CSV/Excel) a auditar, tal como llega."),
+    hoja: Optional[str] = typer.Option(None, "--hoja", help="Hoja del libro Excel (si tiene varias)."),
+    tokens_extra: Optional[str] = typer.Option(
+        None, "--tokens-extra", help="Textos que cuentan como nulo además de la celda vacía (coma-separados)."),
+):
+    """Auditoría de una tabla ANTES de limpiarla o cruzarla (checklist ETL, fase 1): tamaño, tipos de dato,
+    nulos, duplicados y valores imposibles (precios negativos, edades de 150 años). No modifica nada."""
+    with _errores_de_usuario():
+        df = FG.leer_tabla_guiada(input, hoja=hoja)
+        auditoria = FG.ejecutar_auditoria_previa(df, _lista_o_none(tokens_extra))
+        console.print(AP.checklist_a_texto(auditoria))
+        _imprimir_dataframe(auditoria.tipos, "2. Tipos de dato (lo que Python leyó vs lo esperado)")
+        if len(auditoria.nulos):
+            _imprimir_dataframe(auditoria.nulos, "3. Nulos por columna")
+        if auditoria.duplicados:
+            _imprimir_dataframe(auditoria.ejemplos_duplicados.reset_index(drop=True), "4. Filas duplicadas (ejemplos)")
+        if len(auditoria.imposibles):
+            _imprimir_dataframe(auditoria.imposibles, "5. Valores imposibles")
+        if len(auditoria.formulas):
+            _imprimir_dataframe(auditoria.formulas, "5. Totales que no coinciden con la fórmula")
+        if len(auditoria.describe):
+            _imprimir_dataframe(auditoria.describe.reset_index(), "5. Distribución de los números (describe)")
 
 
 @app.command("eda")
