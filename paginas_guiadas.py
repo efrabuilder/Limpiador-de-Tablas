@@ -746,7 +746,8 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
             pass
         filtros.append((fila["columna"], fila["operador"], valor))
     if filtros:
-        st.warning("El filtro **elimina** las filas que no lo cumplen, también las que no tienen dato en esa columna.")
+        st.warning("El filtro **elimina** las filas que no lo cumplen, también las que no tienen dato en esa columna. "
+                   "Se aplica primero, sobre los valores reales, antes de corregir duplicados e imposibles.")
 
     config = {
         "tokens": tokens, "nombres_snake": snake, "vacios_a_nan": vacios,
