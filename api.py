@@ -9,20 +9,30 @@ Uso:
     uvicorn api:app --reload
     (documentación interactiva en http://localhost:8000/docs)
 
-Endpoints:
+Endpoints (en el mismo orden que el menú de la app: la limpieza guiada va primero; en /docs aparecen agrupados):
+
+1. Limpieza guiada de nulos
+    POST /auditoria                   -> checklist de auditoría de una tabla ANTES de limpiarla (tamaño, tipos,
+                                          nulos, duplicados, valores imposibles, total = cantidad × precio)
+    POST /limpieza-guiada/diagnostico -> auditoría inicial, diagnóstico de nulos y reglas sugeridas por columna
+    POST /limpieza-guiada             -> limpia (pasos globales + una regla por columna)
+    GET  /descargar-guiado/{id}/{tipo} -> datos | script | diccionario | eda | código para Power BI de
+                                          /limpieza-guiada o /merge
+
+2. Limpieza de una tabla (clásica)
     POST /analizar   -> sube un archivo, devuelve el resumen de hallazgos (JSON)
     POST /limpiar     -> sube un archivo + configuración, devuelve datos_limpios y reporte
     GET  /descargar/{id}/{tipo}  -> descarga los archivos generados por /limpiar
 
-Limpieza guiada de nulos, merge y diccionario de datos:
-    POST /auditoria                   -> checklist de auditoría de una tabla ANTES de limpiarla (tamaño, tipos,
-                                          nulos, duplicados, valores imposibles)
-    POST /limpieza-guiada/diagnostico -> auditoría inicial, diagnóstico de nulos y reglas sugeridas por columna
-    POST /limpieza-guiada             -> limpia (pasos globales + una regla por columna)
-    POST /merge/diagnostico           -> sugiere y revisa las llaves de dos tablas
+3. Merge
+    POST /merge/diagnostico           -> audita cada tabla y sugiere/revisa las llaves
     POST /merge                       -> une A con B y audita el resultado
-    POST /diccionario                 -> devuelve el diccionario de datos (Excel)
-    GET  /descargar-guiado/{id}/{tipo} -> datos | script | diccionario de /limpieza-guiada o /merge
+
+4. Diccionario de datos
+    POST /diccionario                 -> devuelve el diccionario de datos (Excel o CSV)
+
+5. EDA estadístico
+    POST /eda                         -> descriptivos, correlación y atípicos (JSON o zip)
 """
 from __future__ import annotations
 
@@ -1262,3 +1272,30 @@ def descargar_guiado_endpoint(resultado_id: str, tipo: str, formato: Optional[st
     media = "text/csv" if formato == "csv" else MEDIA_XLSX
     return StreamingResponse(io.BytesIO(tabla_a_bytes(datos["df"], formato)), media_type=media,
                              headers={"Content-Disposition": f'attachment; filename="{base}.{formato}"'})
+
+
+# --- Orden de los grupos en /docs: el mismo del menu de la app (la limpieza guiada va primero) ---
+GRUPOS_API = (
+    ("1. Limpieza guiada", "Auditoría inicial, limpieza guiada de nulos y descargas (incluido el código para Power BI).",
+     ("/auditoria", "/limpieza-guiada", "/descargar-guiado")),
+    ("2. Limpieza de una tabla", "Análisis y limpieza clásica con detección de problemas de calidad.",
+     ("/analizar", "/limpiar", "/exportar", "/descargar/")),
+    ("3. Merge", "Unir dos tablas con auditoría de cada una y revisión de llaves.", ("/merge",)),
+    ("4. Diccionario de datos", "Diccionario técnico (Excel o CSV) y documento de alcance.", ("/diccionario",)),
+    ("5. EDA estadístico", "Descriptivos, correlación y atípicos con boxplots.", ("/eda",)),
+    ("6. Modelo de datos", "Estrella / copo de nieve y script de base de datos.", ("/modelo-sql",)),
+)
+
+
+def _grupo_de(ruta: str) -> Optional[str]:
+    for nombre, _descripcion, prefijos in GRUPOS_API:
+        if any(ruta == p or ruta.startswith(p) for p in prefijos):
+            return nombre
+    return None
+
+
+for _ruta in app.routes:
+    _grupo = _grupo_de(getattr(_ruta, "path", ""))
+    if _grupo and not getattr(_ruta, "tags", None):
+        _ruta.tags = [_grupo]
+app.openapi_tags = [{"name": nombre, "description": descripcion} for nombre, descripcion, _ in GRUPOS_API]
