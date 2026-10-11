@@ -40,8 +40,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from . import auditoria_previa as AP
 from . import diccionario_datos as DD
 from . import eda as ED
+from . import exportador_guiado as EG
 from . import limpieza_guiada as LG
 from . import merge_tablas as MT
 from .loaders import leer_tabla_subida, listar_hojas, tabla_a_bytes
@@ -144,7 +146,11 @@ def configurar_limpieza_guiada(
         rango_latitud: Optional[Tuple[float, float]] = None,
         rango_longitud: Optional[Tuple[float, float]] = None,
         fechas: Optional[Sequence[str]] = None, formato_fecha: str = "%Y-%m-%d",
-        dia_primero: bool = True) -> Dict:
+        dia_primero: bool = True,
+        eliminar_duplicados: bool = False, corregir_imposibles: bool = False,
+        atipicos_iqr: Optional[Sequence[str]] = None, factor_iqr: float = 1.5,
+        accion_atipicos: str = "nulo", filtros: Optional[Sequence[str]] = None,
+        corregir_formulas: bool = False, accion_formulas: str = "marcar") -> Dict:
     """Arma el `config` de pasos globales con las mismas sugerencias de la app web.
 
     None = elegir automaticamente (columnas de texto, numericas, fechas y
@@ -157,6 +163,19 @@ def configurar_limpieza_guiada(
 
     fechas: columnas que se dejan en un solo `formato_fecha` (AAAA-MM-DD por
     defecto). `dia_primero` decide como leer 05/06/2025 cuando no hay pistas.
+
+    Opcionales, todos apagados por defecto porque borran o cambian datos:
+    - eliminar_duplicados: quita las filas identicas a otra anterior (despues de estandarizar).
+    - corregir_imposibles: valores fisicamente imposibles (edad fuera de 0-120, precios o cantidades
+      negativos) segun el nombre de la columna; `atipicos_iqr`: ademas, atipicos del IQR (factor
+      `factor_iqr`) de esas columnas. `accion_atipicos`: nulo (los trata la regla de nulos), limitar
+      (al limite mas cercano), eliminar_fila o marcar (no cambia ningun dato: agrega «<col>_atipico»
+      verdadero/falso, ideal para una venta grande pero real).
+    - corregir_formulas: revisa que el total coincida con cantidad x precio (- descuento + impuesto +
+      envio), con las mismas columnas que detecta la limpieza clasica. `accion_formulas`: marcar (agrega
+      «<total>_revisar», no cambia datos), recalcular o eliminar_fila.
+    - filtros: ['ventas>1000', 'ciudad==Heredia']: solo se quedan las filas que cumplen TODOS (como
+      df[df['ventas'] > 1000]; tambien se van las que no tienen dato en esa columna).
     """
     if "%" not in formato_fecha:
         raise ValueError(f"formato_fecha invalido: '{formato_fecha}' (ej. %Y-%m-%d)")
@@ -195,6 +214,9 @@ def configurar_limpieza_guiada(
     elif longitud:
         longitud = traducir([longitud], "longitud")[0]
 
+    correcciones = _claves_de_correccion(traducir, eliminar_duplicados, corregir_imposibles, atipicos_iqr,
+                                         factor_iqr, accion_atipicos, filtros, corregir_formulas, accion_formulas)
+
     texto = {"columnas": cols_texto, "minusculas": minusculas, "espacios": espacios,
              "comillas": comillas} if estandarizar_texto else None
     return {
@@ -204,7 +226,42 @@ def configurar_limpieza_guiada(
         "rango_latitud": rango_latitud, "rango_longitud": rango_longitud,
         "fechas": {"columnas": cols_fecha, "formato": formato_fecha,
                    "dia_primero": dia_primero} if cols_fecha else None,
+        **correcciones,
     }
+
+
+def _claves_de_correccion(traducir, eliminar_duplicados: bool, corregir_imposibles: bool,
+                          atipicos_iqr: Optional[Sequence[str]], factor_iqr: float, accion_atipicos: str,
+                          filtros: Optional[Sequence[str]], corregir_formulas: bool = False,
+                          accion_formulas: str = "marcar") -> Dict:
+    """Las claves del config de duplicados, valores imposibles/atipicos y filtros (ver configurar_limpieza_guiada)."""
+    if accion_atipicos not in LG.ACCIONES_ATIPICOS:
+        raise ValueError(f"accion_atipicos invalida: '{accion_atipicos}' (use {', '.join(LG.ACCIONES_ATIPICOS)})")
+    if accion_formulas not in LG.ACCIONES_FORMULAS:
+        raise ValueError(f"accion_formulas invalida: '{accion_formulas}' (use {', '.join(LG.ACCIONES_FORMULAS)})")
+    cols_iqr = traducir(atipicos_iqr, "columnas de atipicos") if atipicos_iqr else []
+    atipicos = {"imposibles": corregir_imposibles, "iqr_columnas": cols_iqr, "factor_iqr": factor_iqr,
+                "accion": accion_atipicos} if (corregir_imposibles or cols_iqr) else None
+    lista_filtros = []
+    for texto_filtro in filtros or []:
+        columna, operador, valor = LG.parsear_filtro(texto_filtro)
+        lista_filtros.append((traducir([columna], "columna del filtro")[0], operador, valor))
+    return {"duplicados": eliminar_duplicados, "atipicos": atipicos, "filtros": lista_filtros,
+            "formulas": {"accion": accion_formulas} if corregir_formulas else None}
+
+
+def agregar_correcciones(df: pd.DataFrame, config: Dict, eliminar_duplicados: bool = False,
+                         corregir_imposibles: bool = False, atipicos_iqr: Optional[Sequence[str]] = None,
+                         factor_iqr: float = 1.5, accion_atipicos: str = "nulo",
+                         filtros: Optional[Sequence[str]] = None, corregir_formulas: bool = False,
+                         accion_formulas: str = "marcar") -> Dict:
+    """Copia de `config` con los pasos opcionales de duplicados, valores imposibles/atipicos y filtros (mismos
+    parametros que configurar_limpieza_guiada). Sirve cuando el config ya se armo y se ajusto a mano."""
+    df_ren = LG.paso_nombres_columnas(df)[0] if config.get("nombres_snake", True) else df
+    traducir = _traductor_de_nombres(df, df_ren)
+    return {**config, **_claves_de_correccion(traducir, eliminar_duplicados, corregir_imposibles, atipicos_iqr,
+                                              factor_iqr, accion_atipicos, filtros, corregir_formulas,
+                                              accion_formulas)}
 
 
 def parsear_ajustes_reglas(textos: Optional[Sequence[str]]) -> Dict[str, Dict[str, str]]:
@@ -270,7 +327,8 @@ def ejecutar_limpieza_guiada(df: pd.DataFrame, config: Dict,
                              incluir_fechas_cierre: bool = True,
                              fecha_partes: Optional[Sequence[str]] = None,
                              fecha_partes_mes: bool = True,
-                             fecha_partes_anio: bool = True) -> ResultadoLimpiezaGuiada:
+                             fecha_partes_anio: bool = True,
+                             fechas_datetime: bool = False) -> ResultadoLimpiezaGuiada:
     """Pasos globales + union de valores equivalentes + una regla de nulos por
     columna (la sugerida, salvo que `ajustes` indique otra) + cierre sin vacios +
     auditoria final + script de pandas. Es el mismo recorrido de la app web.
@@ -287,6 +345,9 @@ def ejecutar_limpieza_guiada(df: pd.DataFrame, config: Dict,
       «<col>_mes» y «<col>_anio» al final de la limpieza; ['*'] = todas las estandarizadas. None = ninguna.
       `fecha_partes_mes` / `fecha_partes_anio` eligen cuales de las dos crear. Donde la fecha esta
       vacia, mes y anio quedan vacios (no se rellenan).
+    - fechas_datetime: al final, las columnas de `config['fechas']` pasan de texto a fecha de verdad
+      (datetime64, como pd.to_datetime). Una fecha vacia queda NaT: no se rellena con «No indica», que
+      no es una fecha.
     """
     if numeros_cierre not in ("mediana", "cero", "palabra"):
         raise ValueError("numeros_cierre debe ser 'mediana', 'cero' o 'palabra'")
@@ -307,6 +368,13 @@ def ejecutar_limpieza_guiada(df: pd.DataFrame, config: Dict,
             pasos_globales.append(paso_eq)
 
     reglas = reglas_sugeridas(df_base, tokens, palabra)
+    for paso_global in pasos_globales:  # columnas nuevas (marcas de atipicos y de formula) para el diccionario
+        for r in paso_global.reglas or []:
+            existente = next((x for x in reglas if x["columna"] == r["columna"]), None)
+            if existente is not None:
+                existente.update(r)
+            else:
+                reglas.append(r)
     traducir = _traductor_de_nombres(df, df_base)
     for columna, cambio in (ajustes or {}).items():
         destino = traducir([columna], "regla")[0]
@@ -315,6 +383,15 @@ def ejecutar_limpieza_guiada(df: pd.DataFrame, config: Dict,
         for regla in reglas:
             if regla["columna"] == destino:
                 regla.update(cambio)
+    cols_fecha_datetime = [c for c in (config.get("fechas") or {}).get("columnas", []) if c in df_base.columns]
+    if fechas_datetime:
+        if not cols_fecha_datetime:
+            raise ValueError("Para dejar las fechas como tipo fecha primero hay que estandarizar al menos una "
+                             "columna de fecha (opción de fechas de la limpieza).")
+        for regla in reglas:  # una columna de fechas no puede llevar la palabra «No indica»
+            if regla["columna"] in cols_fecha_datetime and regla["regla"] == "no_indica":
+                regla.update(regla="dejar", valor="")
+        incluir_fechas_cierre = False
     for regla in reglas:  # «no_indica» sin valor = la palabra elegida (el diccionario la muestra)
         if regla["regla"] == "no_indica" and not str(regla.get("valor", "")).strip():
             regla["valor"] = palabra
@@ -328,6 +405,11 @@ def ejecutar_limpieza_guiada(df: pd.DataFrame, config: Dict,
         for r in paso_cierre.reglas or []:  # el diccionario debe decir lo que se hizo
             por_columna[r["columna"]] = {**por_columna.get(r["columna"], {}), **r}
         reglas = list(por_columna.values())
+
+    if fechas_datetime:
+        df_final, paso_datetime = LG.paso_fechas_datetime(df_final, cols_fecha_datetime,
+                                                          config["fechas"].get("formato", "%Y-%m-%d"))
+        pasos_reglas.append(paso_datetime)
 
     if fecha_partes:
         df_final, paso_partes = _agregar_fecha_partes(df_final, config, traducir, fecha_partes,
@@ -445,22 +527,38 @@ def argumentos_diccionario_limpieza(resultado: "ResultadoLimpiezaGuiada",
                 ("Celdas nulas", f"{DD._n(a['nulos_antes'])} antes y {DD._n(a['nulos_despues'])} después")])
 
 
+def exportar_powerbi(resultado: ResultadoLimpiezaGuiada, nombre_paso_anterior: str = "TuPasoAnterior"
+                     ) -> Dict[str, str]:
+    """La limpieza guiada para Power BI, sin cambiar el archivo original: {'script_powerbi': script Python para
+    «Ejecutar script de Python», 'm_python': consulta M con Python.Execute, 'm_puro': consulta M nativa}.
+    `nombre_paso_anterior`: el ultimo paso de la consulta de Power Query de la que parten (ver
+    exportador_guiado.py)."""
+    return EG.exportar_powerbi(resultado, nombre_paso_anterior)
+
+
 def guardar_limpieza_guiada(resultado: ResultadoLimpiezaGuiada, carpeta: str,
                             formato: str = "csv",
                             textos_alcance: Optional[Dict[str, str]] = None,
                             formato_diccionario: str = "xlsx",
-                            incluir_eda: bool = False) -> Dict[str, str]:
+                            incluir_eda: bool = False,
+                            incluir_powerbi: bool = True) -> Dict[str, str]:
     """Guarda tabla limpia, script de pandas y los diccionarios en `carpeta`
     (Excel basico, diccionario tecnico y documento de alcance en Word).
     `textos_alcance` rellena el documento de alcance (proyecto, autor, proposito,
     conclusion, alcance, unidad_analisis, preparacion, recomendacion,
     fuentes_documentales). `formato_diccionario`: formato del diccionario tecnico
     ('xlsx', 'csv' o 'ambos'). `incluir_eda`: guarda tambien el EDA estadistico de la
-    tabla limpia (CSV, PNG y script). Devuelve {tipo: ruta}."""
+    tabla limpia (CSV, PNG y script). `incluir_powerbi` (por defecto si): guarda tambien la limpieza para
+    Power BI sin tocar el archivo original: script de Python, M con Python y M puro. Devuelve {tipo: ruta}."""
     os.makedirs(carpeta, exist_ok=True)
     base = f"{nombre_base(resultado.nombre_archivo)}_limpio"
     rutas = _guardar_tabla(resultado.df, carpeta, base, formato)
     rutas["script"] = _escribir(os.path.join(carpeta, f"{base}_script.py"), resultado.script)
+    if incluir_powerbi:
+        powerbi = exportar_powerbi(resultado)
+        rutas["script_powerbi"] = _escribir(os.path.join(carpeta, f"{base}_powerbi.py"), powerbi["script_powerbi"])
+        rutas["m_python"] = _escribir(os.path.join(carpeta, f"{base}_powerbi_python.m"), powerbi["m_python"])
+        rutas["m_puro"] = _escribir(os.path.join(carpeta, f"{base}_m_puro.m"), powerbi["m_puro"])
     argumentos = argumentos_diccionario_limpieza(resultado, textos_alcance)
     nombre = argumentos.pop("nombre")
     rutas.update(_guardar_diccionarios(carpeta, f"diccionario_{base}.xlsx", base, resultado.df, nombre,
@@ -757,6 +855,38 @@ def _guardar_eda_de_tabla(df: pd.DataFrame, carpeta: str, base: str, formato: st
     except ValueError:  # tabla vacia: no hay nada que explorar
         return {}
     return ED.guardar_eda(resultado, carpeta, base, f"{base}.{extension}")
+
+
+def ejecutar_auditoria_previa(df: pd.DataFrame, tokens_extra: Optional[Sequence[str]] = None
+                              ) -> AP.AuditoriaPrevia:
+    """Auditoria de la tabla ANTES de limpiarla o cruzarla (checklist ETL, fase 1): tamano, tipos, nulos,
+    duplicados y valores imposibles. No modifica la tabla. `tokens_extra`: como en configurar_limpieza_guiada
+    (None = lista base mas los textos tipo «sin dato» que aparezcan)."""
+    if tokens_extra is None:
+        base = tokens_nulos(None)
+        tokens = base + tuple(LG.detectar_textos_tipo_nulo(df, base)["texto"])
+    else:
+        tokens = tokens_nulos(tokens_extra)
+    return AP.auditar_tabla(df, tokens)
+
+
+def auditar_tablas_merge(df_a: pd.DataFrame, df_b: pd.DataFrame, tokens_extra: Optional[Sequence[str]] = None
+                         ) -> Tuple[AP.AuditoriaPrevia, AP.AuditoriaPrevia]:
+    """El checklist de auditoria de CADA tabla, antes de cruzarlas (el estandar pide auditar cada tabla individual
+    antes de cualquier merge, para no unir tablas con duplicados, tipos mal leidos o valores imposibles sin
+    saberlo). Devuelve (auditoria de A, auditoria de B). No modifica las tablas."""
+    return (ejecutar_auditoria_previa(df_a, tokens_extra), ejecutar_auditoria_previa(df_b, tokens_extra))
+
+
+def auditoria_previa_a_dict(auditoria: AP.AuditoriaPrevia) -> Dict:
+    """La auditoria previa lista para JSON (sin DataFrames)."""
+    def registros(tabla: pd.DataFrame) -> List[Dict]:
+        return tabla.astype(object).where(tabla.notna(), None).to_dict("records") if len(tabla) else []
+    return {"filas": auditoria.filas, "columnas": auditoria.columnas, "checklist": auditoria.checklist,
+            "tipos": registros(auditoria.tipos), "nulos": registros(auditoria.nulos),
+            "duplicados": auditoria.duplicados, "imposibles": registros(auditoria.imposibles),
+            "formula": auditoria.formula, "formulas_incorrectas": registros(auditoria.formulas),
+            "describe": registros(auditoria.describe.reset_index()) if len(auditoria.describe) else []}
 
 
 def eda_a_dict(resultado: ED.ResultadoEDA) -> Dict:
