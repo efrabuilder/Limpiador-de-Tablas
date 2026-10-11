@@ -39,6 +39,9 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from .correccion_guiada import (columnas_de_formula, combinar_limites, contar_fuera, detectar_regla_formula,
+                                limites_imposibles,
+                                limites_iqr, texto_formula, texto_limite)
 from .patrones import (
     PATRONES_EMAIL,
     PATRONES_TELEFONO,
@@ -149,7 +152,19 @@ def a_numero(serie):
                 v = v.replace(",", ".")
         return v
 
-    return pd.to_numeric(serie.map(limpiar), errors="coerce")
+    # Se limpia cada valor DISTINTO una sola vez (una columna de 200 mil filas suele tener pocos valores
+    # distintos) y el resultado se reparte por fila; el dtype final es el mismo de pd.to_numeric(serie.map(...)).
+    if len(serie) == 0:
+        return pd.to_numeric(serie.map(limpiar), errors="coerce")
+    codigos, unicos = pd.factorize(serie)
+    if len(unicos) == 0:  # todo nulo
+        return pd.Series(float("nan"), index=serie.index, dtype="float64", name=serie.name)
+    convertidos = pd.to_numeric(pd.Series([limpiar(u) for u in unicos], dtype=object), errors="coerce").to_numpy()
+    sin_dato = codigos < 0
+    valores = convertidos[np.where(sin_dato, 0, codigos)]
+    if sin_dato.any():
+        valores = np.where(sin_dato, np.nan, valores).astype("float64")
+    return pd.Series(valores, index=serie.index, name=serie.name)
 
 
 def parsear_coordenada(valor, tipo, minimo=None, maximo=None):
@@ -249,18 +264,26 @@ def unificar_fechas(serie, formato="%Y-%m-%d", dia_primero=True):
     return fechas.dt.strftime(formato).astype(object).where(fechas.notna(), np.nan)
 
 
+def a_fecha(serie, formato="%Y-%m-%d"):
+    """Pasa una columna de fechas escritas como texto con `formato` (la salida de unificar_fechas) a fecha de
+    verdad (datetime64), como pd.to_datetime. Si el texto trae hora (formato + «HH:MM:SS»), se conserva. Lo que
+    es nulo o no se puede leer (por ejemplo «No indica») queda como NaT, sin inventar una fecha."""
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        return serie
+    base = formato.split(" %H")[0]  # el formato sin la hora
+    largo = len(pd.Timestamp(2000, 12, 28).strftime(base))
+    texto = serie.astype("string").str.strip()
+    fechas = pd.to_datetime(texto.str.slice(0, largo), format=base, errors="coerce")
+    hora = pd.to_timedelta(texto.str.slice(largo).str.strip().replace("", "0s"), errors="coerce")
+    return fechas + hora.fillna(pd.Timedelta(0))
+
+
 def extraer_mes_anio(serie, formato="%Y-%m-%d"):
     """Devuelve (mes, anio) de una columna de fechas escritas como texto con `formato` (la salida de
-    unificar_fechas; si trae hora, se ignora). El mes va de 1 a 12. Ambas son enteros que admiten
-    vacios: donde la fecha es nula o no se puede leer (por ejemplo «No indica»), mes y anio quedan
+    unificar_fechas; si trae hora, se ignora) o ya como fecha. El mes va de 1 a 12. Ambas son enteros que
+    admiten vacios: donde la fecha es nula o no se puede leer (por ejemplo «No indica»), mes y anio quedan
     vacios, sin inventar un valor."""
-    if pd.api.types.is_datetime64_any_dtype(serie):
-        fechas = serie
-    else:
-        base = formato.split(" %H")[0]  # el formato sin la hora
-        largo = len(pd.Timestamp(2000, 12, 28).strftime(base))
-        texto = serie.astype("string").str.strip().str.slice(0, largo)
-        fechas = pd.to_datetime(texto, format=base, errors="coerce")
+    fechas = a_fecha(serie, formato)
     return fechas.dt.month.astype("Int64"), fechas.dt.year.astype("Int64")
 
 
@@ -394,10 +417,96 @@ def rellenar_restantes(df, columnas_texto, columnas_numericas, numeros="mediana"
     return df
 
 
+def aplicar_limites(df, limites, accion="nulo"):
+    """Trata los valores fuera de [minimo, maximo] de cada columna (`limites`: {columna: (minimo, maximo)},
+    None = sin limite de ese lado). accion: «nulo» (pasan a nulo y despues los trata la regla de nulos),
+    «limitar» (se llevan al limite), «eliminar_fila» o «marcar» (no cambia ningun dato: agrega una columna
+    «<col>_atipico» verdadero/falso). Devuelve (tabla, {columna: cuantos})."""
+    df = df.copy()
+    conteos = {}
+    quitar = pd.Series(False, index=df.index)
+    for col, (minimo, maximo) in limites.items():
+        if col not in df.columns:
+            continue
+        valores = a_numero(df[col])
+        fuera = pd.Series(False, index=df.index)
+        if minimo is not None:
+            fuera |= valores < minimo
+        if maximo is not None:
+            fuera |= valores > maximo
+        if accion == "marcar":
+            df[f"{col}_atipico"] = fuera  # siempre la misma columna, haya o no atipicos hoy
+        if not fuera.any():
+            continue
+        conteos[col] = int(fuera.sum())
+        if accion == "eliminar_fila":
+            quitar |= fuera
+        elif accion == "limitar":
+            df[col] = df[col].where(~fuera, valores.clip(lower=minimo, upper=maximo))
+        elif accion == "marcar":
+            pass  # ya se agrego la columna de marca
+        else:
+            df[col] = df[col].where(~fuera)
+    if accion == "eliminar_fila":
+        df = df.loc[~quitar].reset_index(drop=True)
+    return df, conteos
+
+
+def aplicar_formulas(df, reglas, accion="marcar"):
+    """Revisa que cada total coincida con su formula (cantidad x precio - descuento + impuesto + envio), con la
+    tolerancia relativa de la regla y un piso de 0.01. `reglas`: [{total, cantidad, precio, descuento, impuesto,
+    envio, tolerancia}]. accion: «marcar» (agrega «<total>_revisar» verdadero/falso, no cambia datos),
+    «recalcular» (el total pasa a ser lo que dice la formula) o «eliminar_fila». Devuelve (tabla, {total: cuantos})."""
+    df = df.copy()
+    conteos = {}
+    quitar = pd.Series(False, index=df.index)
+    for r in reglas:
+        if not all(r.get(k) in df.columns for k in ("total", "cantidad", "precio")):
+            continue
+        total, cantidad, precio = (a_numero(df[r[k]]) for k in ("total", "cantidad", "precio"))
+        esperado = cantidad * precio
+        if r.get("descuento") in df.columns:
+            esperado = esperado - a_numero(df[r["descuento"]]).fillna(0)
+        for clave in ("impuesto", "envio"):
+            if r.get(clave) in df.columns:
+                esperado = esperado + a_numero(df[r[clave]]).fillna(0)
+        limite = (esperado.abs() * r.get("tolerancia", 0.01)).clip(lower=0.01)
+        mal = ((total - esperado).abs() > limite) & total.notna() & esperado.notna()
+        if accion == "marcar":
+            df[f"{r['total']}_revisar"] = mal
+        if not mal.any():
+            continue
+        conteos[r["total"]] = int(mal.sum())
+        if accion == "recalcular":
+            df[r["total"]] = total.where(~mal, esperado.round(2))
+        elif accion == "eliminar_fila":
+            quitar |= mal
+    if accion == "eliminar_fila":
+        df = df.loc[~quitar].reset_index(drop=True)
+    return df, conteos
+
+
+def aplicar_filtros(df, filtros):
+    """Se queda solo con las filas que cumplen TODOS los filtros [(columna, operador, valor)], como
+    df[df["ventas"] > 1000]. Con un numero se compara como numero; con texto, como texto sin importar
+    mayusculas. Una fila sin dato en la columna no cumple (salvo con !=). Devuelve (tabla, filas eliminadas)."""
+    conservar = pd.Series(True, index=df.index)
+    for columna, operador, valor in filtros:
+        if isinstance(valor, (int, float)):
+            serie = a_numero(df[columna])
+        else:
+            serie = df[columna].astype("string").str.strip().str.lower()
+            valor = str(valor).strip().lower()
+        comparaciones = {">": serie > valor, ">=": serie >= valor, "<": serie < valor,
+                         "<=": serie <= valor, "==": serie == valor, "!=": serie != valor}
+        conservar &= comparaciones[operador].fillna(operador == "!=").astype(bool)
+    return df.loc[conservar].reset_index(drop=True), int((~conservar).sum())
+
+
 # Orden en que se copian al script generado (cada una puede usar las anteriores).
 _FUNCIONES_SCRIPT = (es_nulo, a_numero, parsear_coordenada, nombres_snake,
-                     limpiar_texto, unificar_fechas, extraer_mes_anio, decimales_de, aplicar_regla,
-                     rellenar_restantes)
+                     limpiar_texto, unificar_fechas, a_fecha, extraer_mes_anio, decimales_de, aplicar_regla,
+                     rellenar_restantes, aplicar_limites, aplicar_formulas, aplicar_filtros)
 
 
 # =============================================================================
@@ -695,6 +804,9 @@ class Paso:
     codigo: str
     advertencia: str = ""  # aviso para mostrar destacado (algo que conviene revisar)
     reglas: Optional[List[Dict]] = field(default=None)  # reglas aplicadas (para el diccionario)
+    # Descripcion estructurada del paso ({"tipo": ..., ...}) para traducirlo a Power Query M
+    # (ver exportador_guiado.py). No cambia lo que hace el paso en pandas.
+    m: Optional[Dict] = field(default=None)
 
 
 def columnas_texto_sugeridas(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE) -> List[str]:
@@ -715,6 +827,7 @@ def columnas_texto_sugeridas(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE) -> List
 
 def paso_nombres_columnas(df: pd.DataFrame) -> Tuple[pd.DataFrame, Paso]:
     nuevos = nombres_snake(list(df.columns))
+    columnas_antes = list(df.columns)
     cambios = [(a, b) for a, b in zip(df.columns, nuevos) if a != b]
     df = df.copy()
     df.columns = nuevos
@@ -722,7 +835,8 @@ def paso_nombres_columnas(df: pd.DataFrame) -> Tuple[pd.DataFrame, Paso]:
                (f" (y {len(cambios) - 8} más)" if len(cambios) > 8 else "")) if cambios \
         else "Los nombres ya estaban en snake_case."
     return df, Paso("Nombres de columna en snake_case", detalle,
-                    "df.columns = nombres_snake(df.columns)")
+                    "df.columns = nombres_snake(df.columns)",
+                    m={"tipo": "nombres", "mapa": [(a, b) for a, b in zip(columnas_antes, nuevos)]})
 
 
 def paso_vacios_a_nan(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE) -> Tuple[pd.DataFrame, Paso]:
@@ -740,7 +854,7 @@ def paso_vacios_a_nan(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE) -> Tuple[pd.Da
                f"{len(convertidas)} columnas.") if convertidas else "No había celdas vacías como texto."
     codigo = ("for col in df.columns:\n"
               "    df[col] = df[col].where(~es_nulo(df[col], TOKENS_NULOS))")
-    return df, Paso("Vacíos a nulos reales (NaN)", detalle, codigo)
+    return df, Paso("Vacíos a nulos reales (NaN)", detalle, codigo, m={"tipo": "vacios"})
 
 
 def paso_texto(df: pd.DataFrame, columnas: List[str], minusculas=True, espacios=True,
@@ -754,7 +868,9 @@ def paso_texto(df: pd.DataFrame, columnas: List[str], minusculas=True, espacios=
               f"for col in COLUMNAS_TEXTO:\n"
               f"    df[col] = limpiar_texto(df[col], minusculas={minusculas}, "
               f"espacios={espacios}, comillas={comillas})")
-    return df, Paso("Estandarizar texto", detalle, codigo)
+    return df, Paso("Estandarizar texto", detalle, codigo,
+                    m={"tipo": "texto", "columnas": list(columnas), "minusculas": minusculas,
+                       "espacios": espacios, "comillas": comillas})
 
 
 def paso_numericas(df: pd.DataFrame, columnas: List[str],
@@ -772,7 +888,8 @@ def paso_numericas(df: pd.DataFrame, columnas: List[str],
     codigo = (f"COLUMNAS_NUMERICAS = {list(columnas)!r}\n"
               f"for col in COLUMNAS_NUMERICAS:\n"
               f"    df[col] = a_numero(df[col])")
-    return df, Paso("Convertir columnas numéricas", "\n".join(lineas), codigo)
+    return df, Paso("Convertir columnas numéricas", "\n".join(lineas), codigo,
+                    m={"tipo": "numericas", "columnas": list(columnas)})
 
 
 def paso_coordenadas(df: pd.DataFrame, col_latitud: Optional[str] = None,
@@ -782,13 +899,14 @@ def paso_coordenadas(df: pd.DataFrame, col_latitud: Optional[str] = None,
     punto decimal. `rango_latitud` / `rango_longitud` son (minimo, maximo)
     opcionales con el rango esperado de los datos."""
     df = df.copy()
-    lineas, codigo, avisos = [], [], []
+    lineas, codigo, avisos, items = [], [], [], []
     for col, tipo, rango in ((col_latitud, "latitud", rango_latitud),
                              (col_longitud, "longitud", rango_longitud)):
         if not col:
             continue
         limite = 180 if tipo == "longitud" else 90
         minimo, maximo = rango if rango else (-limite, limite)
+        items.append((col, tipo, minimo, maximo))
         tenian_dato = int(df[col].notna().sum())
         fuera = contar_coordenadas_fuera_de_rango(df[col], tipo, minimo, maximo)
         originales = df[col].copy()
@@ -809,18 +927,34 @@ def paso_coordenadas(df: pd.DataFrame, col_latitud: Optional[str] = None,
         codigo.append(f'df["{col}"] = df["{col}"].map('
                       f'lambda v: parsear_coordenada(v, "{tipo}", {minimo!r}, {maximo!r}))')
     return df, Paso("Parsear coordenadas", "\n".join(lineas), "\n".join(codigo),
-                    advertencia="\n".join(avisos))
+                    advertencia="\n".join(avisos), m={"tipo": "coordenadas", "items": items})
 
 
 def paso_regla(df: pd.DataFrame, columna: str, regla: str, valor: str = "", grupo: str = "",
                tokens=TOKENS_NULOS_BASE) -> Tuple[pd.DataFrame, Optional[Paso]]:
+    numerica = bool(pd.api.types.is_numeric_dtype(df[columna]))  # para traducir la regla a M
     df_nuevo, info = aplicar_regla(df, columna, regla, valor, grupo, tokens)
     if regla == "dejar":
         return df_nuevo, None
     codigo = (f"df, _ = aplicar_regla(df, {columna!r}, {regla!r}, valor={valor!r}, "
               f"grupo={grupo!r}, tokens=TOKENS_NULOS)")
-    return df_nuevo, Paso(f"Nulos de «{columna}»: {REGLAS_NULOS[regla]}", info["mensaje"], codigo)
+    return df_nuevo, Paso(f"Nulos de «{columna}»: {REGLAS_NULOS[regla]}", info["mensaje"], codigo,
+                          m={"tipo": "regla", "columna": columna, "regla": regla, "valor": valor, "grupo": grupo,
+                             "numerica": numerica})
 
+
+ACCIONES_ATIPICOS = {
+    "nulo": "pasan a nulo y los trata la regla de nulos de la columna",
+    "limitar": "se llevan al límite más cercano",
+    "eliminar_fila": "se elimina la fila completa",
+    "marcar": "no se cambia ningún dato: se agrega una columna «<col>_atipico» (verdadero/falso) para filtrarlos",
+}
+ACCIONES_FORMULAS = {
+    "marcar": "no se cambia ningún dato: se agrega una columna «<total>_revisar» (verdadero/falso)",
+    "recalcular": "el total se reemplaza por lo que dice la fórmula (cantidad × precio ...)",
+    "eliminar_fila": "se elimina la fila completa",
+}
+OPERADORES_FILTRO = (">=", "<=", "!=", "==", ">", "<", "=")  # los de dos letras primero
 
 FORMATOS_FECHA = {
     "AAAA-MM-DD  (2025-12-31)": "%Y-%m-%d",
@@ -850,13 +984,14 @@ def paso_fechas(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-%m-%d"
     """Deja las columnas de fecha en un solo formato (texto). Cuenta cuantas maneras
     de escribirlas habia y avisa de las que no se pudieron leer (quedan nulas)."""
     df = df.copy()
-    lineas, codigo, avisos = [], [], []
+    lineas, codigo, avisos, formatos = [], [], [], {}
     for col in columnas:
         con_dato = ~es_nulo(df[col], tokens)
         texto = df.loc[con_dato, col].astype(str)
         formas = texto.str.replace(r"\d", "9", regex=True).str.replace(r"[A-Za-z]+", "a", regex=True)
         fmt = formato + " %H:%M:%S" if (texto.str.contains(r"\d:\d", regex=True).any()
                                        and "%H" not in formato) else formato  # no perder la hora
+        formatos[col] = fmt
         ambiguas, ejemplo = contar_fechas_ambiguas(df[col].where(con_dato))
         nuevo = unificar_fechas(df[col].where(con_dato), fmt, dia_primero)
         ilegibles = con_dato & nuevo.isna()
@@ -876,7 +1011,8 @@ def paso_fechas(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-%m-%d"
         codigo.append(f'df["{col}"] = unificar_fechas(df["{col}"].where(~es_nulo(df["{col}"], TOKENS_NULOS)), '
                       f'{fmt!r}, {dia_primero!r})')
     return df, Paso("Fechas en un solo formato", "\n".join(lineas), "\n".join(codigo),
-                    advertencia="\n".join(avisos))
+                    advertencia="\n".join(avisos),
+                    m={"tipo": "fechas", "formatos": formatos, "dia_primero": dia_primero})
 
 
 def paso_fecha_partes(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-%m-%d",
@@ -887,7 +1023,7 @@ def paso_fecha_partes(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-
     anio quedan vacios (nunca se rellenan: una mediana de meses no tiene sentido). Si la columna
     nueva ya existe, esa se salta y se avisa."""
     df = df.copy()
-    lineas, codigo, avisos, reglas = [], [], [], []
+    lineas, codigo, avisos, reglas, items = [], [], [], [], []
     for col in columnas:
         if col not in df.columns:
             continue
@@ -897,6 +1033,7 @@ def paso_fecha_partes(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-
             avisos.append(f"«{col}»: ya existe {', '.join(repetidas)}; no se volvió a crear.")
             continue
         mes_serie, anio_serie = extraer_mes_anio(df[col], formato)
+        items.append((col, [n for n, _, _ in nuevas]))
         valores = {f"{col}_mes": mes_serie, f"{col}_anio": anio_serie}
         sin_leer = int((valores[nuevas[0][0]].isna() & df[col].notna()).sum())
         codigo.append(f'_mes, _anio = extraer_mes_anio(df["{col}"], {formato!r})')
@@ -913,7 +1050,140 @@ def paso_fecha_partes(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-
     if not lineas and not avisos:
         return df, Paso("Mes y año de las fechas", "No había columnas de fecha para derivar.", "")
     return df, Paso("Mes y año de las fechas", "\n".join(lineas) or "No se creó ninguna columna.",
-                    "\n".join(codigo), advertencia="\n".join(avisos), reglas=reglas)
+                    "\n".join(codigo), advertencia="\n".join(avisos), reglas=reglas,
+                    m={"tipo": "partes", "items": items, "formato": formato})
+
+
+def paso_fechas_datetime(df: pd.DataFrame, columnas: List[str], formato: str = "%Y-%m-%d"
+                         ) -> Tuple[pd.DataFrame, Paso]:
+    """Pasa las columnas de fecha (ya en un solo formato, paso_fechas) de texto a fecha de verdad
+    (datetime64), como pd.to_datetime. Lo que no es una fecha (vacios, «No indica») queda como NaT: una
+    columna de fechas no puede llevar una palabra. Al guardar en CSV las fechas salen como AAAA-MM-DD."""
+    df = df.copy()
+    lineas, codigo = [], []
+    for col in columnas:
+        if col not in df.columns:
+            continue
+        antes = int(df[col].notna().sum())
+        df[col] = a_fecha(df[col], formato)
+        sin_fecha = antes - int(df[col].notna().sum())
+        lineas.append(f"{col}: ahora es fecha (datetime64)"
+                      + (f"; {sin_fecha} valores que no eran una fecha quedaron vacíos (NaT)" if sin_fecha else ""))
+        codigo.append(f'df["{col}"] = a_fecha(df["{col}"], {formato!r})')
+    if not lineas:
+        return df, Paso("Fechas como tipo fecha", "No había columnas de fecha para convertir.", "")
+    return df, Paso("Fechas como tipo fecha", "\n".join(lineas), "\n".join(codigo),
+                    m={"tipo": "datetime", "columnas": [c for c in columnas if c in df.columns], "formato": formato})
+
+
+def paso_duplicados(df: pd.DataFrame) -> Tuple[pd.DataFrame, Paso]:
+    """Elimina las filas identicas a otra anterior (transacciones clonadas por error del sistema); se
+    conserva la primera. Va despues de estandarizar, asi «Ana» y «ana » ya cuentan como iguales."""
+    n = int(df.duplicated().sum())
+    nuevo = df.drop_duplicates(keep="first", ignore_index=True)
+    detalle = (f"{n} filas duplicadas eliminadas (se conserva la primera de cada grupo)."
+               if n else "No había filas duplicadas.")
+    return nuevo, Paso("Eliminar filas duplicadas", detalle,
+                       'df = df.drop_duplicates(keep="first", ignore_index=True)', m={"tipo": "duplicados"})
+
+
+def paso_atipicos(df: pd.DataFrame, imposibles: bool = True, iqr_columnas: Optional[List[str]] = None,
+                  factor_iqr: float = 1.5, accion: str = "nulo") -> Tuple[pd.DataFrame, Paso]:
+    """Corrige valores imposibles (edad de 150, precio o cantidad negativos) y, si se pide, atipicos del IQR de
+    las `iqr_columnas`. Cada columna recibe una regla [minimo, maximo] que queda escrita en el script, asi la
+    correccion se repite en cada actualizacion de los datos. accion: «nulo» (pasan a nulo y despues los trata la
+    regla de nulos de la columna), «limitar» (se llevan al limite) o «eliminar_fila»."""
+    if accion not in ACCIONES_ATIPICOS:
+        raise ValueError(f"accion de atipicos invalida: '{accion}' (use {', '.join(ACCIONES_ATIPICOS)})")
+    limites = limites_imposibles(df) if imposibles else {}
+    if iqr_columnas:
+        limites = combinar_limites(limites, limites_iqr(df, list(iqr_columnas), factor_iqr))
+    if accion == "marcar":  # solo las columnas con algo que marcar hoy o elegidas para el IQR: sin columnas de relleno
+        hoy = contar_fuera(df, limites)
+        limites = {c: l for c, l in limites.items() if c in hoy or c in (iqr_columnas or [])}
+    antes = len(df)
+    df_nuevo, conteos = aplicar_limites(df, limites, accion)
+    if not limites:
+        return df, Paso("Valores imposibles y atípicos", "No hay columnas a las que aplicar una regla.", "")
+    lineas = [f"{c}: {n} valores fuera de {texto_limite(*limites[c])}" for c, n in conteos.items()]
+    detalle = ("\n".join(lineas) + f"\nAcción: {ACCIONES_ATIPICOS[accion]}.") if lineas else \
+        f"Ningún valor cae fuera de las reglas ({len(limites)} columnas revisadas)."
+    advertencia = (f"Se eliminaron {antes - len(df_nuevo)} filas por valores imposibles o atípicos."
+                   if accion == "eliminar_fila" and antes != len(df_nuevo) else "")
+    codigo = (f"LIMITES_ATIPICOS = {limites!r}  # columna: (minimo, maximo); None = sin limite\n"
+              f"df, _ = aplicar_limites(df, LIMITES_ATIPICOS, {accion!r})")
+    reglas = [{"columna": f"{c}_atipico", "regla": "dejar",
+               "descripcion": f"Marca (verdadero/falso) los valores de «{c}» fuera de {texto_limite(*l)}; no cambia el dato"}
+              for c, l in limites.items()] if accion == "marcar" else None
+    return df_nuevo, Paso("Valores imposibles y atípicos", detalle, codigo, advertencia, reglas,
+                          m={"tipo": "limites", "limites": dict(limites), "accion": accion})
+
+
+def paso_formulas(df: pd.DataFrame, accion: str = "marcar") -> Tuple[pd.DataFrame, Paso]:
+    """Revisa que el total coincida con cantidad x precio (- descuento + impuesto + envio): la misma deteccion de
+    la limpieza clasica. Las columnas se buscan por nombre y se elige la combinacion que de verdad cuadra; la
+    regla queda escrita en el script. accion: «marcar» (agrega «<total>_revisar», no cambia datos),
+    «recalcular» (el total pasa a ser lo que dice la formula) o «eliminar_fila»."""
+    if accion not in ACCIONES_FORMULAS:
+        raise ValueError(f"accion de formulas invalida: '{accion}' (use {', '.join(ACCIONES_FORMULAS)})")
+    # La deteccion necesita numeros; el texto como «₡7,650» se lee con a_numero. Las columnas de marca
+    # («<col>_atipico», «<total>_revisar») son verdadero/falso y no entran.
+    candidatas = [c for c in columnas_de_formula(df) if not str(c).endswith(("_atipico", "_revisar"))]
+    regla = detectar_regla_formula(df[candidatas].apply(a_numero)) if candidatas else None
+    if regla is None:
+        return df, Paso("Total = cantidad × precio", "No se encontraron columnas de total, cantidad y precio que "
+                        "cuadren entre sí (se necesita que cuadren en al menos la mitad de las filas).", "")
+    nuevo, conteos = aplicar_formulas(df, [regla], accion)
+    n = conteos.get(regla["total"], 0)
+    detalle = (f"{regla['total']} debería ser {texto_formula(regla)}: {n} filas no coinciden. Acción: "
+               f"{ACCIONES_FORMULAS[accion]}." if n else
+               f"{regla['total']} = {texto_formula(regla)} cuadra en todas las filas.")
+    advertencia = (f"Se eliminaron {n} filas cuyo total no coincidía con la fórmula."
+                   if accion == "eliminar_fila" and n else "")
+    codigo = (f"REGLAS_FORMULA = {[regla]!r}  # total = cantidad x precio (- descuento + impuesto + envio)\n"
+              f"df, _ = aplicar_formulas(df, REGLAS_FORMULA, {accion!r})")
+    reglas = [{"columna": f"{regla['total']}_revisar", "regla": "dejar",
+               "descripcion": f"Marca (verdadero/falso) las filas donde «{regla['total']}» no coincide con "
+                              f"{texto_formula(regla)}; no cambia el dato"}] if accion == "marcar" else None
+    return nuevo, Paso("Total = cantidad × precio", detalle, codigo, advertencia, reglas,
+                       m={"tipo": "formulas", "reglas": [regla], "accion": accion})
+
+
+def parsear_filtro(texto: str) -> Tuple[str, str, object]:
+    """'ventas>1000' -> ('ventas', '>', 1000); 'ciudad==Heredia' -> ('ciudad', '==', 'Heredia').
+    Operadores: >, >=, <, <=, == (o =) y !=."""
+    for operador in OPERADORES_FILTRO:
+        if operador in texto:
+            columna, _, valor = texto.partition(operador)
+            columna, valor = columna.strip(), valor.strip().strip("\"'")
+            if not columna or not valor:
+                break
+            try:
+                numero = float(valor.replace(",", ""))
+                valor = int(numero) if numero.is_integer() else numero
+            except ValueError:
+                pass
+            return columna, ("==" if operador == "=" else operador), valor
+    raise ValueError(f"Filtro inválido: '{texto}'. Use columna operador valor, por ejemplo ventas>1000 "
+                     f"(operadores: > >= < <= == !=).")
+
+
+def paso_filtros(df: pd.DataFrame, filtros: List[Tuple[str, str, object]]) -> Tuple[pd.DataFrame, Paso]:
+    """Se queda solo con las filas que cumplen todos los filtros (por ejemplo ventas > 1000). BORRA las que no
+    cumplen, incluidas las que no tienen dato en esa columna: por eso es opcional y avisa cuantas quitó."""
+    faltantes = [c for c, _, _ in filtros if c not in df.columns]
+    if faltantes:
+        raise ValueError(f"El filtro usa columnas que no existen: {', '.join(faltantes)}.")
+    nuevo, quitadas = aplicar_filtros(df, filtros)
+    texto = " y ".join(f"{c} {o} {v}" for c, o, v in filtros)
+    detalle = f"Se conservan las filas con {texto}: {len(nuevo)} de {len(df)}."
+    codigo = (f"FILTROS = {[tuple(f) for f in filtros]!r}\n"
+              f"df, _quitadas = aplicar_filtros(df, FILTROS)\n"
+              f'print(f"Filas eliminadas por los filtros: {{_quitadas}}")')
+    advertencia = f"El filtro eliminó {quitadas} filas (también las que no tenían dato en la columna filtrada)." \
+        if quitadas else ""
+    return nuevo, Paso("Filtrar filas", detalle, codigo, advertencia,
+                       m={"tipo": "filtros", "filtros": [tuple(f) for f in filtros]})
 
 
 # En columnas con nombres de personas no se sugieren uniones por tipeo («Marta» y «Martha» pueden ser dos personas).
@@ -1038,7 +1308,8 @@ def paso_unificar(df: pd.DataFrame, equivalencias: List[Dict]) -> Tuple[pd.DataF
     codigo = (f"MAPEOS = {mapeos!r}\n"
               "for col, mapeo in MAPEOS.items():\n"
               "    df[col] = df[col].replace(mapeo)")
-    return df, Paso("Unir valores equivalentes", "\n".join(lineas), codigo)
+    return df, Paso("Unir valores equivalentes", "\n".join(lineas), codigo,
+                    m={"tipo": "unificar", "mapeos": {c: dict(m) for c, m in mapeos.items()}})
 
 
 def paso_asegurar_sin_vacios(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE, numeros: str = "mediana",
@@ -1083,7 +1354,9 @@ def paso_asegurar_sin_vacios(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE, numeros
                    + ", ".join(f"{c} ({nulos[c]})" for c in omitidas)) if omitidas else ""
     codigo = (f"df = rellenar_restantes(df, {textos!r}, {numericas!r}, numeros={numeros!r}, "
               f"texto={texto!r}, tokens=TOKENS_NULOS)")
-    return df_nuevo, Paso("Asegurar que no queden vacíos", detalle, codigo, advertencia, reglas)
+    return df_nuevo, Paso("Asegurar que no queden vacíos", detalle, codigo, advertencia, reglas,
+                          m={"tipo": "cierre", "textos": list(textos), "numericas": list(numericas),
+                             "numeros": numeros, "texto": texto})
 
 
 def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFrame, List[Paso]]:
@@ -1094,7 +1367,11 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
       texto (dict con columnas, minusculas, espacios, comillas),
       numericas (lista), latitud (col), longitud (col),
       rango_latitud / rango_longitud ((minimo, maximo), opcionales),
-      fechas (dict con columnas, formato, dia_primero).
+      fechas (dict con columnas, formato, dia_primero),
+      duplicados (bool: eliminar filas identicas),
+      atipicos (dict con imposibles, iqr_columnas, factor_iqr, accion),
+      formulas (dict con accion: total = cantidad x precio),
+      filtros (lista de (columna, operador, valor): solo se quedan las filas que los cumplen).
     Los nombres de columna del config son los de DESPUES de renombrar."""
     tokens = tuple(config.get("tokens", TOKENS_NULOS_BASE))
     pasos: List[Paso] = []
@@ -1126,6 +1403,22 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
         df, paso = paso_fechas(df, [c for c in fechas["columnas"] if c in df.columns],
                                fechas.get("formato", "%Y-%m-%d"), fechas.get("dia_primero", True),
                                tokens)
+        pasos.append(paso)
+    if config.get("duplicados"):
+        df, paso = paso_duplicados(df)
+        pasos.append(paso)
+    atipicos = config.get("atipicos")
+    if atipicos and (atipicos.get("imposibles") or atipicos.get("iqr_columnas")):
+        df, paso = paso_atipicos(df, atipicos.get("imposibles", False),
+                                 [c for c in atipicos.get("iqr_columnas", []) if c in df.columns],
+                                 atipicos.get("factor_iqr", 1.5), atipicos.get("accion", "nulo"))
+        pasos.append(paso)
+    formulas = config.get("formulas")
+    if formulas:
+        df, paso = paso_formulas(df, formulas.get("accion", "marcar"))
+        pasos.append(paso)
+    if config.get("filtros"):
+        df, paso = paso_filtros(df, list(config["filtros"]))
         pasos.append(paso)
     return df, pasos
 
@@ -1172,9 +1465,15 @@ def auditoria_final(df_antes: pd.DataFrame, df_despues: pd.DataFrame,
 
 def generar_script_limpieza(pasos: List[Paso], tokens=TOKENS_NULOS_BASE,
                             nombre_archivo: str = "tu_archivo.csv",
-                            hoja: Optional[str] = None) -> str:
+                            hoja: Optional[str] = None, modo: str = "archivo") -> str:
     """Script pandas autocontenido que repite la limpieza hecha en la app.
-    Trae copiadas las funciones auxiliares, asi no necesita este paquete."""
+    Trae copiadas las funciones auxiliares, asi no necesita este paquete.
+
+    modo='archivo' (por defecto): lee `nombre_archivo` y guarda «limpio.csv». modo='powerbi': para el paso
+    «Ejecutar script de Python» de Power Query: la tabla llega en `dataset` y el resultado queda en
+    `dataset_limpio`, sin leer ni escribir archivos (el archivo original no se toca)."""
+    if modo not in ("archivo", "powerbi"):
+        raise ValueError("modo debe ser 'archivo' o 'powerbi'")
     es_excel = nombre_archivo.lower().endswith((".xlsx", ".xlsm", ".xls"))
     if es_excel:
         carga = (f'HOJA = {hoja!r}  # hoja a limpiar\n'
@@ -1185,15 +1484,26 @@ def generar_script_limpieza(pasos: List[Paso], tokens=TOKENS_NULOS_BASE,
         carga = 'df = pd.read_csv(ARCHIVO, dtype=str, keep_default_na=False)'
         salida = 'df.to_csv("limpio.csv", index=False, encoding="utf-8-sig")'
 
+    if modo == "powerbi":
+        carga = ("# Power BI entrega la tabla ya tipada; la limpieza guiada parte de texto (como al leer un CSV),\n"
+                 'df = dataset.astype("string").fillna("").astype(object)')
+        salida = 'dataset_limpio = df  # Power BI ofrece este resultado para expandir'
     partes = [
         "# -*- coding: utf-8 -*-",
         "# Script generado por Limpiador de Tablas (Limpieza guiada).",
         "# Repite paso a paso la limpieza hecha en la app. Solo necesita pandas y numpy.",
+    ] + ([
+        "#",
+        "# COMO USARLO EN POWER BI (sin cambiar el archivo original):",
+        "#   Power Query -> Transformar -> Ejecutar script de Python -> pegue todo este archivo.",
+        "#   Power BI inyecta la tabla en `dataset`; expanda el resultado `dataset_limpio`.",
+        "#   Requiere Python con pandas y numpy (Power BI Desktop -> Opciones -> Python scripting).",
+    ] if modo == "powerbi" else []) + [
         "import re",
         "import numpy as np",
         "import pandas as pd",
         "",
-        f"ARCHIVO = {nombre_archivo!r}  # cambie por la ruta de su archivo",
+    ] + ([] if modo == "powerbi" else [f"ARCHIVO = {nombre_archivo!r}  # cambie por la ruta de su archivo"]) + [
         f"TOKENS_NULOS = {tuple(tokens)!r}  # textos que cuentan como nulo",
         "TOKENS_NULOS_BASE = TOKENS_NULOS  # valor por defecto de las funciones de abajo",
         "",
@@ -1203,7 +1513,18 @@ def generar_script_limpieza(pasos: List[Paso], tokens=TOKENS_NULOS_BASE,
         partes.append(inspect.getsource(funcion).rstrip())
         partes.append("")
     partes += ["", "# ---------------- Carga ----------------", carga,
-               'print(f"Cargado: {df.shape[0]} filas x {df.shape[1]} columnas")', ""]
+               'print(f"Cargado: {df.shape[0]} filas x {df.shape[1]} columnas")', "",
+               "# ---------------- Auditoria inicial (checklist ETL, fase 1) ----------------",
+               "# 1. Tamano, 2. tipos, 3. nulos, 4. duplicados y 5. logica de negocio (describe), ANTES de limpiar.",
+               "# La tabla se lee como texto, por eso los nulos se cuentan con es_nulo y describe() usa a_numero.",
+               'print(f"1. Tamano: {df.shape}")',
+               'print("2. Tipos (todo se leyo como texto: los numeros y las fechas se convierten mas abajo):")',
+               "df.info()",
+               'print("3. Nulos por columna:")',
+               "print(df.apply(lambda c: es_nulo(c, TOKENS_NULOS).sum()))",
+               'print(f"4. Duplicados: {df.duplicated().sum()}")',
+               'print("5. Logica de negocio (busque minimos negativos o maximos imposibles):")',
+               "print(df.apply(a_numero).dropna(axis=1, how=\"all\").describe().T)", ""]
     for i, paso in enumerate(pasos, 1):
         partes.append(f"# ---------------- {i}. {paso.titulo} ----------------")
         partes.append(paso.codigo)
