@@ -20,13 +20,17 @@ from __future__ import annotations
 
 import io
 import os
+from types import SimpleNamespace
 import re
 
 import pandas as pd
 import streamlit as st
 
+from data_cleaner import auditoria_previa as AP
 from data_cleaner import diccionario_datos as DD
+from data_cleaner import correccion_guiada as CG
 from data_cleaner import eda as ED
+from data_cleaner import exportador_guiado as EG
 from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
 from data_cleaner.loaders import (leer_tabla_subida, listar_hojas, tabla_a_bytes, es_archivo_excel,
@@ -113,6 +117,11 @@ def _alcance_cacheado(_df, firma, editado, nombre, fuentes, cruces, eliminadas, 
                                      nombre_tecnico=nombre_tecnico, textos=textos,
                                      etapas=etapas, controles_extra=controles_extra,
                                      pendientes_extra=pendientes_extra)
+
+
+@st.cache_data(show_spinner="Auditando la tabla…", max_entries=4)
+def _auditoria_cacheada(_df, firma, tokens):
+    return AP.auditar_tabla(_df, tokens)
 
 
 @st.cache_data(show_spinner="Calculando el EDA…", max_entries=4)
@@ -263,6 +272,32 @@ def _botones_descarga(df: pd.DataFrame, base: str, script: str, prefijo: str) ->
             st.rerun()
     c3.download_button("⬇️ Script Python", script, file_name=f"{base}_script.py",
                        mime="text/x-python", key=f"{prefijo}_dl_py")
+
+
+@st.cache_data(show_spinner="Armando el código para Power BI…", max_entries=4)
+def _powerbi_cacheado(_resultado, firma):
+    return EG.exportar_powerbi(_resultado)
+
+
+def botones_powerbi(resultado: dict, base: str, prefijo: str) -> None:
+    """La limpieza guiada para Power BI sin cambiar el archivo original: script de Python, M con Python y M puro."""
+    st.markdown("**Para Power BI (sin cambiar el archivo original)**")
+    st.caption("Repite estos mismos pasos dentro de Power Query, así la limpieza se aplica en cada actualización de "
+               "los datos. Python y «M con Python» dan exactamente la tabla de arriba; «M puro» no necesita Python "
+               "(ver las equivalencias en el encabezado del archivo; compare el resultado la primera vez).")
+    exportable = SimpleNamespace(pasos=resultado["pasos"], tokens=resultado["tokens"], nombre_archivo=resultado["nombre"],
+                                 hoja=resultado["hoja"], df=resultado["df"], palabra=resultado.get("palabra", LG.TEXTO_NO_INDICA))
+    codigo = _powerbi_cacheado(exportable, (_firma(resultado["df"]), st.session_state.get("lg_version", 0)))
+    c1, c2, c3 = st.columns(3)
+    c1.download_button("⬇️ Script Python (Power BI)", codigo["script_powerbi"], file_name=f"{base}_powerbi.py",
+                       mime="text/x-python", key=f"{prefijo}_dl_pbi_py", use_container_width=True,
+                       help="Power Query → Transformar → Ejecutar script de Python.")
+    c2.download_button("⬇️ M con Python", codigo["m_python"], file_name=f"{base}_powerbi_python.m",
+                       mime="text/plain", key=f"{prefijo}_dl_pbi_mpy", use_container_width=True,
+                       help="Editor avanzado de Power Query; ejecuta el mismo script con Python.Execute.")
+    c3.download_button("⬇️ M puro", codigo["m_puro"], file_name=f"{base}_m_puro.m", mime="text/plain",
+                       key=f"{prefijo}_dl_pbi_m", use_container_width=True,
+                       help="Editor avanzado de Power Query; solo funciones nativas, sin Python.")
 
 
 def _boton_enviar_a_clasica(df: pd.DataFrame, nombre: str, al_enviar, prefijo: str) -> None:
@@ -486,6 +521,29 @@ def seccion_eda(df: pd.DataFrame, prefijo: str, nombre: str, tokens=None) -> Non
 # Limpieza guiada (nulos)
 # --------------------------------------------------------------------------
 
+def mostrar_auditoria_previa(auditoria: AP.AuditoriaPrevia) -> None:
+    """El checklist de auditoría (tamaño, tipos, nulos, duplicados, lógica de negocio) y su detalle."""
+    st.markdown("**Checklist de auditoría (antes de limpiar)**")
+    iconos = {AP.OK: "✅", AP.REVISAR: "⚠️"}
+    st.dataframe(pd.DataFrame([{"": iconos[c["estado"]], "Punto": f"{c['n']}. {c['punto']}",
+                                "Resultado": c["resultado"]} for c in auditoria.checklist]), hide_index=True)
+    with st.expander("2. Tipos de dato: lo que Python leyó vs lo que debería ser"):
+        st.dataframe(auditoria.tipos, hide_index=True)
+    if auditoria.duplicados:
+        with st.expander(f"4. Filas duplicadas ({auditoria.duplicados:,})"):
+            st.dataframe(auditoria.ejemplos_duplicados)
+    if len(auditoria.imposibles):
+        with st.expander(f"5. Valores imposibles ({len(auditoria.imposibles)})", expanded=True):
+            st.dataframe(auditoria.imposibles, hide_index=True)
+    if len(auditoria.formulas):
+        with st.expander(f"5. Totales que no coinciden con la fórmula ({len(auditoria.formulas)})", expanded=True):
+            st.caption(f"{auditoria.formula['total']} debería ser {CG.texto_formula(auditoria.formula)}.")
+            st.dataframe(auditoria.formulas, hide_index=True)
+    if len(auditoria.describe):
+        with st.expander("5. Distribución de los números (describe) para buscar valores raros"):
+            st.dataframe(auditoria.describe)
+
+
 def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     st.title("🩺 Limpieza guiada (nulos)")
     st.caption(
@@ -499,7 +557,7 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     df, clave = meta["df"], meta["clave"]
 
     # ---- 2. Diagnostico
-    st.subheader("2. Diagnóstico de nulos y vacíos")
+    st.subheader("2. Auditoría y diagnóstico de nulos")
     base_texto = [t for t in LG.TOKENS_NULOS_BASE if t]
     firma_df = _firma(df)
     detectados = _detectados_cacheado(df, firma_df, ("",) + tuple(base_texto))
@@ -532,6 +590,12 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     m3.metric("Filas", f"{len(df):,}")
     st.dataframe(diag.reset_index(), hide_index=True)
     st.caption("Semáforo: ✅ 0% · 🟢 menos de 5% · 🟡 menos de 30% · 🟠 menos de 70% · 🔴 70% o más.")
+    try:
+        auditoria_previa = _auditoria_cacheada(df, firma_df, tokens)
+    except ValueError as exc:
+        st.info(str(exc))
+        return
+    mostrar_auditoria_previa(auditoria_previa)
 
     # ---- 3. Estandarizacion global
     st.subheader("3. Estandarizar")
@@ -620,6 +684,70 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
             if not (con_mes or con_anio):
                 st.warning("Marque al menos mes o año para crear las columnas.")
 
+    fechas_datetime = False
+    if cols_fechas:
+        fechas_datetime = st.checkbox(
+            "Dejar las fechas como tipo fecha (datetime)", value=False, key=f"lg_fechas_datetime_{sufijo}",
+            help="Como pd.to_datetime: la columna deja de ser texto y pasa a fecha de verdad (datetime64). Una "
+                 "fecha vacía queda vacía (NaT), no «No indica», porque una columna de fechas no puede llevar "
+                 "una palabra. Al guardar en CSV salen como AAAA-MM-DD.")
+
+    st.markdown("**Duplicados, valores imposibles y filtros (opcional)**")
+    st.caption("Estos pasos borran o cambian datos, por eso están apagados. Quedan escritos en el script, así "
+               "la corrección se repite en cada actualización (no se parcha a mano en Power BI).")
+    quitar_duplicados = st.checkbox(
+        f"Eliminar filas duplicadas ({auditoria_previa.duplicados:,} idénticas a una anterior)",
+        value=False, key=f"lg_duplicados_{sufijo}",
+        help="Se conserva la primera. Se compara después de estandarizar, así «Ana» y «ana » cuentan como iguales.")
+    imposibles = st.checkbox(
+        f"Corregir valores imposibles ({len(auditoria_previa.imposibles)} encontrados)", value=False,
+        key=f"lg_imposibles_{sufijo}",
+        help="Edad fuera de 0-120, precios o cantidades negativos, según el nombre de la columna.")
+    corregir_formulas = st.checkbox(
+        (f"Revisar que el total sea cantidad × precio ({len(auditoria_previa.formulas)} no coinciden)"
+         if auditoria_previa.formula else "Revisar que el total sea cantidad × precio (no se encontraron esas columnas)"),
+        value=False, key=f"lg_formulas_{sufijo}", disabled=not auditoria_previa.formula,
+        help="Usa las mismas columnas que detecta la limpieza clásica (total, cantidad, precio y, si ayudan, "
+             "descuento, impuesto y envío). Un total que no cuadra suele ser un error de digitación.")
+    accion_formulas = "marcar"
+    if corregir_formulas:
+        accion_formulas = st.selectbox("Qué hacer con los totales que no cuadran", list(LG.ACCIONES_FORMULAS),
+                                       format_func=lambda a: LG.ACCIONES_FORMULAS[a], key=f"lg_accion_formulas_{sufijo}")
+    numericas_eda = list(ED.tabla_numerica(df_ren, tokens)[0].columns)
+    cols_iqr = st.multiselect(
+        "Atípicos estadísticos (regla del IQR) en estas columnas", numericas_eda, default=[],
+        key=f"lg_iqr_{sufijo}",
+        help="Valores fuera de Q1 − f·IQR y Q3 + f·IQR (el bigote del boxplot). Pueden ser datos reales, por "
+             "ejemplo una venta grande pero única: revíselos en el EDA y, si no quiere cambiar ningún dato, elija "
+             "«marcar» para solo identificarlos.")
+    factor_iqr, accion_atipicos = 1.5, "nulo"
+    if imposibles or cols_iqr:
+        a1, a2 = st.columns(2)
+        factor_iqr = a1.selectbox("Factor del IQR", [1.5, 3.0], key=f"lg_factor_iqr_{sufijo}",
+                                  format_func={1.5: "1.5 · estándar", 3.0: "3.0 · solo extremos"}.get)
+        accion_atipicos = a2.selectbox("Qué hacer con ellos", list(LG.ACCIONES_ATIPICOS),
+                                       format_func=lambda a: LG.ACCIONES_ATIPICOS[a], key=f"lg_accion_atipicos_{sufijo}")
+    st.markdown("Filtrar filas (solo se quedan las que cumplen **todos** los filtros, como `ventas > 1000`)")
+    filtros_editados = st.data_editor(
+        pd.DataFrame({"columna": pd.Series(dtype="object"), "operador": pd.Series(dtype="object"),
+                      "valor": pd.Series(dtype="object")}),
+        num_rows="dynamic", hide_index=True, key=f"lg_filtros_{sufijo}", column_config={
+            "columna": st.column_config.SelectboxColumn("Columna", options=list(df_ren.columns), required=True),
+            "operador": st.column_config.SelectboxColumn("Operador", options=[">", ">=", "<", "<=", "==", "!="],
+                                                         required=True, default=">"),
+            "valor": st.column_config.TextColumn("Valor", required=True)})
+    filtros = []
+    for _, fila in filtros_editados.dropna().iterrows():
+        valor = str(fila["valor"]).strip()
+        try:
+            numero = float(valor.replace(",", ""))
+            valor = int(numero) if numero.is_integer() else numero
+        except ValueError:
+            pass
+        filtros.append((fila["columna"], fila["operador"], valor))
+    if filtros:
+        st.warning("El filtro **elimina** las filas que no lo cumplen, también las que no tienen dato en esa columna.")
+
     config = {
         "tokens": tokens, "nombres_snake": snake, "vacios_a_nan": vacios,
         "texto": {"columnas": cols_texto, "minusculas": minus, "espacios": espacios,
@@ -629,6 +757,11 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
         "rango_latitud": rango_lat, "rango_longitud": rango_lon,
         "fechas": {"columnas": cols_fechas, "formato": formato_fecha,
                    "dia_primero": dia_primero} if cols_fechas else None,
+        "duplicados": quitar_duplicados,
+        "atipicos": {"imposibles": imposibles, "iqr_columnas": cols_iqr, "factor_iqr": factor_iqr,
+                     "accion": accion_atipicos} if (imposibles or cols_iqr) else None,
+        "filtros": filtros,
+        "formulas": {"accion": accion_formulas} if corregir_formulas else None,
     }
     try:
         df_pre, pasos_globales = _globales_cacheado(df, firma_df, config)
@@ -725,6 +858,10 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
     # ---- 5. Aplicar
     if st.button("Aplicar limpieza", type="primary", key="lg_aplicar"):
         reglas = editada.fillna("").to_dict("records")
+        if fechas_datetime:  # una columna de fechas no puede llevar la palabra «No indica»
+            for r in reglas:
+                if r["columna"] in cols_fechas and r["regla"] == "no_indica":
+                    r.update(regla="dejar", valor="")
         for r in reglas:  # «no_indica» sin valor = la palabra elegida, para que el diccionario la muestre
             if r["regla"] == "no_indica" and not str(r["valor"]).strip():
                 r["valor"] = palabra
@@ -732,12 +869,15 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
             df_final, pasos_reglas = LG.ejecutar_reglas(df_base, reglas, tokens)
             if asegurar:
                 df_final, paso_cierre = LG.paso_asegurar_sin_vacios(
-                    df_final, tokens, numeros_cierre, fechas_cierre, palabra)
+                    df_final, tokens, numeros_cierre, fechas_cierre and not fechas_datetime, palabra)
                 pasos_reglas.append(paso_cierre)
                 por_columna = {r["columna"]: r for r in reglas}
                 for r in paso_cierre.reglas or []:  # el diccionario debe decir lo que se hizo
                     por_columna[r["columna"]] = {**por_columna.get(r["columna"], {}), **r}
                 reglas = list(por_columna.values())
+            if fechas_datetime:
+                df_final, paso_datetime = LG.paso_fechas_datetime(df_final, cols_fechas, formato_fecha)
+                pasos_reglas.append(paso_datetime)
             if cols_partes and (con_mes or con_anio):  # al final: así mes y año no se rellenan con una mediana
                 df_final, paso_partes = LG.paso_fecha_partes(df_final, cols_partes, formato_fecha, con_mes, con_anio)
                 pasos_reglas.append(paso_partes)
@@ -748,7 +888,7 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
             st.session_state["lg_resultado"] = {
                 "df": df_final, "antes": df, "clave": clave, "tokens": tokens,
                 "pasos": pasos_globales + pasos_reglas, "nombre": meta["nombre"],
-                "hoja": meta["hoja"], "reglas": reglas,
+                "hoja": meta["hoja"], "reglas": reglas, "palabra": palabra,
             }
             st.session_state["lg_version"] = st.session_state.get("lg_version", 0) + 1
             st.session_state["df_limpieza_guiada"] = (df_final, f"{_nombre_base(meta['nombre'])}_limpio.csv")
@@ -787,6 +927,7 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
                                         resultado["nombre"], resultado["hoja"])
     base_nombre = f"{_nombre_base(resultado['nombre'])}_limpio"
     _botones_descarga(resultado["df"], base_nombre, script, "lg")
+    botones_powerbi(resultado, base_nombre, "lg")
     _boton_enviar_a_clasica(resultado["df"], f"{base_nombre}.csv", al_enviar_a_clasica, "lg")
     st.caption("Esta tabla también está disponible como Tabla A en la sección «Merge».")
 
@@ -837,6 +978,19 @@ def pagina_merge(al_enviar_a_clasica=None) -> None:
         return
     df_a, df_b = meta_a["df"], meta_b["df"]
     clave = f"{meta_a['clave']}|{meta_b['clave']}"
+
+    # ---- Auditoria de cada tabla (antes de cruzar)
+    st.subheader("Auditoría de cada tabla (antes de unir)")
+    st.caption("Cada tabla individual debe pasar el checklist antes de cualquier cruce: duplicados, tipos mal leídos o "
+               "valores imposibles en A o B se arrastran al resultado sin que se note.")
+    aud_col_a, aud_col_b = st.columns(2)
+    for columna, df_t, etiqueta, pref in ((aud_col_a, df_a, "Tabla A", "ma"), (aud_col_b, df_b, "Tabla B", "mb")):
+        with columna:
+            st.markdown(f"**{etiqueta}**")
+            try:
+                mostrar_auditoria_previa(_auditoria_cacheada(df_t, _firma(df_t), LG.TOKENS_NULOS_BASE))
+            except ValueError as exc:
+                st.info(str(exc))
 
     # ---- 2. Llaves
     st.subheader("2. Columnas llave")
