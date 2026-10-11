@@ -15,7 +15,9 @@ Endpoints:
     GET  /descargar/{id}/{tipo}  -> descarga los archivos generados por /limpiar
 
 Limpieza guiada de nulos, merge y diccionario de datos:
-    POST /limpieza-guiada/diagnostico -> diagnóstico de nulos y reglas sugeridas por columna
+    POST /auditoria                   -> checklist de auditoría de una tabla ANTES de limpiarla (tamaño, tipos,
+                                          nulos, duplicados, valores imposibles)
+    POST /limpieza-guiada/diagnostico -> auditoría inicial, diagnóstico de nulos y reglas sugeridas por columna
     POST /limpieza-guiada             -> limpia (pasos globales + una regla por columna)
     POST /merge/diagnostico           -> sugiere y revisa las llaves de dos tablas
     POST /merge                       -> une A con B y audita el resultado
@@ -44,6 +46,7 @@ from data_cleaner import (
 from data_cleaner.exportador import (
     generar_script_powerbi, generar_script_universal, generar_editor_m,
 )
+from data_cleaner import auditoria_previa as AP
 from data_cleaner import diccionario_datos as DD
 from data_cleaner import eda as ED
 from data_cleaner import flujos_guiados as FG
@@ -867,6 +870,16 @@ def _json_dict(texto: str, nombre: str) -> dict:
     return datos
 
 
+def _json_lista(texto: str, nombre: str) -> list:
+    """Lista JSON de textos (vacio = lista vacia): '["ventas>1000"]' -> ['ventas>1000']."""
+    if not texto.strip():
+        return []
+    datos = _o_400(json.loads, texto) if texto.strip().startswith("[") else None
+    if not isinstance(datos, list) or not all(isinstance(d, str) for d in datos):
+        raise HTTPException(status_code=400, detail=f'{nombre} debe ser una lista JSON de textos, ej. ["ventas>1000"].')
+    return datos
+
+
 def _guardar_guiado(tipo: str, base: str, df: pd.DataFrame, script: str, argumentos_diccionario: dict) -> str:
     """Guarda un resultado guiado. Los diccionarios (Excel basico, tecnico y documento de alcance)
     no se arman aqui: tardan en tablas grandes y casi nunca se bajan los tres; se arman al
@@ -890,6 +903,19 @@ def _documentos_diccionario(datos: dict, formato_tecnico: str = "xlsx") -> dict:
     return guardados[formato_tecnico]
 
 
+@app.post("/auditoria")
+def auditoria_endpoint(
+    archivo: UploadFile = File(..., description="Tabla (CSV/Excel) a auditar, tal como llega."),
+    hoja: Optional[str] = Form(None, description="Hoja del libro Excel (si tiene varias)."),
+    tokens_extra: Optional[str] = Form(None, description="Textos que cuentan como nulo, coma-separados "
+                                       "(por defecto, la lista base más los textos tipo «sin dato» de la tabla)."),
+):
+    """Auditoría ANTES de limpiar o cruzar (checklist ETL, fase 1): tamaño, tipos de dato, nulos, duplicados y
+    valores físicamente imposibles. No modifica la tabla."""
+    df = _leer_upload_guiado(archivo, hoja)
+    return _a_json(FG.auditoria_previa_a_dict(_o_400(FG.ejecutar_auditoria_previa, df, _lista_o_none(tokens_extra))))
+
+
 @app.post("/limpieza-guiada/diagnostico")
 def limpieza_guiada_diagnostico_endpoint(
     archivo: UploadFile = File(...),
@@ -905,6 +931,8 @@ def limpieza_guiada_diagnostico_endpoint(
     df_base, _ = _o_400(LG.ejecutar_pasos_globales, df, config)
     return _a_json({
         "filas": len(df), "columnas": len(df.columns),
+        "auditoria_inicial": FG.auditoria_previa_a_dict(_o_400(FG.ejecutar_auditoria_previa, df,
+                                                                _lista_o_none(tokens_extra))),
         "diagnostico": LG.diagnostico_nulos(df, config["tokens"]).reset_index(),
         "reglas_sugeridas": FG.reglas_sugeridas(df_base, config["tokens"]),
         "reglas_disponibles": LG.REGLAS_NULOS,
@@ -943,6 +971,21 @@ def limpieza_guiada_endpoint(
                                    "final y quedan vacías donde la fecha no se pudo leer."),
     mes: bool = Form(True, description="Con mes_anio: crear la columna de mes (1-12)."),
     anio: bool = Form(True, description="Con mes_anio: crear la columna de año."),
+    fechas_datetime: bool = Form(False, description="Dejar las fechas estandarizadas como tipo fecha (datetime64, "
+                                 "como pd.to_datetime) en vez de texto. Una fecha vacía queda NaT."),
+    eliminar_duplicados: bool = Form(False, description="Quitar las filas idénticas a una anterior."),
+    corregir_imposibles: bool = Form(False, description="Corregir valores imposibles (edad fuera de 0-120, "
+                                     "precios o cantidades negativos)."),
+    atipicos_iqr: Optional[str] = Form(None, description="Columnas (coma-separadas) donde corregir también "
+                                       "atípicos del IQR."),
+    factor_iqr: float = Form(1.5, description="Factor del IQR para atipicos_iqr (1.5 estándar, 3 extremos)."),
+    accion_atipicos: str = Form("nulo", description="nulo | limitar | eliminar_fila | marcar (no cambia ningún dato: "
+                                "agrega «<col>_atipico» verdadero/falso)."),
+    corregir_formulas: bool = Form(False, description="Revisar que el total sea cantidad × precio (- descuento + "
+                                   "impuesto + envío), con las columnas que detecta la limpieza clásica."),
+    accion_formulas: str = Form("marcar", description="marcar | recalcular | eliminar_fila."),
+    filtros: str = Form("", description='JSON con una lista, ej. ["ventas>1000"]. Solo se quedan las filas que '
+                        "cumplen TODOS (elimina el resto, también las sin dato en esa columna)."),
     proyecto: str = Form("", description="Proyecto, para el documento de alcance."),
     autor: str = Form("", description="Autor(a), para el documento de alcance."),
     reglas: str = Form("", description='JSON {"columna": "regla[:parametro]"}. Ej: '
@@ -962,19 +1005,25 @@ def limpieza_guiada_endpoint(
         columnas_texto=_lista_o_none(columnas_texto), minusculas=minusculas, espacios=espacios,
         comillas=comillas, numericas=_lista_o_none(numericas), latitud=latitud, longitud=longitud,
         rango_latitud=_rango(rango_latitud, "rango_latitud"), rango_longitud=_rango(rango_longitud, "rango_longitud"),
-        fechas=_lista_o_none(fechas), formato_fecha=formato_fecha, dia_primero=dia_primero)
+        fechas=_lista_o_none(fechas), formato_fecha=formato_fecha, dia_primero=dia_primero,
+        eliminar_duplicados=eliminar_duplicados, corregir_imposibles=corregir_imposibles,
+        atipicos_iqr=_lista_o_none(atipicos_iqr), factor_iqr=factor_iqr, accion_atipicos=accion_atipicos,
+        filtros=_json_lista(filtros, "filtros"), corregir_formulas=corregir_formulas,
+        accion_formulas=accion_formulas)
     ajustes = _o_400(FG.parsear_ajustes_reglas,
                      [f"{k}={v}" for k, v in _json_dict(reglas, "reglas").items()])
     resultado = _o_400(FG.ejecutar_limpieza_guiada, df, config, ajustes, nombre_archivo=nombre, hoja=hoja,
                        palabra=palabra, unir_equivalentes=unir_equivalentes, asegurar_sin_vacios=cierre,
                        numeros_cierre=numeros_cierre, incluir_fechas_cierre=fechas_cierre,
-                       fecha_partes=_lista_o_none(mes_anio) or None, fecha_partes_mes=mes, fecha_partes_anio=anio)
+                       fecha_partes=_lista_o_none(mes_anio) or None, fecha_partes_mes=mes, fecha_partes_anio=anio,
+                       fechas_datetime=fechas_datetime)
 
     base = f"{FG.nombre_base(nombre)}_limpio"
     resultado_id = _guardar_guiado("limpieza", base, resultado.df, resultado.script,
                                    FG.argumentos_diccionario_limpieza(
                                        resultado, {"proyecto": proyecto, "autor": autor}))
     _RESULTADOS_GUIADOS[resultado_id]["formato"] = formato
+    _RESULTADOS_GUIADOS[resultado_id]["exportable"] = resultado  # para armar el codigo de Power BI al pedirlo
     return _a_json({
         "id": resultado_id,
         "auditoria": FG.auditoria_a_dict(resultado.auditoria),
@@ -995,11 +1044,15 @@ def merge_diagnostico_endpoint(
     modo_llave: str = Form("texto", description="texto | codigo | sin_cambios"),
     ancho: int = Form(0),
 ):
-    """Sugiere las columnas llave y revisa cuántas filas de A encuentran pareja en B."""
+    """Audita cada tabla (checklist, antes de cruzar), sugiere las columnas llave y revisa cuántas filas de A
+    encuentran pareja en B."""
     df_a, df_b = _leer_upload_guiado(archivo_a, hoja_a), _leer_upload_guiado(archivo_b, hoja_b)
     claves_a, claves_b, diagnostico = _o_400(
         FG.diagnosticar_llaves, df_a, df_b, _lista_o_none(llave_a), _lista_o_none(llave_b), modo_llave, ancho)
+    auditoria_a, auditoria_b = _o_400(FG.auditar_tablas_merge, df_a, df_b)
     return _a_json({
+        "auditoria_tabla_a": FG.auditoria_previa_a_dict(auditoria_a),
+        "auditoria_tabla_b": FG.auditoria_previa_a_dict(auditoria_b),
         "llaves_sugeridas": MT.sugerir_llaves(df_a, df_b),
         "llaves_usadas": {"a": claves_a, "b": claves_b},
         "diagnostico": FG.diagnostico_a_dict(diagnostico),
@@ -1166,22 +1219,33 @@ def eda_endpoint(
 
 @app.get("/descargar-guiado/{resultado_id}/{tipo}")
 def descargar_guiado_endpoint(resultado_id: str, tipo: str, formato: Optional[str] = None,
-                              formato_diccionario: str = "xlsx"):
+                              formato_diccionario: str = "xlsx", paso_anterior: str = "TuPasoAnterior"):
     """Baja lo generado por /limpieza-guiada o /merge. tipo: datos | script | diccionario (Excel de siempre) |
     diccionario_tecnico | documento_alcance (Word) | diccionarios (zip con todo) | eda (zip con el EDA
-    estadístico: CSV, PNG y script).
+    estadístico: CSV, PNG y script) | script_powerbi | m_python | m_puro (solo para /limpieza-guiada: la limpieza
+    para Power BI sin cambiar el archivo original; `paso_anterior` = el último paso de su consulta de Power Query).
     Para 'datos', formato = csv | xlsx (por defecto el elegido al crear el resultado).
     Para el diccionario técnico, el documento de alcance y los diccionarios, formato_diccionario = xlsx | csv |
     ambos (por defecto xlsx; con ambos, el diccionario técnico sale en un zip con los dos formatos)."""
     if resultado_id not in _RESULTADOS_GUIADOS:
         raise HTTPException(status_code=404, detail="No existe ese resultado (o ya expiró).")
     if tipo not in ("datos", "script", "diccionario", "diccionario_tecnico", "documento_alcance", "diccionarios",
-                    "eda"):
+                    "eda", "script_powerbi", "m_python", "m_puro"):
         raise HTTPException(status_code=400, detail="tipo debe ser 'datos', 'script', 'diccionario', "
-                                                    "'diccionario_tecnico', 'documento_alcance', 'diccionarios' "
-                                                    "o 'eda'.")
+                                                    "'diccionario_tecnico', 'documento_alcance', 'diccionarios', "
+                                                    "'eda', 'script_powerbi', 'm_python' o 'm_puro'.")
     datos = _RESULTADOS_GUIADOS[resultado_id]
     base = datos["base"]
+    if tipo in ("script_powerbi", "m_python", "m_puro"):
+        if "exportable" not in datos:
+            raise HTTPException(status_code=400, detail="El código para Power BI solo existe para los resultados de "
+                                                        "/limpieza-guiada (no para /merge).")
+        codigo = FG.exportar_powerbi(datos["exportable"], paso_anterior)[tipo]
+        nombre, media = {"script_powerbi": (f"{base}_powerbi.py", "text/x-python"),
+                         "m_python": (f"{base}_powerbi_python.m", "text/plain"),
+                         "m_puro": (f"{base}_m_puro.m", "text/plain")}[tipo]
+        return StreamingResponse(io.BytesIO(codigo.encode("utf-8")), media_type=media,
+                                 headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
     if tipo == "script":
         return StreamingResponse(io.BytesIO(datos["script"].encode("utf-8")), media_type="text/x-python",
                                  headers={"Content-Disposition": f'attachment; filename="{base}_script.py"'})
