@@ -1170,7 +1170,8 @@ def parsear_filtro(texto: str) -> Tuple[str, str, object]:
 
 def paso_filtros(df: pd.DataFrame, filtros: List[Tuple[str, str, object]]) -> Tuple[pd.DataFrame, Paso]:
     """Se queda solo con las filas que cumplen todos los filtros (por ejemplo ventas > 1000). BORRA las que no
-    cumplen, incluidas las que no tienen dato en esa columna: por eso es opcional y avisa cuantas quitó."""
+    cumplen, incluidas las que no tienen dato en esa columna: por eso es opcional y avisa cuantas quitó. Corre
+    antes que las correcciones de duplicados, imposibles y formulas, asi que mira los valores reales."""
     faltantes = [c for c, _, _ in filtros if c not in df.columns]
     if faltantes:
         raise ValueError(f"El filtro usa columnas que no existen: {', '.join(faltantes)}.")
@@ -1368,10 +1369,13 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
       numericas (lista), latitud (col), longitud (col),
       rango_latitud / rango_longitud ((minimo, maximo), opcionales),
       fechas (dict con columnas, formato, dia_primero),
+      filtros (lista de (columna, operador, valor): solo se quedan las filas que los cumplen). Se aplican
+        PRIMERO (despues de estandarizar): asi actuan sobre los valores reales y no sobre los nulos que
+        una correccion posterior pudiera crear (un precio imposible de -20 que pasa a nulo no debe
+        sacar la fila por un filtro como precio < 1000),
       duplicados (bool: eliminar filas identicas),
       atipicos (dict con imposibles, iqr_columnas, factor_iqr, accion),
-      formulas (dict con accion: total = cantidad x precio),
-      filtros (lista de (columna, operador, valor): solo se quedan las filas que los cumplen).
+      formulas (dict con accion: total = cantidad x precio).
     Los nombres de columna del config son los de DESPUES de renombrar."""
     tokens = tuple(config.get("tokens", TOKENS_NULOS_BASE))
     pasos: List[Paso] = []
@@ -1404,6 +1408,9 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
                                fechas.get("formato", "%Y-%m-%d"), fechas.get("dia_primero", True),
                                tokens)
         pasos.append(paso)
+    if config.get("filtros"):  # primero: el filtro actua sobre los valores reales, antes de que una correccion cree nulos
+        df, paso = paso_filtros(df, list(config["filtros"]))
+        pasos.append(paso)
     if config.get("duplicados"):
         df, paso = paso_duplicados(df)
         pasos.append(paso)
@@ -1416,9 +1423,6 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
     formulas = config.get("formulas")
     if formulas:
         df, paso = paso_formulas(df, formulas.get("accion", "marcar"))
-        pasos.append(paso)
-    if config.get("filtros"):
-        df, paso = paso_filtros(df, list(config["filtros"]))
         pasos.append(paso)
     return df, pasos
 
