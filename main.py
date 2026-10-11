@@ -12,7 +12,7 @@ Uso:
                                       merge (unir dos tablas), diccionario de datos
                                       o EDA estadístico
     python main.py --demo          -> corre con datos de ejemplo, sin preguntas
-    python main.py --modo guiada   -> salta el menú (clasica | guiada | merge | diccionario | eda)
+    python main.py --modo guiada   -> salta el menú (guiada | clasica | merge | diccionario | eda | auditoria)
 """
 from __future__ import annotations
 import os
@@ -24,6 +24,8 @@ from data_cleaner import (
     load_table, analizar, limpiar, DEFAULT_CONFIG,
     construir_reporte, exportar_reporte_excel, imprimir_resumen_consola, exportar,
 )
+from data_cleaner import auditoria_previa as AP
+from data_cleaner import correccion_guiada as CG
 from data_cleaner import eda as ED
 from data_cleaner import flujos_guiados as FG
 from data_cleaner import limpieza_guiada as LG
@@ -31,11 +33,12 @@ from data_cleaner import merge_tablas as MT
 from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES, FORMATO_FECHA_POR_DEFECTO
 
 MODOS = {
-    "clasica": "Limpieza de una tabla (detecta y corrige problemas de calidad)",
     "guiada": "Limpieza guiada de nulos (diagnóstico + una regla por columna)",
+    "clasica": "Limpieza de una tabla (detecta y corrige problemas de calidad)",
     "merge": "Merge (unir dos tablas con revisión de llaves)",
     "diccionario": "Diccionario de datos de una tabla (técnico en Excel o CSV)",
     "eda": "EDA estadístico (describe, correlación y atípicos con boxplots)",
+    "auditoria": "Auditoría previa de una tabla (tamaño, tipos, nulos, duplicados, valores imposibles)",
 }
 
 OPCIONES_ACCION = {
@@ -215,6 +218,43 @@ def _pedir_mes_anio(config: dict):
     return ["*"] if preguntar(pregunta, ["si", "no"], defecto="no") == "si" else None
 
 
+def _pedir_correcciones(df, config: dict, auditoria: AP.AuditoriaPrevia) -> dict:
+    """Opcional: duplicados, valores imposibles/atípicos y filtros. Devuelve el config con lo elegido."""
+    print("\nPasos opcionales que BORRAN o cambian datos (quedan escritos en el script):")
+    if preguntar("¿Eliminar duplicados, corregir valores imposibles/atípicos, revisar el total o filtrar filas?",
+                 ["si", "no"], defecto="no") == "no":
+        return config
+    duplicados = bool(auditoria.duplicados) and preguntar(
+        f"¿Eliminar las {auditoria.duplicados} filas duplicadas?", ["si", "no"], defecto="si") == "si"
+    imposibles = bool(len(auditoria.imposibles)) and preguntar(
+        f"¿Corregir los {len(auditoria.imposibles)} valores imposibles?", ["si", "no"], defecto="si") == "si"
+    iqr = _lista_o_none(preguntar("Columnas donde corregir también atípicos del IQR (coma-separadas, Enter = ninguna):",
+                                  defecto="")) or None
+    accion = "nulo"
+    if imposibles or iqr:
+        print("  (Una venta grande pero real no es un error: con «marcar» no se cambia ningún dato.)")
+        accion = preguntar("¿Qué hacer con ellos?", list(LG.ACCIONES_ATIPICOS), defecto="nulo")
+    formulas, accion_formulas = False, "marcar"
+    if auditoria.formula:
+        formulas = preguntar(f"¿Revisar que {auditoria.formula['total']} sea {CG.texto_formula(auditoria.formula)} "
+                             f"({len(auditoria.formulas)} no coinciden)?", ["si", "no"], defecto="si") == "si"
+        if formulas:
+            accion_formulas = preguntar("¿Qué hacer con los totales que no cuadran?", list(LG.ACCIONES_FORMULAS),
+                                        defecto="marcar")
+    filtros = _lista_o_none(preguntar(
+        "Filtros: solo se quedan las filas que cumplen TODOS (ej. ventas>1000; coma-separados, Enter = ninguno):",
+        defecto="")) or None
+    return FG.agregar_correcciones(df, config, duplicados, imposibles, iqr, 1.5, accion, filtros, formulas,
+                                   accion_formulas)
+
+
+def _pedir_fechas_datetime(config: dict) -> bool:
+    if not (config.get("fechas") or {}).get("columnas"):
+        return False
+    return preguntar("\n¿Dejar las fechas como tipo fecha (datetime) en vez de texto?", ["si", "no"],
+                     defecto="no") == "si"
+
+
 def flujo_limpieza_guiada(args) -> None:
     df, ruta, hoja = _pedir_tabla("la tabla", args.input)
 
@@ -222,6 +262,11 @@ def flujo_limpieza_guiada(args) -> None:
           f"(opciones: {', '.join(LG.TOKENS_NULOS_EXTRA)}).")
     extra_txt = preguntar("Escriba los textos separados por coma (Enter = nan,none,null,n/a y los textos tipo «sin dato» que haya en la tabla; '-' = ninguno):", defecto="")
     config = FG.configurar_limpieza_guiada(df, tokens_extra=_lista_o_none(extra_txt))
+    auditoria = FG.ejecutar_auditoria_previa(df, _lista_o_none(extra_txt))
+    print("\n--- Auditoría inicial (checklist, antes de limpiar) ---")
+    print(AP.checklist_a_texto(auditoria))
+    if len(auditoria.imposibles):
+        print("\n  Valores imposibles:\n" + auditoria.imposibles.to_string(index=False))
     print("\n--- Diagnóstico de nulos y vacíos ---")
     print(LG.diagnostico_nulos(df, config["tokens"]).to_string())
 
@@ -252,10 +297,12 @@ def flujo_limpieza_guiada(args) -> None:
                 break
             ajustes_txt.append(linea)
 
+    config = _pedir_correcciones(df, config, auditoria)
+    fechas_datetime = _pedir_fechas_datetime(config)
     fecha_partes = _pedir_mes_anio(config)
     resultado = FG.ejecutar_limpieza_guiada(
         df, config, FG.parsear_ajustes_reglas(ajustes_txt), nombre_archivo=ruta, hoja=hoja,
-        fecha_partes=fecha_partes)
+        fecha_partes=fecha_partes, fechas_datetime=fechas_datetime)
     aud = resultado.auditoria
     print("\n--- Auditoría final ---")
     print(f"  Filas: {aud['filas_antes']} → {aud['filas_despues']} · "
@@ -271,6 +318,11 @@ def flujo_limpieza_guiada(args) -> None:
 def flujo_merge(args) -> None:
     df_a, ruta_a, hoja_a = _pedir_tabla("la tabla A (la que manda)", args.input)
     df_b, ruta_b, hoja_b = _pedir_tabla("la tabla B (la que enriquece)")
+
+    auditoria_a, auditoria_b = FG.auditar_tablas_merge(df_a, df_b)
+    print("\n--- Auditoría de cada tabla, antes de unir (checklist) ---")
+    print(f"Tabla A ({ruta_a}):\n{AP.checklist_a_texto(auditoria_a)}")
+    print(f"Tabla B ({ruta_b}):\n{AP.checklist_a_texto(auditoria_b)}")
 
     sugerencias = MT.sugerir_llaves(df_a, df_b)
     if len(sugerencias):
@@ -337,8 +389,26 @@ def flujo_eda(args) -> None:
         _imprimir_rutas(FG.guardar_eda(resultado, args.outdir, FG.nombre_base(ruta), ruta))
 
 
+def flujo_auditoria(args) -> None:
+    df, _, _ = _pedir_tabla("la tabla a auditar (tal como llega)", args.input)
+    auditoria = FG.ejecutar_auditoria_previa(df)
+    print("\n--- Auditoría inicial (checklist) ---")
+    print(AP.checklist_a_texto(auditoria))
+    print("\n--- 2. Tipos de dato ---\n" + auditoria.tipos.to_string(index=False))
+    if len(auditoria.nulos):
+        print("\n--- 3. Nulos por columna ---\n" + auditoria.nulos.to_string(index=False))
+    if auditoria.duplicados:
+        print("\n--- 4. Filas duplicadas (ejemplos) ---\n" + auditoria.ejemplos_duplicados.to_string())
+    if len(auditoria.imposibles):
+        print("\n--- 5. Valores imposibles ---\n" + auditoria.imposibles.to_string(index=False))
+    if len(auditoria.formulas):
+        print("\n--- 5. Totales que no coinciden con la fórmula ---\n" + auditoria.formulas.to_string(index=False))
+    if len(auditoria.describe):
+        print("\n--- 5. Distribución de los números (describe) ---\n" + auditoria.describe.to_string())
+
+
 FLUJOS_GUIADOS = {"guiada": flujo_limpieza_guiada, "merge": flujo_merge, "diccionario": flujo_diccionario,
-                  "eda": flujo_eda}
+                  "eda": flujo_eda, "auditoria": flujo_auditoria}
 
 
 def correr_flujo_guiado(modo: str, args) -> None:
@@ -364,7 +434,7 @@ def main():
 
     modo = "clasica" if args.demo else (args.modo or preguntar(
         "¿Qué desea hacer?", [f"{k} — {v}" for k, v in MODOS.items()],
-        defecto=f"clasica — {MODOS['clasica']}").split(" — ")[0])
+        defecto=f"guiada — {MODOS['guiada']}").split(" — ")[0])
     if modo != "clasica":
         correr_flujo_guiado(modo, args)
         return
