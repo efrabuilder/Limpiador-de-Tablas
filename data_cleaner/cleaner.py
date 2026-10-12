@@ -36,8 +36,11 @@ from .analyzer import Issue, detectar_atipicos_iqr, deduplicar_columnas, _es_val
 from .patrones import (
     formato_fecha_python, FORMATO_FECHA_POR_DEFECTO,
     rango_plausible_fijo, es_columna_no_negativa, a_numero_tolerante,
-    techo_probable_conteo_acotado,
+    techo_probable_conteo_acotado, columnas_excluir_de_atipicos,
+    es_columna_coordenada, tiene_cola_pesada,
 )
+
+_ACCIONES_ESTADISTICAS = ("reemplazar_media", "reemplazar_mediana", "reemplazar_moda")
 
 ACCIONES_VALIDAS = {
     "eliminar_fila", "reemplazar_media", "reemplazar_mediana",
@@ -254,12 +257,37 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
     registro = []
     filas_a_eliminar = set()
 
+    def _limites_logicos(columna):
+        """Solo los limites logicos de la columna (sin IQR): rango fijo o piso en 0."""
+        rango = rango_plausible_fijo(columna)
+        if rango is not None:
+            return rango
+        if es_columna_no_negativa(columna):
+            return 0, np.nan
+        return np.nan, np.nan
+
     # Pre-calcular límites por columna para la acción "limitar" (IQR cruzado
     # con el rango lógico de la columna, ver _limites_para_limitar)
     limites_iqr = {}
     for issue in issues:
         if issue.tipo == "atipico" and issue.columna and issue.columna not in limites_iqr:
             limites_iqr[issue.columna] = _limites_para_limitar(df, issue.columna)
+
+    # Columnas donde un valor "calculado" seria un dato inventado: identificadores,
+    # codigos (postal, folio...), telefonos y coordenadas. Ahi media/mediana/moda no
+    # se aplican: la celda se deja como esta (vacia) y se marca para revision.
+    cols_sin_imputar = set(columnas_excluir_de_atipicos(df)) | {
+        c for c in df.columns if es_columna_coordenada(c)
+    }
+    # Magnitudes con cola larga natural (poblacion, superficie...): sus valores altos
+    # son reales, asi que ni se recortan ni se reemplazan; solo cuentan los limites
+    # logicos (negativos, rango fijo).
+    cols_cola_pesada = {
+        c for c in {i.columna for i in issues if i.tipo == "atipico" and i.columna}
+        if c in df.columns and c not in cols_sin_imputar and tiene_cola_pesada(_a_numero(df[c]))
+    }
+    for c in cols_cola_pesada:
+        limites_iqr[c] = _limites_logicos(c)
 
     # Cache de media/mediana/moda por (columna, accion): son iguales para
     # todos los hallazgos de la misma columna, no hace falta recalcularlas.
@@ -283,6 +311,21 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
     for issue in issues:
         accion = config.get(issue.tipo, "marcar_solo")
         valor_nuevo = None
+        nota_extra = ""
+
+        if issue.columna in cols_sin_imputar and (
+            (issue.tipo in ("faltante", "tipo_invalido") and accion in _ACCIONES_ESTADISTICAS)
+            or (issue.tipo == "atipico" and accion in ("limitar",) + _ACCIONES_ESTADISTICAS
+                and es_columna_coordenada(issue.columna))
+        ):
+            # No se inventa un codigo postal, un id ni una coordenada: la celda queda
+            # como estaba y se marca para revisar.
+            accion = "marcar_solo"
+            nota_extra = " | columna de código/identificador/coordenada: no se imputa ni se recorta (queda para revisión)"
+        elif issue.tipo == "atipico" and issue.columna in cols_cola_pesada \
+                and accion in _ACCIONES_ESTADISTICAS:
+            accion = "marcar_solo"
+            nota_extra = " | distribución con cola larga natural: el valor alto es legítimo, no se reemplaza"
 
         if accion == "marcar_solo":
             valor_nuevo = issue.valor_original
@@ -314,6 +357,11 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
                 if not pd.isna(lim_sup) and valor_nuevo > lim_sup:
                     valor_nuevo = lim_sup
                 _asignar(df_limpio, issue.fila, issue.columna, valor_nuevo)
+                if issue.columna in cols_cola_pesada and valor_nuevo == valor_original_num:
+                    accion = "marcar_solo"
+                    valor_nuevo = issue.valor_original
+                    nota_extra = (" | distribución con cola larga natural (p. ej. población, superficie): "
+                                  "el valor alto es legítimo, no se recorta")
 
         elif issue.tipo == "atipico" and accion in (
             "reemplazar_media", "reemplazar_mediana", "reemplazar_moda"
@@ -341,7 +389,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
         else:
             valor_nuevo = issue.valor_original
 
-        detalle = issue.detalle
+        detalle = issue.detalle + nota_extra
         if issue.columna and issue.columna in df.columns \
                 and accion in ("reemplazar_media", "reemplazar_mediana") \
                 and issue.tipo in ("faltante", "tipo_invalido", "atipico") \
