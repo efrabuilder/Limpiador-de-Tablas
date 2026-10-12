@@ -889,10 +889,16 @@ def detectar_capitalizacion_incorrecta(df: pd.DataFrame, columnas: Optional[List
         # pero sus valores son codigos tipo "CL-1291", no nombres -- sin
         # esta exclusion, cada fila se marcaba como "capitalizacion
         # inconsistente" solo por no ser Formato Nombre Propio.
+        # Tampoco se aplican a columnas de correo o teléfono (por nombre o por
+        # contenido): "Email_Cliente" contiene el token "cliente", pero un
+        # correo va en minúscula y sugerir "A@x.com" sería incorrecto.
+        no_nombre = set(_columnas_por_patron(df, _PATRONES_EMAIL)) | set(_columnas_por_patron(df, _PATRONES_TELEFONO))
         cols = [
             c for c in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO)
             if (pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c]))
             and not _es_columna_id(c)
+            and c not in no_nombre
+            and not _parece_email(df[c])
         ]
     else:
         cols = []
