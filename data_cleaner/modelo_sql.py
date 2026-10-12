@@ -88,6 +88,23 @@ def validar_modelo(modelo: dict, hojas_cargadas: dict) -> list:
     return errores
 
 
+def _sentencia_pk_no_nula(dialecto: str, tabla_sql: str, columna_sql: str, tipo_actual: str):
+    """SQL que deja la columna de una llave primaria como NOT NULL, o None si el
+    motor no lo necesita. pandas crea las columnas como NULL y SQL Server rechaza
+    un PRIMARY KEY sobre una columna que admite nulos (MySQL y PostgreSQL la
+    vuelven NOT NULL solos). Un texto "max"/TEXT tampoco puede ser llave: se
+    acota a un largo indexable."""
+    largo = (tipo_actual or "").lower()
+    texto_largo = "(max)" in largo or largo.startswith(("text", "ntext", "longtext", "mediumtext"))
+    if dialecto == "mssql":
+        tipo = "NVARCHAR(450)" if texto_largo else tipo_actual
+        return f"ALTER TABLE {tabla_sql} ALTER COLUMN {columna_sql} {tipo} NOT NULL"
+    if dialecto == "mysql":
+        tipo = "VARCHAR(255)" if texto_largo else tipo_actual
+        return f"ALTER TABLE {tabla_sql} MODIFY COLUMN {columna_sql} {tipo} NOT NULL"
+    return None
+
+
 def aplicar_modelo_sql(modelo: dict, hojas_cargadas: dict, connection_string: str,
                         if_exists: str = "replace") -> list:
     """
@@ -125,7 +142,15 @@ def aplicar_modelo_sql(modelo: dict, hojas_cargadas: dict, connection_string: st
         df.to_sql(tabla, engine, if_exists=if_exists, index=False)
         mensajes.append(f"Datos escritos: '{tabla}' ({len(df)} filas, {len(df.columns)} columnas).")
 
+    if engine.dialect.name == "sqlite":
+        mensajes.append("⚠ SQLite no permite agregar llaves primarias/foráneas a una tabla ya creada: "
+                        "los datos quedaron escritos sin PK ni FK. Use SQL Server, MySQL o PostgreSQL "
+                        "(o el script SQL generado) para el modelo con llaves.")
+        return mensajes
+
     # 2. Llaves primarias
+    from sqlalchemy import inspect as _inspeccionar
+    quote = engine.dialect.identifier_preparer.quote
     with engine.begin() as conn:
         for tabla, definicion in modelo.items():
             pk = definicion.get("clave_primaria")
@@ -133,6 +158,13 @@ def aplicar_modelo_sql(modelo: dict, hojas_cargadas: dict, connection_string: st
                 continue
             nombre_restriccion = f"PK_{tabla}"
             try:
+                # La columna de la PK debe ser NOT NULL (SQL Server lo exige).
+                columnas_tabla = {c["name"]: c for c in _inspeccionar(conn).get_columns(tabla)}
+                if pk in columnas_tabla:
+                    tipo_actual = columnas_tabla[pk]["type"].compile(dialect=engine.dialect)
+                    sentencia = _sentencia_pk_no_nula(engine.dialect.name, quote(tabla), quote(pk), tipo_actual)
+                    if sentencia:
+                        conn.execute(text(sentencia))
                 conn.execute(text(
                     f'ALTER TABLE {tabla} ADD CONSTRAINT {nombre_restriccion} PRIMARY KEY ({pk})'
                 ))
@@ -347,9 +379,19 @@ def generar_script_modelo_sql(modelo: dict, hojas_cargadas: dict, motor: str = "
     # 1. create table (estructura) de cada tabla del modelo.
     for tabla, definicion in modelo.items():
         df = hojas_cargadas[definicion["hoja"]]
-        columnas_sql = [
-            f"  {q(col)} {_tipo_sql_columna(df[col], motor)}" for col in df.columns
-        ]
+        pk_tabla = definicion.get("clave_primaria")
+
+        def _definicion_columna(col, pk_tabla=pk_tabla, df=df):
+            tipo = _tipo_sql_columna(df[col], motor)
+            if col != pk_tabla:
+                return f"  {q(col)} {tipo}"
+            # La llave primaria exige NOT NULL (SQL Server rechaza el PK si la
+            # columna admite nulos) y un tipo indexable (no texto "max").
+            if tipo in ("nvarchar(max)", "text") and motor != "postgresql":
+                tipo = "nvarchar(450)" if motor == "sql_server" else "varchar(255)"
+            return f"  {q(col)} {tipo} not null"
+
+        columnas_sql = [_definicion_columna(col) for col in df.columns]
         bloques.append(f"drop table if exists {q(tabla)};")
         bloques.append(f"create table {q(tabla)} (\n" + ",\n".join(columnas_sql) + "\n);")
         bloques.append("")
