@@ -32,7 +32,7 @@ import re
 import pandas as pd
 import numpy as np
 from typing import Dict, List
-from .analyzer import Issue, detectar_atipicos_iqr, _es_valor_vacio, _serie_no_vacios
+from .analyzer import Issue, detectar_atipicos_iqr, deduplicar_columnas, _es_valor_vacio, _serie_no_vacios
 from .patrones import (
     formato_fecha_python, FORMATO_FECHA_POR_DEFECTO,
     rango_plausible_fijo, es_columna_no_negativa, a_numero_tolerante,
@@ -245,6 +245,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
     Devuelve (df_limpio, registro_acciones) donde registro_acciones es una
     lista de dicts lista para construir el reporte detallado.
     """
+    df = deduplicar_columnas(df)  # mismos nombres que usó analizar() para los hallazgos
     config = {**DEFAULT_CONFIG, **(config or {})}
     valores_fijos = valores_fijos or {}
     correcciones_individuales = correcciones_individuales or {}
