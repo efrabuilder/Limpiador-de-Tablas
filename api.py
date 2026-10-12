@@ -130,8 +130,16 @@ def _leer_upload(archivo: UploadFile) -> pd.DataFrame:
     contenido = archivo.file.read()
     buffer = io.BytesIO(contenido)
     buffer.name = nombre
+    if not contenido.strip():
+        raise HTTPException(status_code=400, detail="El archivo está vacío.")
     if es_archivo_csv(nombre):
-        return load_csv(buffer)
+        try:
+            df = load_csv(buffer)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"No se pudo leer el CSV: {exc}")
+        if df.shape[1] == 0:
+            raise HTTPException(status_code=400, detail="El archivo no tiene columnas.")
+        return df
     if es_archivo_excel(nombre):
         try:
             return load_excel(buffer)
