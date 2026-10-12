@@ -22,7 +22,7 @@ o se indican explícitamente — ver "Auto-detección de columnas" abajo):
 |------------------------|-------------------------------------------------------------------------------|
 | `fecha_invalida`       | Fecha no parseable, o fuera de un rango `--fecha-min`/`--fecha-max` dado      |
 | `email_invalido`       | No cumple el formato `usuario@dominio.tld`                                    |
-| `telefono_invalido`    | Formato o cantidad de dígitos inválida (configurable, por defecto 8 dígitos)   |
+| `telefono_invalido`    | Formato o cantidad de dígitos inválida (configurable; por defecto 7 a 15 dígitos, y la app de escritorio arranca con Costa Rica = 8 dígitos)   |
 | `id_duplicado`         | Valor repetido en una columna identificadora (ID, código, folio…), aunque el resto de la fila sea distinto — a diferencia de `duplicado`, que exige la fila completa igual |
 | `formula_incorrecta`   | Una columna no coincide con el resultado de otras (ej. `Total ≠ Cantidad × Precio_Unitario`) |
 | `texto_inconsistente`  | Variantes o errores de tipeo del mismo valor categórico (ej. "San Jose" / "san josé " / "SanJosé") en columnas de baja cardinalidad (categoría, vendedor, método de pago, ciudad…) |
