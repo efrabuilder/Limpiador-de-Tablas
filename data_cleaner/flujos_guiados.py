@@ -619,7 +619,25 @@ def diagnosticar_llaves(df_a: pd.DataFrame, df_b: pd.DataFrame,
     if modo not in MT.MODOS_LLAVE:
         raise ValueError(f"Modo de llave invalido: '{modo}'. Validos: {', '.join(MT.MODOS_LLAVE)}")
     claves_a, claves_b = resolver_llaves(df_a, df_b, claves_a, claves_b)
-    return claves_a, claves_b, MT.diagnosticar_llaves(df_a, df_b, claves_a, claves_b, modo, ancho)
+    modo, ancho, aviso = _modo_llave_automatico(df_a, df_b, claves_a, claves_b, modo, ancho)
+    diagnostico = MT.diagnosticar_llaves(df_a, df_b, claves_a, claves_b, modo, ancho)
+    if aviso:
+        diagnostico["aviso_modo_llave"] = aviso
+    return claves_a, claves_b, diagnostico
+
+
+def _modo_llave_automatico(df_a: pd.DataFrame, df_b: pd.DataFrame, claves_a: List[str],
+                           claves_b: List[str], modo: str, ancho: int) -> Tuple[str, int, str]:
+    """Con el modo por defecto (texto) y llaves que son codigos numericos a los que se les
+    perdieron los ceros iniciales en alguna de las tablas (1067 vs 01067), pasa solo a
+    modo 'codigo' con el ancho que corresponde. Devuelve (modo, ancho, aviso)."""
+    if modo != "texto" or ancho:
+        return modo, ancho, ""
+    ancho_auto = MT.inferir_ancho_codigo(df_a, claves_a, df_b, claves_b)
+    if not ancho_auto:
+        return modo, ancho, ""
+    return "codigo", ancho_auto, (f"Las llaves son códigos numéricos de {ancho_auto} dígitos y a algunos les faltan "
+                                   f"los ceros iniciales: se compararon en modo «codigo» con ancho {ancho_auto}.")
 
 
 def ejecutar_merge(df_a: pd.DataFrame, df_b: pd.DataFrame,
@@ -649,6 +667,8 @@ def ejecutar_merge(df_a: pd.DataFrame, df_b: pd.DataFrame,
         raise ValueError(f"Validacion invalida: '{validate}'. Validas: auto, "
                          f"{', '.join(k or 'vacio' for k in MT.VALIDACIONES)}")
 
+    claves_a, claves_b = resolver_llaves(df_a, df_b, claves_a, claves_b)
+    modo, ancho, _ = _modo_llave_automatico(df_a, df_b, claves_a, claves_b, modo, ancho)
     claves_a, claves_b, diagnostico = diagnosticar_llaves(df_a, df_b, claves_a, claves_b, modo, ancho)
 
     otras_b = [c for c in df_b.columns if c not in claves_b]
