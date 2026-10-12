@@ -213,6 +213,12 @@ PATRONES_IDENTIFICADORES_NO_TELEFONO: dict[str, Tuple[str, ...]] = {
     "dispositivo": (
         "imei", "mac", "numero_serial", "serial",
     ),
+    # Codigos postales: se escriben con ceros a la izquierda (01067) y no son
+    # una magnitud: no tiene sentido promediarlos, imputarlos con la mediana
+    # ni buscarles atipicos por IQR.
+    "codigo_postal": (
+        "codigo_postal", "postal_code", "postal", "zip", "zipcode", "zip_code", "plz", "cp",
+    ),
     "pedidos_logistica": (
         "codigo_producto", "numero_orden", "orden_compra", "numero_pedido",
         "pedido", "codigo_pedido", "tracking", "numero_tracking",
@@ -894,6 +900,59 @@ def techo_probable_conteo_acotado(serie: pd.Series) -> Optional[float]:
     return None
 
 
+# Coordenadas: rango geografico valido y lectura de la coma decimal
+# -----------------------------------------------------------------------------
+RANGO_LATITUD: Tuple[float, float] = (-90.0, 90.0)
+RANGO_LONGITUD: Tuple[float, float] = (-180.0, 180.0)
+
+
+def rango_coordenada(col) -> Optional[Tuple[float, float]]:
+    """(minimo, maximo) geografico si el NOMBRE de la columna es una latitud
+    o una longitud; None en cualquier otro caso."""
+    tipo = tipo_coordenada(col)
+    if tipo == "latitud":
+        return RANGO_LATITUD
+    if tipo == "longitud":
+        return RANGO_LONGITUD
+    return None
+
+
+def coordenada_a_numero(serie: pd.Series) -> pd.Series:
+    """Convierte una columna de coordenadas escrita como texto (con coma
+    decimal: "10,13727") a numero. A diferencia de a_numero_tolerante, aqui
+    la coma SIEMPRE es el decimal (una coordenada no lleva separador de
+    miles), asi "9,091" no se lee como 9091."""
+    if pd.api.types.is_numeric_dtype(serie):
+        return pd.to_numeric(serie, errors="coerce").astype("float64")
+    limpio = serie.astype("string").str.strip().str.replace(",", ".", regex=False)
+    return pd.to_numeric(limpio, errors="coerce").astype("float64")
+
+
+def tiene_cola_pesada(serie: pd.Series, min_filas: int = 30, min_asimetria: float = 2.0,
+                      min_pct_atipicos: float = 0.03) -> bool:
+    """True si la columna es una magnitud NO negativa con una cola larga
+    natural (poblacion, superficie, ingresos...): muchos valores altos
+    legitimos, no errores de captura. En ese caso el IQR marca como
+    "atipico" a las ciudades grandes o a las empresas grandes, y recortarlos
+    (winsorizing) destruye datos reales.
+
+    Se exige a la vez: suficientes filas, asimetria positiva fuerte, ningun
+    valor negativo y que el IQR marque al menos `min_pct_atipicos` de las
+    filas (unos pocos atipicos aislados SI pueden ser errores)."""
+    num = pd.to_numeric(serie, errors="coerce").dropna()
+    if len(num) < min_filas or (num < 0).any():
+        return False
+    if num.nunique() < 10:
+        return False
+    q1, q3 = num.quantile(0.25), num.quantile(0.75)
+    iqr = q3 - q1
+    if iqr <= 0:
+        return False
+    fuera = ((num < q1 - 1.5 * iqr) | (num > q3 + 1.5 * iqr)).mean()
+    return bool(num.skew() >= min_asimetria and fuera >= min_pct_atipicos)
+
+
+# -----------------------------------------------------------------------------
 # Columnas a excluir del chequeo estadistico de atipicos (IQR / Z-score)
 # -----------------------------------------------------------------------------
 def columnas_excluir_de_atipicos(df: pd.DataFrame) -> List[str]:
