@@ -43,11 +43,40 @@ def load_csv(path, **kwargs) -> pd.DataFrame:
     texto = _leer_texto_csv(path)
     if "sep" not in kwargs and "delimiter" not in kwargs:
         texto, kwargs["sep"] = _texto_y_separador(texto)
+    if "dtype" not in kwargs:
+        columnas_codigo = _columnas_con_ceros_a_la_izquierda(texto, kwargs)
+        if columnas_codigo:
+            kwargs["dtype"] = {c: str for c in columnas_codigo}
     try:
         return pd.read_csv(io.StringIO(texto), **kwargs)
     except pd.errors.ParserError:  # filas con más celdas que el encabezado: el motor flexible las acepta
         kwargs.pop("low_memory", None)
         return pd.read_csv(io.StringIO(texto), engine="python", **kwargs)
+
+
+_REGEX_CERO_INICIAL = re.compile(r"0\d+")
+
+
+def _columnas_con_ceros_a_la_izquierda(texto: str, kwargs: dict) -> list:
+    """Columnas que pandas convertiria a número y perderían ceros a la izquierda
+    (código postal 01067 -> 1067, folio 00123 -> 123). Se detectan leyendo la
+    tabla como texto: una columna 'es un código' si TODOS sus valores no vacíos
+    son solo dígitos y al menos uno empieza en 0 con más de un dígito (un "0"
+    suelto o "0.5" no cuentan). Esas columnas se leen como texto."""
+    opciones = {k: v for k, v in kwargs.items() if k in ("sep", "delimiter", "header", "skiprows", "encoding")}
+    try:
+        crudo = pd.read_csv(io.StringIO(texto), dtype=str, keep_default_na=False, engine="python", **opciones)
+    except Exception:
+        return []
+    columnas = []
+    for col in crudo.columns:
+        valores = crudo[col].astype(str).str.strip()
+        valores = valores[valores != ""]
+        if valores.empty or not valores.str.fullmatch(r"\d+").all():
+            continue
+        if valores.str.fullmatch(_REGEX_CERO_INICIAL).any():
+            columnas.append(col)
+    return columnas
 
 
 # -----------------------------------------------------------------------------
@@ -162,7 +191,8 @@ def load_excel(path, sheet_name=None, detectar_encabezado: bool = True, **kwargs
 
     Por defecto (sheet_name=None) lee TODAS las hojas del archivo y las
     concatena en un único DataFrame, agregando la columna '_hoja' al
-    inicio con el nombre de la hoja de origen de cada fila. Si se indica
+    inicio con el nombre de la hoja de origen de cada fila (solo si el libro
+    tiene más de una hoja; con una sola, no se agrega). Si se indica
     un sheet_name explícito, se conserva el comportamiento de pandas
     (una sola hoja, sin columna '_hoja').
 
@@ -193,6 +223,8 @@ def load_excel(path, sheet_name=None, detectar_encabezado: bool = True, **kwargs
         if isinstance(hojas, dict):
             if not hojas:
                 return pd.DataFrame()
+            if len(hojas) == 1:  # libro de una sola hoja: no hace falta la columna '_hoja'
+                return next(iter(hojas.values()))
             marcos = []
             for nombre_hoja, df_hoja in hojas.items():
                 df_hoja = df_hoja.copy()
@@ -208,6 +240,8 @@ def load_excel(path, sheet_name=None, detectar_encabezado: bool = True, **kwargs
 
     if not crudos:
         return pd.DataFrame()
+    if len(crudos) == 1:  # libro de una sola hoja: no hace falta la columna '_hoja'
+        return _procesar_hoja_cruda(next(iter(crudos.values())))
     marcos = []
     for nombre_hoja, crudo in crudos.items():
         df_hoja = _procesar_hoja_cruda(crudo)
@@ -570,6 +604,28 @@ def load_sql(connection_string: str, query: str = None, table_name: str = None) 
         return pd.read_sql_table(table_name, conn)
 
 
+def _coordenadas_a_numero(df: pd.DataFrame) -> pd.DataFrame:
+    """Latitud/longitud que llegaron como texto con coma decimal ("10,13727")
+    pasan a número, para que el análisis estadístico y la validación de rango
+    geográfico funcionen. Solo se convierte si TODOS los valores no vacíos son
+    legibles como número (si hay texto raro, la columna se deja como llegó)."""
+    from .patrones import es_columna_coordenada, coordenada_a_numero
+    for col in df.columns:
+        serie = df[col]
+        if not es_columna_coordenada(col) or pd.api.types.is_numeric_dtype(serie):
+            continue
+        if not (pd.api.types.is_object_dtype(serie) or pd.api.types.is_string_dtype(serie)):
+            continue
+        no_vacios = serie.dropna()
+        no_vacios = no_vacios[no_vacios.astype(str).str.strip() != ""]
+        if no_vacios.empty:
+            continue
+        numeros = coordenada_a_numero(serie)
+        if numeros.loc[no_vacios.index].notna().all():
+            df[col] = numeros
+    return df
+
+
 def load_table(path_or_conn: str, kind: str = "auto", **kwargs) -> pd.DataFrame:
     """
     Punto de entrada único: detecta o recibe el tipo de fuente ('csv', 'excel', 'sql')
@@ -593,9 +649,9 @@ def load_table(path_or_conn: str, kind: str = "auto", **kwargs) -> pd.DataFrame:
             )
 
     if kind == "csv":
-        return load_csv(path_or_conn, **kwargs)
+        return _coordenadas_a_numero(load_csv(path_or_conn, **kwargs))
     if kind == "excel":
-        return load_excel(path_or_conn, **kwargs)
+        return _coordenadas_a_numero(load_excel(path_or_conn, **kwargs))
     if kind == "sql":
         return load_sql(path_or_conn, **kwargs)
 
