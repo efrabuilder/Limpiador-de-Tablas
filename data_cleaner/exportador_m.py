@@ -85,6 +85,8 @@ from data_cleaner.patrones import (
     parece_telefono as _parece_telefono,
     parece_fecha as _parece_fecha,
     rango_digitos_telefono as _rango_digitos_telefono,
+    es_columna_coordenada as _es_columna_coordenada,
+    tiene_cola_pesada as _tiene_cola_pesada,
 )
 _PATRONES_EXCLUIR_TEXTO = _PATRONES_EMAIL + _PATRONES_TELEFONO + _PATRONES_FECHA + _PATRONES_ESTADO + \
     ("nombre", "cliente", "direccion", "dirección", "observacion", "observación", "comentario")
@@ -1058,11 +1060,25 @@ def generar_editor_m_puro(
     # relleno con mediana ni recorte por IQR, o se pisaria/rompería la
     # limpieza especifica de esa regla (ej. Telefono quedaria convertido a
     # numero, perdiendo ceros a la izquierda, antes de poder validarlo).
-    columnas_excluidas_numerico = set(cols_id) | set(cols_tel)
+    # Tambien se excluyen los codigos (postal, folio...) reconocidos por nombre: son
+    # texto con ceros a la izquierda y un valor "calculado" (mediana) seria inventado.
+    columnas_excluidas_numerico = set(cols_id) | set(cols_tel) | set(_columnas_identificador_serie_por_nombre(df))
     columnas_numericas_potenciales = [c for c in df.columns
                                        if c not in columnas_excluidas_numerico
                                        and _columna_numerica_potencial(df[c])]
     for col in columnas_numericas_potenciales:
+        if _es_columna_coordenada(col):
+            # Latitud/longitud: la coma es SIEMPRE el decimal ("10,13727"); quitarla (como
+            # hace la conversion generica) la volveria 1013727.
+            cb.agregar(f"NumConvertido_{re.sub(r'[^A-Za-z0-9]', '', col)}",
+                       "Table.TransformColumns({prev}, {{" + _m_str(col) +
+                       ", each try Number.FromText(Text.Replace(Text.From(_), \",\", \".\"), \"en-US\") otherwise null, type number}})")
+            if a_faltante in ("reemplazar_mediana", "reemplazar_media", "reemplazar_moda"):
+                comentarios.append(
+                    f'  // AVISO: la columna de coordenadas "{col}" no se rellena con media/mediana/moda '
+                    f'(seria una ubicacion inventada); los nulos se dejan como estan.'
+                )
+            continue
         cb.agregar(f"NumConvertido_{re.sub(r'[^A-Za-z0-9]', '', col)}",
                    "Table.TransformColumns({prev}, {{" + _m_str(col) +
                    f", each try Number.FromText(Text.Select(Text.From(_), {{\"0\"..\"9\",\".\",\"-\"}})) otherwise null, type number}}}})")
@@ -1137,7 +1153,8 @@ def generar_editor_m_puro(
     excluidas_atipico_contenido = _columnas_identificador_serie_por_contenido(
         df, excluir=excluidas_atipico_por_nombre
     )
-    excluidas_atipico = excluidas_atipico_por_nombre | set(excluidas_atipico_contenido)
+    excluidas_atipico = excluidas_atipico_por_nombre | set(excluidas_atipico_contenido) \
+        | {c for c in df.columns if _es_columna_coordenada(c)}  # una coordenada fuera de rango se revisa, no se recorta
     columnas_para_atipico = [c for c in columnas_numericas_potenciales if c not in excluidas_atipico]
     if excluidas_atipico_contenido:
         cols_aviso = ", ".join(excluidas_atipico_contenido)
@@ -1151,6 +1168,21 @@ def generar_editor_m_puro(
     if a_atipico != "marcar_solo" or True:
         for col in columnas_para_atipico:
             nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
+            if a_atipico == "limitar" and _tiene_cola_pesada(_a_numero_tolerante(df[col])) \
+                    and _rango_plausible_fijo(col) is None:
+                # Magnitud con cola larga natural (poblacion, superficie...): sus valores
+                # altos son reales; solo se aplica el piso logico (0) si corresponde.
+                comentarios.append(
+                    f'  // AVISO: la columna "{col}" tiene una cola larga natural; sus valores altos '
+                    f'son legitimos, asi que no se recortan por IQR.'
+                )
+                if _es_columna_no_negativa(col):
+                    cb.agregar(
+                        f"PisoCero_{nombre_col_id}",
+                        "Table.TransformColumns({prev}, {{" + _m_str(col) +
+                        ", each if _ = null then _ else if _ < 0 then 0 else _, type number}})"
+                    )
+                continue
             if a_atipico == "limitar":
                 # Limites = IQR cruzado con el rango logico de la columna
                 # (edad 0-120, conteos >= 0, y si el Q3 sugiere una escala
