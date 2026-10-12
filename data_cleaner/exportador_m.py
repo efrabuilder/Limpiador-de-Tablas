@@ -739,7 +739,8 @@ def generar_editor_m_puro(
         columnas_capitalizacion, "capitalizacion_incorrecta",
         lambda: [c for c in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO)
                  if (pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c]))
-                 and not _es_columna_id(c)])
+                 and not _es_columna_id(c)
+                 and c not in cols_email and c not in cols_tel])
 
     if columna_total or columna_cantidad or columna_precio or incluir_generico:
         col_total = columna_total or (_columnas_por_patron(df, _PATRONES_TOTAL) or [None])[0]
