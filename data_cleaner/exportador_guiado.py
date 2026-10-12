@@ -124,14 +124,16 @@ _M_FUNCIONES: Dict[str, Tuple[Tuple[str, ...], str]] = {
                 if valido then (try Number.FromText(r, "en-US") otherwise null) else null,'''),
     "fnNum": (("fnANumero",), '''    fnNum = (v as any) as nullable number =>
         if v is number then v else fnANumero(v),'''),
-    "fnCoord": ((), '''    fnCoord = (v as any, minimo as number, maximo as number) as nullable number =>
+    "fnCoord": ((), '''    fnCoord = (v as any, minimo as number, maximo as number, referencia as nullable number) as nullable number =>
         if v = null then null
         else
             let
                 n = try Number.FromText(Text.Replace(Text.Trim(Text.From(v, "en-US")), ",", "."), "en-US") otherwise null,
-                candidatos = if n = null then {} else List.Select(List.Transform({0..12}, each n / Number.Power(10, _)), each _ >= minimo and _ <= maximo)
+                candidatos = if n = null then {} else List.Select(List.Transform({0..11}, each n / Number.Power(10, _)), each _ >= minimo and _ <= maximo)
             in
-                if List.Count(candidatos) = 0 then null else candidatos{0},'''),
+                if List.Count(candidatos) = 0 then null
+                else if referencia = null or candidatos{0} = n then candidatos{0}
+                else List.First(List.Sort(candidatos, each Number.Abs(_ - referencia))),'''),
     "fnSoloDigitos": ((), '''    fnSoloDigitos = (t as text) as logical =>
         t <> "" and Text.Select(t, {"0".."9"}) = t,'''),
     "fnPartesFecha": (("fnSoloDigitos",), '''    fnPartesFecha = (s as nullable text) as nullable record =>
@@ -270,8 +272,9 @@ def _m_numericas(cb: _ConstructorM, titulo: str, m: Dict) -> None:
 
 
 def _m_coordenadas(cb: _ConstructorM, titulo: str, m: Dict) -> None:
-    cols = ", ".join("{" + _m_txt(c) + f", each fnCoord(_, {_m_num(a)}, {_m_num(b)}), type nullable number}}"
-                     for c, _t, a, b in m["items"])
+    cols = ", ".join("{" + _m_txt(c) + f", each fnCoord(_, {_m_num(a)}, {_m_num(b)}, "
+                     f"{'null' if r is None else _m_num(r)}), type nullable number}}"
+                     for c, _t, a, b, r in m["items"])
     if cols:
         cb.agregar(titulo, f"Table.TransformColumns({{prev}}, {{{cols}}})")
 
