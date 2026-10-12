@@ -78,6 +78,29 @@ def normalizar_llave(serie, modo="texto", ancho=0):
     return s.astype(object).where(s.notna(), np.nan)
 
 
+def inferir_ancho_codigo(df_a: pd.DataFrame, claves_a: List[str], df_b: pd.DataFrame, claves_b: List[str]) -> int:
+    """Ancho de relleno con ceros si las llaves son codigos numericos (codigo postal,
+    folio...) a los que algun lado les quito los ceros iniciales (1067 en vez de 01067);
+    0 si no hay motivo para tocarlas.
+
+    Solo se propone cuando TODAS las llaves de ambos lados son puros digitos, hay un
+    largo dominante (>= 60 % de los valores) que es tambien el maximo, y existen valores
+    mas cortos. Un id comun (1, 2 ... 5000) no cumple: no tiene largo dominante."""
+    largos = []
+    for df, claves in ((df_a, claves_a), (df_b, claves_b)):
+        for c in claves:
+            v = df[c].dropna().astype("string").str.strip().str.replace(r"\.0+$", "", regex=True)
+            v = v[v != ""]
+            if v.empty or not v.str.fullmatch(r"\d+").all():
+                return 0
+            largos.append(v.str.len())
+    largos = pd.concat(largos)
+    moda = int(largos.mode().iloc[0])
+    if moda < 3 or int(largos.max()) != moda or (largos == moda).mean() < 0.6 or (largos < moda).sum() == 0:
+        return 0
+    return moda
+
+
 def colapsar_por_llave(df, claves, agregaciones):
     """Deja UNA fila por llave. `agregaciones` es {columna: funcion} con
     funciones como 'first', 'sum', 'mean', 'max'... (las numericas leen la
