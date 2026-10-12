@@ -137,7 +137,7 @@ _PATRONES_IMPUESTO = ('impuesto', 'iva', 'tax', 'itbis', 'vat')
 _PATRONES_ENVIO = ('envio', 'flete', 'shipping', 'freight', 'logistico')
 _PATRONES_FECHA_CON_PENDIENTE = ('cobro', 'pago', 'entrega', 'ingreso')
 _VALORES_FECHA_PENDIENTE = ('pendiente', 'pendiente de pago', 'pendiente de cobro', 'pendiente de entrega', 'por cobrar', 'por pagar', 'por entregar', 'no aplica', 'n/a', 'na', 'no corresponde', 'sin fecha', 'no fecha', 'no definido', 'no definida', 'sin definir', 'null', 'none', '-')
-_REGEX_EMAIL = re.compile(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,}$")
+_REGEX_EMAIL = re.compile(r"^(?!.*\\.\\.)(?!\\.)[^@\\s]+(?<!\\.)@[^@\\s]+\\.[^@\\s]{2,}$")
 _REGEX_TELEFONO_FORMATO = re.compile(r"^[\\d\\s\\-\\+\\(\\)]+$")
 
 
@@ -539,6 +539,11 @@ def _intentar(fn, valor_por_defecto):
         return valor_por_defecto
 
 
+def _empieza_con_anio(val):
+    # aaaa-mm-dd: con el año primero, un mes imposible (13...) es error real, no un dd/mm invertido.
+    return bool(re.match(r"^\\s*\\d{4}\\s*[-/.]", str(val)))
+
+
 def _separador_fecha(val):
     if val is None:
         return None
@@ -571,7 +576,7 @@ def _detectar_fechas_invalidas(df):
             if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
                 continue
             fecha_conteo = parseado.loc[idx]
-            if pd.isna(fecha_conteo):
+            if pd.isna(fecha_conteo) and not _empieza_con_anio(val):
                 fecha_conteo = pd.to_datetime(val, errors="coerce", dayfirst=True)
             if pd.isna(fecha_conteo):
                 continue
@@ -588,7 +593,7 @@ def _detectar_fechas_invalidas(df):
             if admite_pendiente and _es_valor_fecha_pendiente(val):
                 continue
             fecha = parseado.loc[idx]
-            if pd.isna(fecha):
+            if pd.isna(fecha) and not _empieza_con_anio(val):
                 fecha = pd.to_datetime(val, errors="coerce", dayfirst=True)
             if pd.isna(fecha):
                 hallazgos.append({"tipo": "fecha_invalida", "columna": col, "fila": int(idx),
@@ -704,16 +709,26 @@ def _detectar_capitalizacion_incorrecta(df):
 
 def _detectar_ids_duplicados(df, umbral_unicidad=0.9):
     hallazgos = []
-    cols_id = COLUMNAS_FORZADAS_ID if COLUMNAS_FORZADAS_ID is not None \\
+    forzadas = COLUMNAS_FORZADAS_ID is not None
+    cols_id = COLUMNAS_FORZADAS_ID if forzadas \\
         else [c for c in df.columns if _es_columna_id(c)]
     for col in cols_id:
+        if col not in df.columns:
+            continue
         serie_no_nula = df[col].dropna()
         if len(serie_no_nula) == 0:
             continue
-        if serie_no_nula.nunique() / len(serie_no_nula) < umbral_unicidad:
-            continue
+        # Columna indicada a mano: se revisa siempre. En modo automatico, la
+        # "id" a secas o la primera columna (llave primaria) pide solo 50 % de
+        # valores distintos; el resto (posibles llaves foraneas) pide 90 %.
+        if not forzadas:
+            es_llave_primaria = list(df.columns).index(col) == 0 or str(col).strip().lower() == "id"
+            umbral = min(umbral_unicidad, 0.5) if es_llave_primaria else umbral_unicidad
+            if serie_no_nula.nunique() / len(serie_no_nula) < umbral:
+                continue
         serie = df[col]
-        mask = serie.duplicated(keep="first") & serie.notna()
+        mask = serie.duplicated(keep="first") & serie.notna() \\
+            & ~serie.map(lambda v: isinstance(v, str) and v.strip() == "")
         for idx in serie[mask].index:
             hallazgos.append({"tipo": "id_duplicado", "columna": col, "fila": int(idx),
                                "valor_original": serie.loc[idx],
@@ -985,7 +1000,7 @@ def _normalizar_fechas_columna(serie, formato_python):
         if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
             continue
         fecha = parseado.loc[idx]
-        if pd.isna(fecha):
+        if pd.isna(fecha) and not _empieza_con_anio(val):
             fecha = pd.to_datetime(val, errors="coerce", dayfirst=True)
         if pd.isna(fecha):
             continue
