@@ -41,6 +41,8 @@ def load_csv(path, **kwargs) -> pd.DataFrame:
     cp1252, latin-1) y el separador (coma, punto y coma, tabulador o barra vertical), salvo que se pase `sep`.
     `path` puede ser una ruta, un archivo abierto o un archivo subido."""
     texto = _leer_texto_csv(path)
+    if not texto.strip():
+        raise ValueError("El archivo está vacío: no tiene encabezados ni datos.")
     if "sep" not in kwargs and "delimiter" not in kwargs:
         texto, kwargs["sep"] = _texto_y_separador(texto)
     if "dtype" not in kwargs:
@@ -49,9 +51,26 @@ def load_csv(path, **kwargs) -> pd.DataFrame:
             kwargs["dtype"] = {c: str for c in columnas_codigo}
     try:
         return pd.read_csv(io.StringIO(texto), **kwargs)
-    except pd.errors.ParserError:  # filas con más celdas que el encabezado: el motor flexible las acepta
-        kwargs.pop("low_memory", None)
-        return pd.read_csv(io.StringIO(texto), engine="python", **kwargs)
+    except pd.errors.ParserError:  # filas con más celdas que el encabezado
+        return _leer_csv_irregular(texto, kwargs)
+
+
+def _leer_csv_irregular(texto: str, kwargs: dict) -> pd.DataFrame:
+    """CSV donde alguna fila trae más celdas que el encabezado (pandas, incluso con
+    engine='python', se niega a leerlo). Se rellenan las filas cortas y las columnas
+    sobrantes se agregan como 'columna_extra_N' en vez de perder datos o fallar."""
+    import csv
+    separador = kwargs.get("sep") or kwargs.get("delimiter") or ","
+    filas = list(csv.reader(io.StringIO(texto), delimiter=separador))
+    ancho = max(len(f) for f in filas)
+    encabezado = filas[0] + [f"columna_extra_{i}" for i in range(len(filas[0]) + 1, ancho + 1)]
+    buffer = io.StringIO()
+    escritor = csv.writer(buffer)
+    escritor.writerow(encabezado)
+    for f in filas[1:]:
+        escritor.writerow(f + [""] * (ancho - len(f)))
+    opciones = {k: v for k, v in kwargs.items() if k not in ("sep", "delimiter", "header", "skiprows", "dtype")}
+    return pd.read_csv(io.StringIO(buffer.getvalue()), sep=",", **opciones)
 
 
 _REGEX_CERO_INICIAL = re.compile(r"0\d+")
