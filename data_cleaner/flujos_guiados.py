@@ -76,9 +76,11 @@ def hojas_de_archivo(ruta: str) -> List[str]:
 
 
 def tokens_nulos(extra: Optional[Sequence[str]] = None) -> Tuple[str, ...]:
-    """Textos que cuentan como nulo: la celda vacia mas los `extra` elegidos."""
+    """Textos que cuentan como nulo: la celda vacia, los `extra` elegidos y los errores de Excel (#N/A, #REF!...),
+    que nunca son un dato y siempre cuentan."""
     elegidos = TOKENS_EXTRA_DEFECTO if extra is None else tuple(extra)
-    return ("",) + tuple(str(t).strip().lower() for t in elegidos)
+    tokens = ("",) + tuple(str(t).strip().lower() for t in elegidos)
+    return tokens + tuple(e for e in LG.ERRORES_EXCEL if e not in tokens)
 
 
 def parsear_pares(textos: Optional[Sequence[str]], opcion: str) -> Dict[str, str]:
