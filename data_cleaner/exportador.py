@@ -111,6 +111,7 @@ _PATRONES_NO_TELEFONO = (
     "tracking", "numero_tracking", "codigo_tracking", "guia", "numero_guia", "guia_envio", "awb",
     "conocimiento_embarque", "folio_pago", "numero_folio", "codigo_rastreo", "numero_seguimiento",
     "seguimiento", "numero_referencia", "referencia_pago",
+    "codigo_postal", "postal_code", "postal", "zip", "zipcode", "zip_code", "plz", "cp",
 )
 # Latitud / longitud: numeros con muchos decimales (o enteros sin separador)
 # que NO son telefono -- ver PATRONES_COORDENADAS en data_cleaner/patrones.py.
@@ -217,6 +218,29 @@ def _es_valor_fecha_pendiente(valor):
 
 def _columna_admite_fecha_pendiente(col):
     return _coincide_patron_columna(col, _PATRONES_FECHA_CON_PENDIENTE)
+
+
+def _tiene_cola_pesada(serie, min_filas=30, min_asimetria=2.0, min_pct_atipicos=0.03):
+    """Magnitud NO negativa con cola larga natural (poblacion, superficie...):
+    sus valores altos son reales, no errores -- ver patrones.tiene_cola_pesada."""
+    num = pd.to_numeric(serie, errors="coerce").dropna()
+    if len(num) < min_filas or (num < 0).any() or num.nunique() < 10:
+        return False
+    q1, q3 = num.quantile(0.25), num.quantile(0.75)
+    iqr = q3 - q1
+    if iqr <= 0:
+        return False
+    fuera = ((num < q1 - 1.5 * iqr) | (num > q3 + 1.5 * iqr)).mean()
+    return bool(num.skew() >= min_asimetria and fuera >= min_pct_atipicos)
+
+
+def _limites_logicos(col):
+    """Solo los limites logicos de la columna (sin IQR)."""
+    if _coincide_patron_columna(col, _PATRONES_EDAD):
+        return 0, 120
+    if _coincide_patron_columna(col, _PATRONES_NO_NEGATIVO):
+        return 0, np.nan
+    return np.nan, np.nan
 
 
 def _limites_limitar(df, col, factor_iqr):
@@ -1126,12 +1150,35 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
         if h["tipo"] == "atipico" and h["columna"] not in limites_iqr:
             limites_iqr[h["columna"]] = _limites_limitar(df, h["columna"], factor_iqr)
 
+    # Identificadores, codigos (postal, folio...), telefonos y coordenadas: no se
+    # imputan con media/mediana/moda (seria un dato inventado). Y las magnitudes con
+    # cola larga natural no se recortan: sus valores altos son reales.
+    _estad = ("reemplazar_media", "reemplazar_mediana", "reemplazar_moda")
+    cols_sin_imputar = set(_columnas_excluir_de_atipicos(df)) | set(
+        c for c in df.columns if _coincide_patron_columna(c, _PATRONES_COORDENADAS))
+    cols_cola_pesada = set(
+        c for c in set(h["columna"] for h in hallazgos if h["tipo"] == "atipico" and h["columna"])
+        if c in df.columns and c not in cols_sin_imputar and _tiene_cola_pesada(_a_numero(df[c])))
+    for c in cols_cola_pesada:
+        limites_iqr[c] = _limites_logicos(c)
+
     registro = []
     filas_a_eliminar = set()
 
     for h in hallazgos:
         accion = config.get(h["tipo"], "marcar_solo")
         valor_nuevo = h["valor_original"]
+        nota_extra = ""
+
+        if h["columna"] in cols_sin_imputar and (
+                (h["tipo"] in ("faltante", "tipo_invalido") and accion in _estad)
+                or (h["tipo"] == "atipico" and accion in ("limitar",) + _estad
+                    and _coincide_patron_columna(h["columna"], _PATRONES_COORDENADAS))):
+            accion = "marcar_solo"
+            nota_extra = " | columna de código/identificador/coordenada: no se imputa ni se recorta (queda para revisión)"
+        elif h["tipo"] == "atipico" and h["columna"] in cols_cola_pesada and accion in _estad:
+            accion = "marcar_solo"
+            nota_extra = " | distribución con cola larga natural: el valor alto es legítimo, no se reemplaza"
 
         if accion == "marcar_solo":
             pass
@@ -1155,6 +1202,10 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
                 if not pd.isna(lim_sup) and valor_nuevo > lim_sup:
                     valor_nuevo = lim_sup
                 _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
+                if h["columna"] in cols_cola_pesada and valor_nuevo == val_num:
+                    accion = "marcar_solo"
+                    valor_nuevo = h["valor_original"]
+                    nota_extra = " | distribución con cola larga natural: el valor alto es legítimo, no se recorta"
         elif h["tipo"] == "atipico" and accion in (
                 "reemplazar_media", "reemplazar_mediana", "reemplazar_moda"):
             valor_nuevo = _valor_reemplazo(df, h["columna"], accion)
@@ -1177,7 +1228,7 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             else:
                 valor_nuevo = h["valor_original"]
 
-        detalle = h["detalle"]
+        detalle = h["detalle"] + nota_extra
         if h["columna"] and h["columna"] in df.columns \\
                 and accion in ("reemplazar_media", "reemplazar_mediana") \\
                 and h["tipo"] in ("faltante", "tipo_invalido", "atipico") \\
