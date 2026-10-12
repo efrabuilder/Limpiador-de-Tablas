@@ -79,6 +79,34 @@ class AnalysisResult:
         return resumen
 
 
+def deduplicar_columnas(df: pd.DataFrame) -> pd.DataFrame:
+    """Si hay columnas con el mismo nombre (posible al leer desde SQL o al armar
+    un DataFrame a mano) devuelve una copia con nombres únicos (a, a.1, a.2),
+    igual que hace pandas al leer un CSV; si no hay repetidas devuelve el mismo
+    DataFrame. Sin esto df[col] devuelve un DataFrame en vez de una serie y los
+    detectores fallan."""
+    if not df.columns.duplicated().any():
+        return df
+    vistos: dict = {}
+    nuevos = []
+    for c in df.columns:
+        n = vistos.get(c, 0)
+        vistos[c] = n + 1
+        nuevos.append(c if n == 0 else f"{c}.{n}")
+    # Un nombre generado puede chocar con uno ya existente: se sigue numerando.
+    usados = set()
+    for i, c in enumerate(nuevos):
+        base, k = c, 1
+        while c in usados:
+            c = f"{base}.{k}"
+            k += 1
+        usados.add(c)
+        nuevos[i] = c
+    copia = df.copy()
+    copia.columns = nuevos
+    return copia
+
+
 def _es_columna_numerica_potencial(serie: pd.Series) -> bool:
     """Determina si una columna 'object' en realidad contiene números como texto."""
     convertibles = pd.to_numeric(serie.dropna(), errors="coerce")
@@ -422,8 +450,10 @@ def detectar_fechas_invalidas(df: pd.DataFrame, columnas: Optional[List[str]] = 
             if admite_pendiente and _es_valor_fecha_pendiente(val):
                 continue
             fecha = parseado.loc[idx]
-            if pd.isna(fecha):
-                # Reintento con dayfirst por si el formato es dd/mm/aaaa
+            if pd.isna(fecha) and not _empieza_con_anio(val):
+                # Reintento con dayfirst por si el formato es dd/mm/aaaa. Si el
+                # texto empieza con el año (aaaa-mm-dd) NO se reintenta: dayfirst
+                # intercambiaría mes y día y "2024-13-01" pasaría como 13-ene-2024.
                 fecha = pd.to_datetime(val, errors="coerce", dayfirst=True)
             if pd.isna(fecha):
                 issues.append(Issue("fecha_invalida", col, int(idx), val,
@@ -446,6 +476,16 @@ def detectar_fechas_invalidas(df: pd.DataFrame, columnas: Optional[List[str]] = 
                         f"pero el resto de la columna usa '{separador_dominante}'"
                     ))
     return issues
+
+
+_REGEX_INICIA_CON_ANIO = re.compile(r"^\s*\d{4}\s*[-/.]")
+
+
+def _empieza_con_anio(val) -> bool:
+    """True si el texto de la fecha empieza con el año de 4 dígitos (aaaa-mm-dd,
+    aaaa/mm/dd...). En ese orden el mes va antes que el día, así que un mes
+    imposible (13, 14...) es un error real y no un dd/mm intercambiado."""
+    return bool(_REGEX_INICIA_CON_ANIO.match(str(val)))
 
 
 def _separador_fecha(val) -> Optional[str]:
@@ -499,7 +539,7 @@ def _formato_fecha_dominante(serie: pd.Series, parseado: pd.Series) -> tuple[Opt
 # Email
 # ---------------------------------------------------------------------------
 
-_REGEX_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
+_REGEX_EMAIL = re.compile(r"^(?!.*\.\.)(?!\.)[^@\s]+(?<!\.)@[^@\s]+\.[^@\s]{2,}$")
 
 
 def detectar_emails_invalidos(df: pd.DataFrame, columnas: Optional[List[str]] = None,
@@ -579,7 +619,8 @@ def detectar_telefonos_invalidos(df: pd.DataFrame, columnas: Optional[List[str]]
 def detectar_ids_duplicados(df: pd.DataFrame, columnas: Optional[List[str]] = None,
                              auto: bool = True, umbral_unicidad: float = 0.9) -> List[Issue]:
     """
-    'umbral_unicidad' evita que columnas tipo llave foránea (ej. ID_Cliente,
+    'umbral_unicidad' (0.9; 0.5 para la columna "id" o la primera de la tabla)
+    evita que columnas tipo llave foránea (ej. ID_Cliente,
     que se repite legítimamente cada vez que un cliente vuelve a comprar) se
     autodetecten como identificador único: en modo automático solo se
     consideran columnas cuyo nombre matchea un patrón de id (_es_columna_id)
@@ -590,13 +631,21 @@ def detectar_ids_duplicados(df: pd.DataFrame, columnas: Optional[List[str]] = No
         cols = columnas
     elif auto:
         cols = []
-        for c in df.columns:
+        for pos, c in enumerate(df.columns):
             if not _es_columna_id(c):
                 continue
             serie_no_nula = df[c].dropna()
             if len(serie_no_nula) == 0:
                 continue
-            if serie_no_nula.nunique() / len(serie_no_nula) >= umbral_unicidad:
+            # La columna "id" a secas o la primera columna de la tabla casi
+            # siempre es la llave primaria: ahí basta con que la mitad de los
+            # valores sean distintos, así un ID repetido en más del 10 % de las
+            # filas (justo cuando la columna está más dañada) también se avisa.
+            # El resto (ID_Cliente, codigo_producto...) puede ser llave foránea
+            # y mantiene el umbral estricto.
+            es_llave_primaria = pos == 0 or str(c).strip().lower() == "id"
+            umbral = min(umbral_unicidad, 0.5) if es_llave_primaria else umbral_unicidad
+            if serie_no_nula.nunique() / len(serie_no_nula) >= umbral:
                 cols.append(c)
     else:
         cols = []
@@ -1016,6 +1065,7 @@ def analizar(df: pd.DataFrame, metodo_atipicos: str = "iqr",
     es True, se intentan adivinar por el nombre de columna — así el mismo
     motor sirve para datasets distintos sin cambiar código.
     """
+    df = deduplicar_columnas(df)
     issues: List[Issue] = []
     issues += detectar_faltantes(df)
     issues += detectar_duplicados(df)
