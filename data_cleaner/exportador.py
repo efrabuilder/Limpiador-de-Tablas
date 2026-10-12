@@ -714,7 +714,11 @@ def _detectar_espacios_extra(df):
 def _detectar_capitalizacion_incorrecta(df):
     hallazgos = []
     cols_capitalizacion = COLUMNAS_FORZADAS_CAPITALIZACION if COLUMNAS_FORZADAS_CAPITALIZACION is not None \\
-        else [c for c in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO) if not _es_columna_id(c)]
+        else [c for c in _columnas_por_patron(df, _PATRONES_NOMBRE_PROPIO)
+              if not _es_columna_id(c)
+              and c not in _columnas_por_patron(df, _PATRONES_EMAIL)
+              and c not in _columnas_por_patron(df, _PATRONES_TELEFONO)
+              and not _parece_email_col(df[c])]
     for col in cols_capitalizacion:
         if not (pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col])):
             continue
@@ -1081,6 +1085,23 @@ def _es_columna_numerica(serie, serie_num):
     return serie_num.notna().sum() >= 0.5 * len(no_vacios)
 
 
+def _columnas_texto_sin_imputar(df):
+    excluidas = set()
+    for c in df.columns:
+        serie = df[c]
+        if _es_columna_numerica(serie, _a_numero(serie)):
+            continue
+        no_vacios = serie.dropna()
+        no_vacios = no_vacios[~no_vacios.map(lambda v: isinstance(v, str) and v.strip() == "")]
+        if no_vacios.empty:
+            continue
+        if (c in _columnas_por_patron(df, _PATRONES_EMAIL + _PATRONES_FECHA)
+                or _parece_email_col(serie)
+                or no_vacios.nunique() / len(no_vacios) > 0.5):
+            excluidas.add(c)
+    return excluidas
+
+
 def _valor_reemplazo(df, columna, accion, valor_fijo=None):
     if accion == "valor_fijo":
         return _interpretar_valor_fijo(valor_fijo)
@@ -1155,7 +1176,8 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
     # cola larga natural no se recortan: sus valores altos son reales.
     _estad = ("reemplazar_media", "reemplazar_mediana", "reemplazar_moda")
     cols_sin_imputar = set(_columnas_excluir_de_atipicos(df)) | set(
-        c for c in df.columns if _coincide_patron_columna(c, _PATRONES_COORDENADAS))
+        c for c in df.columns if _coincide_patron_columna(c, _PATRONES_COORDENADAS)) \\
+        | _columnas_texto_sin_imputar(df)
     cols_cola_pesada = set(
         c for c in set(h["columna"] for h in hallazgos if h["tipo"] == "atipico" and h["columna"])
         if c in df.columns and c not in cols_sin_imputar and _tiene_cola_pesada(_a_numero(df[c])))
@@ -1175,7 +1197,7 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
                 or (h["tipo"] == "atipico" and accion in ("limitar",) + _estad
                     and _coincide_patron_columna(h["columna"], _PATRONES_COORDENADAS))):
             accion = "marcar_solo"
-            nota_extra = " | columna de código/identificador/coordenada: no se imputa ni se recorta (queda para revisión)"
+            nota_extra = " | columna de código/identificador/coordenada/correo/texto libre: no se imputa ni se recorta (queda para revisión)"
         elif h["tipo"] == "atipico" and h["columna"] in cols_cola_pesada and accion in _estad:
             accion = "marcar_solo"
             nota_extra = " | distribución con cola larga natural: el valor alto es legítimo, no se reemplaza"
