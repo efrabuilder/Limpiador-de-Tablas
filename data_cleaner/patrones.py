@@ -82,7 +82,13 @@ def a_numero_tolerante(serie: pd.Series) -> pd.Series:
             return None
         if not isinstance(v, str):
             return v
-        v = re.sub(r"[^\d,.\-]", "", v.strip())
+        # Solo se toleran espacios y simbolos/codigos de moneda; si quedan letras
+        # (codigo "P10", texto "n3") NO es un numero: antes se borraban las letras
+        # y "P10" pasaba a 10 (igual que ya hacen los scripts exportados).
+        sin_moneda = re.sub(r"[\s$€£₡¥]|crc|usd|eur", "", v.strip(), flags=re.IGNORECASE)
+        if re.search(r"[^\W\d_]", sin_moneda):
+            return None
+        v = re.sub(r"[^\d,.\-]", "", sin_moneda)
         if v in ("", "-"):
             return None
         i_coma, i_punto = v.rfind(","), v.rfind(".")
