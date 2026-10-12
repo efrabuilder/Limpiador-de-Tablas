@@ -38,6 +38,7 @@ from .patrones import (
     rango_plausible_fijo, es_columna_no_negativa, a_numero_tolerante,
     techo_probable_conteo_acotado, columnas_excluir_de_atipicos,
     es_columna_coordenada, tiene_cola_pesada,
+    columnas_por_patron, parece_email, PATRONES_EMAIL, PATRONES_FECHA,
 )
 
 _ACCIONES_ESTADISTICAS = ("reemplazar_media", "reemplazar_mediana", "reemplazar_moda")
@@ -116,6 +117,26 @@ def _es_columna_numerica(serie: pd.Series, serie_num: pd.Series) -> bool:
     if no_vacios.empty:
         return False
     return serie_num.notna().sum() >= 0.5 * len(no_vacios)
+
+
+def _columnas_texto_sin_imputar(df: pd.DataFrame) -> set:
+    """Columnas de TEXTO donde rellenar un faltante con la moda inventaría un dato:
+    correos, fechas (por nombre) y texto casi todo distinto (nombres, direcciones,
+    comentarios: más de la mitad de los valores no vacíos son únicos). Una categoría
+    de pocas opciones (departamento, método de pago...) sí admite la moda."""
+    excluidas = set()
+    for c in df.columns:
+        serie = df[c]
+        if _es_columna_numerica(serie, _a_numero(serie)):
+            continue
+        no_vacios = _serie_no_vacios(serie)
+        if no_vacios.empty:
+            continue
+        if (c in columnas_por_patron(df, PATRONES_EMAIL + PATRONES_FECHA)
+                or parece_email(serie)
+                or no_vacios.nunique() / len(no_vacios) > 0.5):
+            excluidas.add(c)
+    return excluidas
 
 
 def _admite_estadistico(df: pd.DataFrame, columna: str, accion: str) -> bool:
@@ -278,7 +299,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
     # se aplican: la celda se deja como esta (vacia) y se marca para revision.
     cols_sin_imputar = set(columnas_excluir_de_atipicos(df)) | {
         c for c in df.columns if es_columna_coordenada(c)
-    }
+    } | _columnas_texto_sin_imputar(df)
     # Magnitudes con cola larga natural (poblacion, superficie...): sus valores altos
     # son reales, asi que ni se recortan ni se reemplazan; solo cuentan los limites
     # logicos (negativos, rango fijo).
@@ -321,7 +342,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             # No se inventa un codigo postal, un id ni una coordenada: la celda queda
             # como estaba y se marca para revisar.
             accion = "marcar_solo"
-            nota_extra = " | columna de código/identificador/coordenada: no se imputa ni se recorta (queda para revisión)"
+            nota_extra = " | columna de código/identificador/coordenada/correo/texto libre: no se imputa ni se recorta (queda para revisión)"
         elif issue.tipo == "atipico" and issue.columna in cols_cola_pesada \
                 and accion in _ACCIONES_ESTADISTICAS:
             accion = "marcar_solo"
