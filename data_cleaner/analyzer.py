@@ -278,18 +278,20 @@ def detectar_atipicos_logicos(df: pd.DataFrame, columnas: Optional[List[str]] = 
     for col in columnas:
         if col not in df.columns:
             continue
-        serie = _a_numero_tolerante(df[col])
+        rango_coord = _rango_coordenada(col)
+        serie = _coordenada_a_numero(df[col]) if rango_coord is not None else _a_numero_tolerante(df[col])
         if serie.notna().sum() == 0:
             continue
-        rango_fijo = _rango_plausible_fijo(col)
+        rango_fijo = rango_coord or _rango_plausible_fijo(col)
         if rango_fijo is not None:
             minimo, maximo = rango_fijo
             fuera = serie[(serie < minimo) | (serie > maximo)]
             for idx, val in fuera.items():
-                issues.append(Issue(
-                    "atipico", col, int(idx), val,
-                    f"Fuera del rango plausible [{minimo}, {maximo}] para este tipo de dato"
-                ))
+                detalle = f"Fuera del rango plausible [{minimo}, {maximo}] para este tipo de dato"
+                if rango_coord is not None:
+                    detalle = (f"Coordenada fuera del rango geográfico [{minimo:g}, {maximo:g}]: posible error de "
+                               "captura (p. ej. falta el punto decimal). Revíselo en el origen")
+                issues.append(Issue("atipico", col, int(idx), val, detalle))
         elif _es_columna_no_negativa(col):
             negativos = serie[serie < 0]
             for idx, val in negativos.items():
@@ -341,6 +343,8 @@ from data_cleaner.patrones import (
     parece_fecha as _parece_fecha,
     rango_digitos_telefono as _rango_digitos_telefono,
     columnas_excluir_de_atipicos as _columnas_excluir_de_atipicos,
+    rango_coordenada as _rango_coordenada,
+    coordenada_a_numero as _coordenada_a_numero,
     columnas_identificador_serie_por_nombre as _columnas_identificador_serie_por_nombre,
     columnas_identificador_serie_por_contenido as _columnas_identificador_serie_por_contenido,
     rango_plausible_fijo as _rango_plausible_fijo,
