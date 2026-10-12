@@ -13,9 +13,10 @@ COMO USARLO:
     4. Se crea "codigo_generado.m" en la misma carpeta. Abralo, copie todo
        el contenido y peguelo en el Editor avanzado de Power Query.
 """
+import argparse
 import pandas as pd
 from data_cleaner.exportador_m import generar_editor_m_puro
-from data_cleaner.loaders import load_csv, load_excel
+from data_cleaner.loaders import load_table
 
 # -----------------------------------------------------------------------------
 # CONFIGURACION: ajuste segun su archivo y como quiere corregir cada cosa.
@@ -23,12 +24,21 @@ from data_cleaner.loaders import load_csv, load_excel
 ARCHIVO_ENTRADA = "Jardineria_Datos_X.xlsx"   # su archivo CSV o cualquier Excel
 HOJA = "Ventas_Jardineria"                     # nombre de la hoja (None si es .csv)
 NOMBRE_PASO_ANTERIOR = "Tipo de columna cambiado"  # el paso de Power Query que entrega la tabla
+ARCHIVO_SALIDA = "codigo_generado.m"
+
+# Tambien se pueden pasar por la linea de comandos, sin editar este archivo:
+#   python generar_m.py --input mis_datos.csv [--hoja Hoja1] [--paso "Tipo cambiado"] [--salida codigo.m]
+_parser = argparse.ArgumentParser(description="Genera el codigo M (Power Query) de limpieza de una tabla.")
+_parser.add_argument("--input", "-i", default=ARCHIVO_ENTRADA, help="CSV o Excel de entrada.")
+_parser.add_argument("--hoja", default=HOJA, help="Hoja del libro Excel (se ignora en CSV).")
+_parser.add_argument("--paso", default=NOMBRE_PASO_ANTERIOR, help="Paso anterior de Power Query.")
+_parser.add_argument("--salida", "-o", default=ARCHIVO_SALIDA, help="Archivo .m a crear.")
+_args = _parser.parse_args()
+ARCHIVO_ENTRADA, HOJA, NOMBRE_PASO_ANTERIOR, ARCHIVO_SALIDA = _args.input, _args.hoja, _args.paso, _args.salida
 
 # Acepta CSV/TXT/TSV y cualquier Excel (.xlsx, .xlsm, .xls, .xlsb, .ods)
-if ARCHIVO_ENTRADA.lower().endswith((".csv", ".txt", ".tsv", ".tab")):
-    df = load_csv(ARCHIVO_ENTRADA)
-else:
-    df = load_excel(ARCHIVO_ENTRADA, sheet_name=HOJA)
+_es_csv = ARCHIVO_ENTRADA.lower().endswith((".csv", ".txt", ".tsv", ".tab"))
+df = load_table(ARCHIVO_ENTRADA) if (_es_csv or not HOJA) else load_table(ARCHIVO_ENTRADA, sheet_name=HOJA)
 
 codigo_m = generar_editor_m_puro(
     df,
@@ -55,8 +65,8 @@ codigo_m = generar_editor_m_puro(
     texto_inconsistente="usar_sugerido",
 )
 
-with open("codigo_generado.m", "w", encoding="utf-8") as f:
+with open(ARCHIVO_SALIDA, "w", encoding="utf-8") as f:
     f.write(codigo_m)
 
-print("Listo. Se genero 'codigo_generado.m' junto a este script.")
+print(f"Listo. Se genero '{ARCHIVO_SALIDA}'.")
 print(f"Filas analizadas: {len(df)} | Columnas: {len(df.columns)}")
