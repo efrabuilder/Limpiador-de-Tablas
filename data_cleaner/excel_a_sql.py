@@ -30,7 +30,7 @@ ARCHIVO_EXCEL = "mi_archivo.xlsx"
 # Cadena de conexion SQLAlchemy. Ejemplo SQL Server con autenticacion de
 # Windows (mismo patron que ya usan app.py / desktop_app.py):
 CADENA_CONEXION = (
-    "mssql+pyodbc://@LENOVO-EFRAIN-S\\MSSQLSERVER2025/super_San_Pascual"
+    "mssql+pyodbc://@NOMBRE_SERVIDOR\\INSTANCIA/NOMBRE_BASE_DATOS"   # <- cambie estos 3 valores
     "?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes"
     "&TrustServerCertificate=yes&trusted_connection=yes"
 )
