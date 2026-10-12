@@ -64,7 +64,7 @@ from data_cleaner import limpieza_guiada as LG
 from data_cleaner import merge_tablas as MT
 from data_cleaner.exportador_m import generar_editor_m_puro
 from data_cleaner.loaders import (load_csv, load_excel, load_table, load_tablas, leer_tabla_subida, tabla_a_bytes,
-                                  es_archivo_csv, es_archivo_excel)
+                                  es_archivo_csv, es_archivo_excel, _coordenadas_a_numero)
 from data_cleaner.exporters import exportar_sql
 from data_cleaner.modelo_sql import aplicar_modelo_sql, generar_dot_modelo, generar_script_crear_base_datos
 from data_cleaner.patrones import FORMATOS_FECHA_DISPONIBLES, formato_fecha_python, formato_fecha_m
@@ -134,7 +134,10 @@ def _leer_upload(archivo: UploadFile) -> pd.DataFrame:
         raise HTTPException(status_code=400, detail="El archivo está vacío.")
     if es_archivo_csv(nombre):
         try:
-            df = load_csv(buffer)
+            # Mantener el mismo tratamiento de coordenadas que la CLI/load_table.
+            # Convierte latitud/longitud con coma decimal a valores numéricos
+            # antes del análisis para evitar resultados distintos entre interfaces.
+            df = _coordenadas_a_numero(load_csv(buffer))
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"No se pudo leer el CSV: {exc}")
         if df.shape[1] == 0:
