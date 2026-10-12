@@ -972,6 +972,9 @@ def merge_cmd(
             sufijo_b=sufijo_b, conservar_indicador=conservar_indicador,
             rellenos=list(FG.parsear_pares(relleno, "--relleno").items()), hoja_a=hoja_a, hoja_b=hoja_b)
         aud = resultado.auditoria
+        if resultado.params.get("modo") == "codigo" and modo_llave == "texto":
+            console.print(f"[cyan]ℹ Llaves leídas como códigos: ancho {resultado.params.get('ancho')} "
+                          "(se restauraron los ceros iniciales).[/cyan]")
         console.print(f"Filas del resultado: [bold]{len(resultado.df)}[/bold] "
                       f"({len(resultado.df) - aud['filas_a']:+d} vs A) · "
                       f"A con pareja: {aud['semaforo']} {aud['pct_filas_con_pareja']}%")
