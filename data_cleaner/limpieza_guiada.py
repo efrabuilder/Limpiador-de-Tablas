@@ -57,7 +57,10 @@ from .patrones import (
 # (no aplica / no disponible) ya viene incluido: casi nunca es un dato real. Los
 # de la lista extra son opcionales porque "na", "-" o "unknown" podrian ser datos
 # reales; la app avisa si los encuentra en la tabla.
-TOKENS_NULOS_BASE = ("", "nan", "none", "null", "n/a")
+# Valores de error de Excel que se cuelan en los archivos: nunca son un dato, siempre significan «sin valor».
+ERRORES_EXCEL = ("#n/a", "#n/d", "#value!", "#valor!", "#ref!", "#div/0!", "#name?", "#nombre?", "#num!",
+                 "#null!", "#nulo!")
+TOKENS_NULOS_BASE = ("", "nan", "none", "null", "n/a") + ERRORES_EXCEL
 TOKENS_NULOS_EXTRA = ("na", "-", "--", "s/d", "sin dato", "unknown", "desconocido",
                       "not available", "no disponible")
 
@@ -167,13 +170,16 @@ def a_numero(serie):
     return pd.Series(valores, index=serie.index, name=serie.name)
 
 
-def parsear_coordenada(valor, tipo, minimo=None, maximo=None):
+def parsear_coordenada(valor, tipo, minimo=None, maximo=None, referencia=None):
     """Latitud (tipo='latitud') o longitud (tipo='longitud') como numero.
     Acepta coma decimal. El valor debe caer entre `minimo` y `maximo`
     (por defecto -90..90 para latitud y -180..180 para longitud; se puede
     pasar el rango del pais para ser mas preciso, ej. 5.5..15.5 en
     Alemania). Si viene fuera de rango porque le falta el punto decimal
     (ej. 9953281 en vez de 9.953281), se divide entre 10 hasta que entre.
+    Cuando varias divisiones entran en rango (943751 -> 94.3751, 9.43751,
+    0.943751), se elige la mas cercana a `referencia` (la mediana de los
+    valores buenos de la columna); sin `referencia`, la primera que entra.
     Lo que no es un numero, o no entra en rango ni asi, queda como NaN."""
     if valor is None or (not isinstance(valor, str) and pd.isna(valor)):
         return np.nan
@@ -186,11 +192,16 @@ def parsear_coordenada(valor, tipo, minimo=None, maximo=None):
     limite = 180 if tipo == "longitud" else 90
     minimo = -limite if minimo is None else minimo
     maximo = limite if maximo is None else maximo
-    for _ in range(12):  # hasta 12 divisiones entre 10
+    candidatos = []
+    for divisiones in range(12):  # hasta 11 divisiones entre 10
         if minimo <= numero <= maximo:
-            return numero
+            if referencia is None or divisiones == 0:
+                return numero  # ya venia en rango, o no hay referencia: la primera escala que entra
+            candidatos.append(numero)
         numero /= 10
-    return np.nan
+    if not candidatos:
+        return np.nan
+    return min(candidatos, key=lambda c: abs(c - referencia))
 
 
 def nombres_snake(columnas):
@@ -892,6 +903,28 @@ def paso_numericas(df: pd.DataFrame, columnas: List[str],
                     m={"tipo": "numericas", "columnas": list(columnas)})
 
 
+MIN_VALORES_REFERENCIA = 10  # con menos valores buenos la mediana no es confiable
+
+
+def referencia_coordenada(serie: pd.Series, minimo: float, maximo: float) -> Optional[float]:
+    """Mediana de los valores de la columna que YA venian en rango (con su punto decimal), o None si son muy
+    pocos. Sirve para elegir la escala correcta de un valor sin punto decimal: en Alemania la longitud
+    943751 puede ser 94.3751 o 9.43751, y solo los demas datos dicen cual es."""
+    numeros = serie.map(lambda v: _a_float_coordenada(v))
+    buenos = numeros[(numeros >= minimo) & (numeros <= maximo)]
+    return round(float(buenos.median()), 6) if len(buenos) >= MIN_VALORES_REFERENCIA else None
+
+
+def _a_float_coordenada(valor) -> float:
+    if valor is None or (not isinstance(valor, str) and pd.isna(valor)):
+        return np.nan
+    try:
+        numero = float(str(valor).strip().replace(",", "."))
+    except ValueError:
+        return np.nan
+    return numero if np.isfinite(numero) else np.nan
+
+
 def paso_coordenadas(df: pd.DataFrame, col_latitud: Optional[str] = None,
                      col_longitud: Optional[str] = None, rango_latitud=None,
                      rango_longitud=None) -> Tuple[pd.DataFrame, Paso]:
@@ -906,18 +939,21 @@ def paso_coordenadas(df: pd.DataFrame, col_latitud: Optional[str] = None,
             continue
         limite = 180 if tipo == "longitud" else 90
         minimo, maximo = rango if rango else (-limite, limite)
-        items.append((col, tipo, minimo, maximo))
+        referencia = referencia_coordenada(df[col], minimo, maximo)
+        items.append((col, tipo, minimo, maximo, referencia))
         tenian_dato = int(df[col].notna().sum())
         fuera = contar_coordenadas_fuera_de_rango(df[col], tipo, minimo, maximo)
         originales = df[col].copy()
-        df[col] = df[col].map(lambda v, t=tipo, a=minimo, b=maximo: parsear_coordenada(v, t, a, b))
+        df[col] = df[col].map(lambda v, t=tipo, a=minimo, b=maximo, r=referencia: parsear_coordenada(v, t, a, b, r))
         nulos_nuevos = tenian_dato - int(df[col].notna().sum())
         reescaladas = originales.map(lambda v: _fuera_de_rango(v, minimo, maximo)) & df[col].notna()
         if reescaladas.any():
             ejemplos = ", ".join(f"{o} → {n:g}" for o, n in
                                  zip(originales[reescaladas].head(3), df.loc[reescaladas, col].head(3)))
+            elegida = (f"; entre las escalas posibles se eligió la más cercana a la mediana de la columna ({referencia:g})"
+                       if referencia is not None else "")
             avisos.append(f"«{col}»: {int(reescaladas.sum())} valores fuera de rango se corrigieron "
-                          f"dividiéndolos entre 10 hasta entrar en el rango ({ejemplos}). Es lo esperado "
+                          f"dividiéndolos entre 10 hasta entrar en el rango ({ejemplos}){elegida}. Es lo esperado "
                           f"si venían sin punto decimal; si no, revise esos valores.")
         minimo_real, maximo_real = df[col].min(), df[col].max()
         valores = (f"mín {minimo_real:.4f} / máx {maximo_real:.4f}"
@@ -925,7 +961,7 @@ def paso_coordenadas(df: pd.DataFrame, col_latitud: Optional[str] = None,
         lineas.append(f"{col} ({tipo}, rango {minimo}..{maximo}): {fuera} fuera de rango, "
                       f"{nulos_nuevos} no se pudieron arreglar y quedaron nulos; {valores}")
         codigo.append(f'df["{col}"] = df["{col}"].map('
-                      f'lambda v: parsear_coordenada(v, "{tipo}", {minimo!r}, {maximo!r}))')
+                      f'lambda v: parsear_coordenada(v, "{tipo}", {minimo!r}, {maximo!r}, {referencia!r}))')
     return df, Paso("Parsear coordenadas", "\n".join(lineas), "\n".join(codigo),
                     advertencia="\n".join(avisos), m={"tipo": "coordenadas", "items": items})
 
@@ -1366,6 +1402,8 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
     `config` (todas las claves son opcionales):
       tokens, nombres_snake (bool), vacios_a_nan (bool),
       texto (dict con columnas, minusculas, espacios, comillas),
+      texto_nombres_propios (bool, por defecto True; solo actua si hay `texto`): las columnas de
+        nombres propios que `texto` no incluye se limpian solo de espacios y comillas, sin minusculas,
       numericas (lista), latitud (col), longitud (col),
       rango_latitud / rango_longitud ((minimo, maximo), opcionales),
       fechas (dict con columnas, formato, dia_primero),
@@ -1391,6 +1429,22 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
                               texto.get("minusculas", True), texto.get("espacios", True),
                               texto.get("comillas", True))
         pasos.append(paso)
+    if texto is not None and config.get("texto_nombres_propios", True):
+        # Las columnas de nombres propios (personas, empresas, lugares) no pasan a
+        # minúsculas para no perder sus mayúsculas, pero SÍ se les quitan los espacios
+        # de los lados y repetidos y las comillas de los extremos: "  Ana PEREZ " y
+        # "Ana PEREZ" son la misma persona y si no se igualan no se detectan duplicados.
+        espacios, comillas = texto.get("espacios", True), texto.get("comillas", True)
+        ya_tratadas = set(texto.get("columnas") or [])
+        if espacios or comillas:
+            cols_fecha_n = columnas_fecha_por_nombre(df)
+            nombres = [c for c in df.columns
+                       if c not in ya_tratadas and coincide_patron(c, PATRONES_NOMBRE_PROPIO)
+                       and rol_columna(df, c, cols_fecha_n, tokens, umbral_numerico=0.6) == "texto"]
+            if nombres:
+                df, paso = paso_texto(df, nombres, minusculas=False, espacios=espacios, comillas=comillas)
+                paso.titulo = "Estandarizar texto de nombres propios (solo espacios y comillas)"
+                pasos.append(paso)
     numericas = [c for c in config.get("numericas", []) if c in df.columns]
     if numericas:
         df, paso = paso_numericas(df, numericas, tokens)
@@ -1489,8 +1543,13 @@ def generar_script_limpieza(pasos: List[Paso], tokens=TOKENS_NULOS_BASE,
         salida = 'df.to_csv("limpio.csv", index=False, encoding="utf-8-sig")'
 
     if modo == "powerbi":
-        carga = ("# Power BI entrega la tabla ya tipada; la limpieza guiada parte de texto (como al leer un CSV),\n"
-                 'df = dataset.astype("string").fillna("").astype(object)')
+        carga = ("# Power BI entrega la tabla ya tipada; la limpieza guiada parte de texto (como al leer un CSV).\n"
+                 "# Un entero con vacios llega como decimal (24937.0): se vuelve entero antes de pasarlo a texto.\n"
+                 "df = dataset.copy()\n"
+                 "for _col in df.columns:\n"
+                 "    if pd.api.types.is_float_dtype(df[_col]) and (df[_col].dropna() % 1 == 0).all():\n"
+                 '        df[_col] = df[_col].astype("Int64")\n'
+                 'df = df.astype("string").fillna("").astype(object)')
         salida = 'dataset_limpio = df  # Power BI ofrece este resultado para expandir'
     partes = [
         "# -*- coding: utf-8 -*-",
@@ -1502,6 +1561,8 @@ def generar_script_limpieza(pasos: List[Paso], tokens=TOKENS_NULOS_BASE,
         "#   Power Query -> Transformar -> Ejecutar script de Python -> pegue todo este archivo.",
         "#   Power BI inyecta la tabla en `dataset`; expanda el resultado `dataset_limpio`.",
         "#   Requiere Python con pandas y numpy (Power BI Desktop -> Opciones -> Python scripting).",
+        "#   Si Power Query le puso tipo numero a columnas con ceros a la izquierda (codigos postales, folios),",
+        "#   cambielas a Texto ANTES de este paso: despues de convertirse en numero los ceros ya no se pueden recuperar.",
     ] if modo == "powerbi" else []) + [
         "import re",
         "import numpy as np",
