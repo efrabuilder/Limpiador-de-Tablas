@@ -276,35 +276,36 @@ def _columnas_candidatas_texto(df, umbral_max_cardinalidad=0.5):
 # multi-formato + función de percentil (para IQR), inyectadas al inicio del
 # query cuando hacen falta.
 # =============================================================================
-_M_FUNCION_FECHA = '''  // Interpreta una fecha en texto sin importar cual de los 5 formatos use.
-  // Devuelve null si el texto no calza con ninguno o si la fecha no existe
-  // (ej. 31 de febrero).
+_M_FUNCION_FECHA = '''  // Interpreta una fecha en texto: aaaa-mm-dd (tambien con / o .), dd/mm/aaaa
+  // (tambien con - o .; si el mes no existe prueba mm/dd/aaaa), dd-mm-aa y
+  // "15 de enero de 2024" (meses en espanol o ingles). Ignora una hora al final.
+  // Devuelve null si el texto no calza o si la fecha no existe (ej. 31 de febrero).
   FechaDesdeTexto = (t as text) as nullable date =>
     let
-        limpio = Text.Trim(t),
-        MesesEN = {"January","February","March","April","May","June","July","August","September","October","November","December"},
-        porPuntos = try (
-            let p = Text.Split(limpio, ".") in
-            if List.Count(p) = 3 then #date(Number.From(p{0}), Number.From(p{1}), Number.From(p{2})) else error "na"
-        ) otherwise null,
-        conDe = if porPuntos <> null then porPuntos else try (
-            let p = Text.Split(limpio, " de ") in
-            if List.Count(p) = 3 and List.Contains(MesesEN, p{1}) then
-                #date(Number.From(p{2}), List.PositionOf(MesesEN, p{1}) + 1, Number.From(p{0}))
+        limpio = Text.Lower(Text.Trim(t)),
+        Meses = {"enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre",
+                 "january","february","march","april","may","june","july","august","september","october","november","december"},
+        conDe = try (
+            let p = Text.Split(Text.Replace(limpio, " del ", " de "), " de "),
+                mes = Text.Trim(p{1})
+            in
+            if List.Count(p) = 3 and List.Contains(Meses, mes) then
+                #date(Number.From(Text.Trim(Text.Split(Text.Trim(p{2}), " "){0})),
+                      Number.Mod(List.PositionOf(Meses, mes), 12) + 1,
+                      Number.From(Text.Trim(p{0})))
             else error "na"
         ) otherwise null,
-        porSlash = if conDe <> null then conDe else try (
-            let p = Text.Split(limpio, "/") in
-            if List.Count(p) = 3 then #date(Number.From(p{2}), Number.From(p{1}), Number.From(p{0})) else error "na"
-        ) otherwise null,
-        porGuion = if porSlash <> null then porSlash else try (
-            let p = Text.Split(limpio, "-") in
+        soloFecha = Text.Split(Text.Replace(Text.Replace(Text.Replace(limpio, "/", "-"), ".", "-"), "t", " "), " "){0},
+        porSeparador = if conDe <> null then conDe else try (
+            let p = Text.Split(soloFecha, "-") in
             if List.Count(p) <> 3 then error "na"
+            else if Text.Length(p{0}) = 4 then #date(Number.From(p{0}), Number.From(p{1}), Number.From(p{2}))
             else if Text.Length(p{2}) = 2 then #date(2000 + Number.From(p{2}), Number.From(p{1}), Number.From(p{0}))
-            else #date(Number.From(p{2}), Number.From(p{0}), Number.From(p{1}))
+            else try #date(Number.From(p{2}), Number.From(p{1}), Number.From(p{0}))
+                 otherwise #date(Number.From(p{2}), Number.From(p{0}), Number.From(p{1}))
         ) otherwise null
     in
-        porGuion,
+        porSeparador,
 '''
 
 _M_FUNCION_PERCENTIL = '''  // Percentil con interpolacion lineal (igual convencion que pandas .quantile()).
@@ -1350,7 +1351,7 @@ def generar_editor_m_puro(
             f"[{col}] = null or not Text.Contains([{col}], \"@\") "
             f"or Text.StartsWith([{col}], \"@\") or Text.EndsWith([{col}], \"@\") "
             f"or not Text.Contains(Text.AfterDelimiter([{col}], \"@\"), \".\") "
-            f"or Text.EndsWith([{col}], \".\")"
+            f"or Text.EndsWith([{col}], \".\") or Text.Contains([{col}], \"..\")"
         )
         if a_email == "valor_fijo":
             valor_fijo_email = _buscar_valor_fijo(valores_fijos, "email_invalido", col)
