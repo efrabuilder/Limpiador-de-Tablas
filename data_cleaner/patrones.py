@@ -496,7 +496,7 @@ def es_valor_estado_valido(valor, valores_validos: Optional[Iterable[str]] = Non
 # -----------------------------------------------------------------------------
 # Nivel 2: deteccion por CONTENIDO (respaldo cuando el nombre no dice nada)
 # -----------------------------------------------------------------------------
-_REGEX_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
+_REGEX_EMAIL = re.compile(r"^(?!.*\.\.)(?!\.)[^@\s]+(?<!\.)@[^@\s]+\.[^@\s]{2,}$")
 
 
 def _muestra(serie: pd.Series, n: int = 200) -> pd.Series:
