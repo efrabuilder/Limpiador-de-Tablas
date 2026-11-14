@@ -1053,6 +1053,28 @@ def _interpretar_valor_fijo(valor):
     return valor
 
 
+def _coma_es_decimal(textos):
+    decimal, miles = False, False
+    for t in textos:
+        if not isinstance(t, str):
+            continue
+        i_coma, i_punto = t.rfind(","), t.rfind(".")
+        if i_coma == -1:
+            continue
+        if i_punto != -1:
+            if i_coma > i_punto:
+                decimal = True
+            else:
+                miles = True
+            continue
+        partes = t.lstrip("-").split(",")
+        if len(partes) > 2:
+            miles = True
+        elif len(partes[1]) != 3 or partes[0] == "0":
+            decimal = True
+    return decimal and not miles
+
+
 def _a_numero(serie):
     directo = pd.to_numeric(serie, errors="coerce")
     if directo.notna().mean() >= 0.5:
@@ -1064,17 +1086,24 @@ def _a_numero(serie):
         v = re.sub(r"[^\\d,.\\-]", "", v.strip())
         if v in ("", "-"):
             return None
+        return v
+
+    def _resolver(v, coma_decimal):
+        if not isinstance(v, str):
+            return v
         i_coma, i_punto = v.rfind(","), v.rfind(".")
         if i_coma != -1 and i_punto != -1:
             v = v.replace(".", "").replace(",", ".") if i_coma > i_punto \\
                 else v.replace(",", "")
         elif i_coma != -1:
-            partes = v.split(",")
-            v = v.replace(",", "") if all(len(p) == 3 for p in partes[1:]) \\
-                else v.replace(",", ".")
+            partes = v.lstrip("-").split(",")
+            es_decimal = coma_decimal or partes[0] == "0" or not all(len(p) == 3 for p in partes[1:])
+            v = v.replace(",", ".") if es_decimal else v.replace(",", "")
         return v
 
-    return pd.to_numeric(serie.apply(_normalizar), errors="coerce")
+    limpia = serie.apply(_normalizar)
+    coma_decimal = _coma_es_decimal(limpia.dropna().unique())
+    return pd.to_numeric(limpia.apply(lambda v: _resolver(v, coma_decimal)), errors="coerce")
 
 
 def _es_columna_numerica(serie, serie_num):
