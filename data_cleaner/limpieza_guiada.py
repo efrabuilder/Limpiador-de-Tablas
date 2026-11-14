@@ -128,10 +128,37 @@ def es_nulo(serie, tokens=TOKENS_NULOS_BASE):
     return (serie.isna() | texto.isin(list(tokens))).fillna(False).astype(bool)
 
 
+def coma_es_decimal(textos):
+    """True si en esta columna la coma es el decimal ('0,303', '3,8608') y no el separador de miles.
+    Recibe los textos ya sin moneda ni espacios. Una coma sola con 3 digitos ('4,957') es ambigua, asi que
+    decide la evidencia de toda la columna: un '0,303', una coma con otra cantidad de digitos o un
+    '1.234,56' prueban que es decimal; un '1,234,567' o un '1,234.56' prueban que son miles."""
+    decimal, miles = False, False  # evidencia encontrada
+    for t in textos:
+        if not isinstance(t, str):
+            continue  # numeros y nulos no dicen nada
+        i_coma, i_punto = t.rfind(","), t.rfind(".")
+        if i_coma == -1:
+            continue  # sin coma no hay evidencia
+        if i_punto != -1:  # trae los dos: el ultimo es el decimal
+            if i_coma > i_punto:
+                decimal = True
+            else:
+                miles = True
+            continue
+        partes = t.lstrip("-").split(",")
+        if len(partes) > 2:  # varias comas: 1,234,567
+            miles = True
+        elif len(partes[1]) != 3 or partes[0] == "0":  # 3,8608 o 0,303
+            decimal = True
+    return decimal and not miles
+
+
 def a_numero(serie):
     """Convierte a numero tolerando simbolos de moneda y separadores:
-    '1,234.56' -> 1234.56, '1.234,56' -> 1234.56, '7,5' -> 7.5.
-    Lo que trae letras (como un codigo 'P10') o no se puede leer queda como NaN."""
+    '1,234.56' -> 1234.56, '1.234,56' -> 1234.56, '7,5' -> 7.5, '0,303' -> 0.303.
+    Una coma sola con 3 digitos ('7,650') se lee como miles salvo que la columna use coma decimal
+    (ver coma_es_decimal). Lo que trae letras (como un codigo 'P10') o no se puede leer queda como NaN."""
     if pd.api.types.is_datetime64_any_dtype(serie):  # una fecha no es un numero
         return pd.Series(float("nan"), index=serie.index, dtype="float64")
 
@@ -141,28 +168,35 @@ def a_numero(serie):
         v = re.sub(r"[\s$€£₡¥]|crc|usd|eur", "", v.strip(), flags=re.I)  # fuera moneda y espacios
         if not re.fullmatch(r"-?[\d.,]+", v):  # con letras ('P10') no es un numero
             return None
+        return v
+
+    def convertir(v, coma_decimal):
+        if not isinstance(v, str):
+            return v
         i_coma, i_punto = v.rfind(","), v.rfind(".")
         if i_coma != -1 and i_punto != -1:  # trae los dos: el ultimo es el decimal
             if i_coma > i_punto:
                 v = v.replace(".", "").replace(",", ".")
             else:
                 v = v.replace(",", "")
-        elif i_coma != -1:  # solo coma: miles si son grupos de 3 digitos
-            partes = v.split(",")
-            if all(len(p) == 3 for p in partes[1:]):
-                v = v.replace(",", "")
+        elif i_coma != -1:  # solo coma
+            partes = v.lstrip("-").split(",")
+            if coma_decimal or partes[0] == "0" or not all(len(p) == 3 for p in partes[1:]):
+                v = v.replace(",", ".")  # decimal
             else:
-                v = v.replace(",", ".")
+                v = v.replace(",", "")  # miles
         return v
 
     # Se limpia cada valor DISTINTO una sola vez (una columna de 200 mil filas suele tener pocos valores
     # distintos) y el resultado se reparte por fila; el dtype final es el mismo de pd.to_numeric(serie.map(...)).
     if len(serie) == 0:
-        return pd.to_numeric(serie.map(limpiar), errors="coerce")
+        return pd.to_numeric(serie.map(lambda v: convertir(limpiar(v), False)), errors="coerce")
     codigos, unicos = pd.factorize(serie)
     if len(unicos) == 0:  # todo nulo
         return pd.Series(float("nan"), index=serie.index, dtype="float64", name=serie.name)
-    convertidos = pd.to_numeric(pd.Series([limpiar(u) for u in unicos], dtype=object), errors="coerce").to_numpy()
+    limpios = [limpiar(u) for u in unicos]  # textos sin moneda
+    coma_decimal = coma_es_decimal(limpios)  # la columna usa coma decimal?
+    convertidos = pd.to_numeric(pd.Series([convertir(t, coma_decimal) for t in limpios], dtype=object), errors="coerce").to_numpy()
     sin_dato = codigos < 0
     valores = convertidos[np.where(sin_dato, 0, codigos)]
     if sin_dato.any():
@@ -515,7 +549,7 @@ def aplicar_filtros(df, filtros):
 
 
 # Orden en que se copian al script generado (cada una puede usar las anteriores).
-_FUNCIONES_SCRIPT = (es_nulo, a_numero, parsear_coordenada, nombres_snake,
+_FUNCIONES_SCRIPT = (es_nulo, coma_es_decimal, a_numero, parsear_coordenada, nombres_snake,
                      limpiar_texto, unificar_fechas, a_fecha, extraer_mes_anio, decimales_de, aplicar_regla,
                      rellenar_restantes, aplicar_limites, aplicar_formulas, aplicar_filtros)
 
@@ -888,8 +922,12 @@ def paso_numericas(df: pd.DataFrame, columnas: List[str],
                    tokens=TOKENS_NULOS_BASE) -> Tuple[pd.DataFrame, Paso]:
     df = df.copy()
     lineas = []
+    con_coma_decimal = []  # columnas donde la coma es el decimal (el M las necesita saber)
     for col in columnas:
         antes = int((~es_nulo(df[col], tokens)).sum())  # celdas con dato real
+        if df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
+            if coma_es_decimal(df[col].dropna().astype(str).str.replace(r"[\s$€£₡¥]|crc|usd|eur", "", regex=True, case=False).unique()):
+                con_coma_decimal.append(col)
         convertida = a_numero(df[col])
         despues = int(convertida.notna().sum())
         perdidos = antes - despues
@@ -900,7 +938,7 @@ def paso_numericas(df: pd.DataFrame, columnas: List[str],
               f"for col in COLUMNAS_NUMERICAS:\n"
               f"    df[col] = a_numero(df[col])")
     return df, Paso("Convertir columnas numéricas", "\n".join(lineas), codigo,
-                    m={"tipo": "numericas", "columnas": list(columnas)})
+                    m={"tipo": "numericas", "columnas": list(columnas), "coma_decimal": con_coma_decimal})
 
 
 MIN_VALORES_REFERENCIA = 10  # con menos valores buenos la mediana no es confiable
