@@ -67,6 +67,7 @@ from data_cleaner.patrones import (
     columnas_identificador_serie_por_contenido as _columnas_identificador_serie_por_contenido,
     techo_probable_conteo_acotado as _techo_probable_conteo_acotado,
     a_numero_tolerante as _a_numero_tolerante,
+    _coma_es_decimal,
     PATRONES_EMAIL as _PATRONES_EMAIL,
     PATRONES_TELEFONO as _PATRONES_TELEFONO,
     PATRONES_FECHA as _PATRONES_FECHA,
@@ -308,6 +309,36 @@ _M_FUNCION_FECHA = '''  // Interpreta una fecha en texto: aaaa-mm-dd (tambien co
         ) otherwise null
     in
         porSeparador,
+'''
+
+_M_FUNCION_NUMERO = '''  // Convierte un valor a numero SIN depender de la configuracion regional de
+  // Power BI. Si ya es numero lo deja igual (asi 0.303 sigue siendo 0.303); si es
+  // texto acepta moneda y separadores: "1,234.56" y "1.234,56" -> 1234.56, "7,5" -> 7.5,
+  // "7,650" -> 7650 y "0.303" -> 0.303 (un punto solo es SIEMPRE decimal).
+  // Una coma sola con 3 digitos ("4,957") es ambigua: comaDecimal = true (se decide al generar el
+  // codigo mirando toda la columna) la lee como decimal; "0,303" es siempre decimal.
+  // Si trae letras (ej. "P10") o no se puede leer devuelve null.
+  NumeroDesdeValor = (v as any, optional comaDecimal as nullable logical) as nullable number =>
+    if v = null then null
+    else if v is number then v
+    else if not (v is text) then null
+    else
+      let
+        t1 = Text.Remove(Text.Trim(v), {"$", "€", "£", "₡", "¥", " ", "#(tab)", "#(lf)", "#(cr)", "#(00A0)"}),
+        t2 = Text.Replace(Text.Replace(Text.Replace(Text.Lower(t1), "crc", ""), "usd", ""), "eur", ""),
+        cuerpo = if Text.StartsWith(t2, "-") then Text.Middle(t2, 1) else t2,
+        valido = cuerpo <> "" and Text.Select(cuerpo, {"0".."9", ".", ","}) = cuerpo,
+        iComa = Text.PositionOf(t2, ",", Occurrence.Last),
+        iPunto = Text.PositionOf(t2, ".", Occurrence.Last),
+        partes = Text.Split(t2, ","),
+        r =
+          if iComa >= 0 and iPunto >= 0 then
+            (if iComa > iPunto then Text.Replace(Text.Replace(t2, ".", ""), ",", ".") else Text.Replace(t2, ",", ""))
+          else if iComa >= 0 then
+            (if comaDecimal <> true and partes{0} <> "0" and partes{0} <> "-0" and List.AllTrue(List.Transform(List.Skip(partes, 1), each Text.Length(_) = 3)) then Text.Replace(t2, ",", "") else Text.Replace(t2, ",", "."))
+          else t2
+      in
+        if valido then (try Number.FromText(r, "en-US") otherwise null) else null,
 '''
 
 _M_FUNCION_PERCENTIL = '''  // Percentil con interpolacion lineal (igual convencion que pandas .quantile()).
@@ -796,6 +827,7 @@ def generar_editor_m_puro(
     cb = _ConstructorM(nombre_paso_anterior)
     necesita_fecha_fn = bool(cols_fecha)
     necesita_percentil_fn = (a_atipico in {"limitar"})
+    necesita_numero_fn = False
     necesita_correccion_digitos_fn = bool(cols_tel) and a_tel == "editar_individualmente"
     necesita_recortar_fn = False
 
@@ -1082,7 +1114,8 @@ def generar_editor_m_puro(
             continue
         cb.agregar(f"NumConvertido_{re.sub(r'[^A-Za-z0-9]', '', col)}",
                    "Table.TransformColumns({prev}, {{" + _m_str(col) +
-                   f", each try Number.FromText(Text.Select(Text.From(_), {{\"0\"..\"9\",\".\",\"-\"}})) otherwise null, type number}}}})")
+                   ", each NumeroDesdeValor(_" + (", true" if _coma_es_decimal(df[col].dropna().astype(str).str.replace(r"[\s$€£₡¥]|crc|usd|eur", "", regex=True, case=False).unique()) else "") + "), type number}})")
+        necesita_numero_fn = True
         if a_faltante != "marcar_solo" or a_tipo_invalido != "marcar_solo":
             pass  # el relleno de nulos ocurre mas abajo, comun a ambas reglas
         nombre_col_id = re.sub(r'[^A-Za-z0-9]', '', col)
@@ -1466,6 +1499,8 @@ def generar_editor_m_puro(
         funciones_extra += _M_FUNCION_CAPITALIZAR + "\n"
     if necesita_fecha_fn:
         funciones_extra += _M_FUNCION_FECHA + "\n"
+    if necesita_numero_fn:
+        funciones_extra += _M_FUNCION_NUMERO + "\n"
     if necesita_percentil_fn:
         funciones_extra += _M_FUNCION_PERCENTIL + "\n"
     if necesita_correccion_digitos_fn:
