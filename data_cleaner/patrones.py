@@ -42,6 +42,32 @@ from typing import Iterable, List, Optional, Tuple
 import pandas as pd
 
 
+def _coma_es_decimal(textos) -> bool:
+    """True si en la columna la coma es el decimal ("0,303", "3,8608") y no el separador de miles.
+    Una coma sola con 3 digitos ("4,957") es ambigua: decide la evidencia de toda la columna. Prueban
+    coma decimal un "0,303", una coma con otra cantidad de digitos o un "1.234,56"; prueban miles un
+    "1,234,567" o un "1,234.56". (Misma regla que coma_es_decimal de limpieza_guiada.)"""
+    decimal, miles = False, False
+    for t in textos:
+        if not isinstance(t, str):
+            continue
+        i_coma, i_punto = t.rfind(","), t.rfind(".")
+        if i_coma == -1:
+            continue
+        if i_punto != -1:
+            if i_coma > i_punto:
+                decimal = True
+            else:
+                miles = True
+            continue
+        partes = t.lstrip("-").split(",")
+        if len(partes) > 2:
+            miles = True
+        elif len(partes[1]) != 3 or partes[0] == "0":
+            decimal = True
+    return decimal and not miles
+
+
 def a_numero_tolerante(serie: pd.Series) -> pd.Series:
     """Convierte una serie a numerico, tolerando formato de moneda/miles
     (ej. "₡7,650", "$1,234.56", "1.234,56") ademas de numeros ya limpios.
@@ -91,6 +117,11 @@ def a_numero_tolerante(serie: pd.Series) -> pd.Series:
         v = re.sub(r"[^\d,.\-]", "", sin_moneda)
         if v in ("", "-"):
             return None
+        return v
+
+    def _resolver(v, coma_decimal):
+        if not isinstance(v, str):
+            return v
         i_coma, i_punto = v.rfind(","), v.rfind(".")
         if i_coma != -1 and i_punto != -1:
             # Trae ambos separadores: el ultimo es el decimal, el otro es
@@ -98,14 +129,16 @@ def a_numero_tolerante(serie: pd.Series) -> pd.Series:
             v = v.replace(".", "").replace(",", ".") if i_coma > i_punto \
                 else v.replace(",", "")
         elif i_coma != -1:
-            # Solo coma: de miles si quedan grupos exactos de 3 digitos
-            # despues de cada una (ej. "7,650"), si no es el decimal.
-            partes = v.split(",")
-            v = v.replace(",", "") if all(len(p) == 3 for p in partes[1:]) \
-                else v.replace(",", ".")
+            # Solo coma: decimal si la columna usa coma decimal, si es "0,xxx" o si no
+            # son grupos exactos de 3 digitos; miles en el resto (ej. "7,650").
+            partes = v.lstrip("-").split(",")
+            es_decimal = coma_decimal or partes[0] == "0" or not all(len(p) == 3 for p in partes[1:])
+            v = v.replace(",", ".") if es_decimal else v.replace(",", "")
         return v
 
-    normalizada = serie.apply(_normalizar)
+    limpia = serie.apply(_normalizar)  # texto sin moneda, separadores aun sin resolver
+    coma_decimal = _coma_es_decimal(limpia.dropna().unique())
+    normalizada = limpia.apply(lambda v: _resolver(v, coma_decimal))
     if pd.api.types.is_datetime64_any_dtype(normalizada):
         # .apply() re-infirio el tipo como fecha (ver nota arriba) -- no
         # hay nada numerico real que rescatar aqui.
