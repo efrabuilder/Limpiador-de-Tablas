@@ -101,7 +101,7 @@ _M_FUNCIONES: Dict[str, Tuple[Tuple[str, ...], str]] = {
                 d = if espacios then Text.Combine(List.Select(Text.SplitAny(c, " #(tab)#(lf)#(cr)"), each _ <> ""), " ") else c
             in
                 d,'''),
-    "fnANumero": ((), '''    fnANumero = (v as any) as nullable number =>
+    "fnANumero": ((), '''    fnANumero = (v as any, optional comaDecimal as nullable logical) as nullable number =>
         if v = null then null
         else if v is number then v
         else if not (v is text) then null
@@ -118,7 +118,7 @@ _M_FUNCIONES: Dict[str, Tuple[Tuple[str, ...], str]] = {
                     if iComa >= 0 and iPunto >= 0 then
                         (if iComa > iPunto then Text.Replace(Text.Replace(t2, ".", ""), ",", ".") else Text.Replace(t2, ",", ""))
                     else if iComa >= 0 then
-                        (if List.AllTrue(List.Transform(List.Skip(partes, 1), each Text.Length(_) = 3)) then Text.Replace(t2, ",", "") else Text.Replace(t2, ",", "."))
+                        (if comaDecimal <> true and partes{0} <> "0" and partes{0} <> "-0" and List.AllTrue(List.Transform(List.Skip(partes, 1), each Text.Length(_) = 3)) then Text.Replace(t2, ",", "") else Text.Replace(t2, ",", "."))
                     else t2
             in
                 if valido then (try Number.FromText(r, "en-US") otherwise null) else null,'''),
@@ -266,7 +266,9 @@ def _m_texto(cb: _ConstructorM, titulo: str, m: Dict) -> None:
 
 
 def _m_numericas(cb: _ConstructorM, titulo: str, m: Dict) -> None:
-    cols = ", ".join("{" + _m_txt(c) + ", each fnANumero(_), type nullable number}" for c in m["columnas"])
+    con_coma = set(m.get("coma_decimal", []))  # columnas donde la coma es el decimal (ej. "0,303")
+    cols = ", ".join("{" + _m_txt(c) + (", each fnANumero(_, true)" if c in con_coma else ", each fnANumero(_)")
+                     + ", type nullable number}" for c in m["columnas"])
     if cols:
         cb.agregar(titulo, f"Table.TransformColumns({{prev}}, {{{cols}}})")
 
