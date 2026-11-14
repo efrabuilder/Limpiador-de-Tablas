@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .limpieza_guiada import a_numero
+from .limpieza_guiada import a_numero, coma_es_decimal
 from .patrones import normalizar_nombre
 
 MODOS_LLAVE = {
@@ -113,7 +113,7 @@ def colapsar_por_llave(df, claves, agregaciones):
     return df.groupby(list(claves), as_index=False, dropna=True, sort=False).agg(agregaciones)
 
 
-_FUNCIONES_SCRIPT = (a_numero, normalizar_llave, colapsar_por_llave)
+_FUNCIONES_SCRIPT = (coma_es_decimal, a_numero, normalizar_llave, colapsar_por_llave)
 
 
 # =============================================================================
