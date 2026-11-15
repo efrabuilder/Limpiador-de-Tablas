@@ -838,6 +838,10 @@ def limpieza_guiada_cmd(
     filtro: List[str] = typer.Option(
         [], "--filtro", help="Solo se quedan las filas que cumplen TODOS los filtros, ej. ventas>1000 "
                              "(operadores > >= < <= == !=). Elimina el resto, también las sin dato. Repetible."),
+    derivada: List[str] = typer.Option(
+        [], "--derivada", help="Columna nueva calculada de las originales: nombre=expresión con las columnas entre "
+                               "corchetes, ej. ganancia=[precio_total]-[costo_total] (usa + - * / **, paréntesis y "
+                               "abs, round, sqrt, log). Repetible."),
     formato_diccionario: str = typer.Option(
         "xlsx", "--formato-diccionario",
         help="Formato del diccionario técnico: xlsx, csv o ambos (el documento de alcance enlaza al CSV si hay dos)."),
@@ -869,7 +873,8 @@ def limpieza_guiada_cmd(
             formato_fecha=formato_fecha, dia_primero=dia_primero,
             eliminar_duplicados=eliminar_duplicados, corregir_imposibles=corregir_imposibles,
             atipicos_iqr=_lista_o_none(atipicos_iqr), factor_iqr=factor_iqr, accion_atipicos=accion_atipicos,
-            filtros=filtro, corregir_formulas=corregir_formulas, accion_formulas=accion_formulas)
+            filtros=filtro, corregir_formulas=corregir_formulas, accion_formulas=accion_formulas,
+            derivadas=derivada or None)
         auditoria = FG.ejecutar_auditoria_previa(df, _lista_o_none(tokens_extra))
         console.print("\n[bold]Auditoría inicial (checklist, antes de limpiar)[/bold]")
         console.print(AP.checklist_a_texto(auditoria))
