@@ -374,6 +374,14 @@ class VentanaLimpiezaGuiada(_VentanaBase):
         ttk.Label(marco, text="El filtro ELIMINA las filas que no lo cumplen (también las sin dato en esa columna).",
                   foreground="gray").grid(row=fila, column=0, columnspan=4, sticky="w")
         fila += 1
+        self.var_derivadas = tk.StringVar()
+        ttk.Label(marco, text="Columnas derivadas (separadas por ;)").grid(row=fila, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(marco, textvariable=self.var_derivadas, width=70).grid(row=fila, column=1, columnspan=3, sticky="we", pady=(6, 0))
+        fila += 1
+        ttk.Label(marco, text="Ej.: ganancia=[precio_total]-[costo_total]; margen=round([ganancia]/[precio_total],2). "
+                              "Usa + - * / **, paréntesis y abs, round, sqrt, log.",
+                  foreground="gray").grid(row=fila, column=0, columnspan=4, sticky="w")
+        fila += 1
 
         ttk.Label(marco, text="Vienen sugeridas según el contenido de cada columna; déjelas vacías para no aplicar el paso.",
                   foreground="gray").grid(row=fila, column=0, columnspan=4, sticky="w", pady=(8, 0))
@@ -472,7 +480,8 @@ class VentanaLimpiezaGuiada(_VentanaBase):
             eliminar_duplicados=self.var_duplicados.get(), corregir_imposibles=self.var_imposibles.get(),
             atipicos_iqr=_lista(self.var_cols_iqr.get()) or None, accion_atipicos=self.var_accion.get(),
             filtros=_lista(self.var_filtros.get()) or None,
-            corregir_formulas=self.var_formulas.get(), accion_formulas=self.var_accion_formulas.get())
+            corregir_formulas=self.var_formulas.get(), accion_formulas=self.var_accion_formulas.get(),
+            derivadas=[t.strip() for t in self.var_derivadas.get().split(";") if t.strip()] or None)
 
     def _diagnosticar(self) -> None:
         df = self._exigir_tabla()
