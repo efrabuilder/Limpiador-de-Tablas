@@ -25,8 +25,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from .descripciones import _ENTIDADES, _ID, _con_tildes, normalizar_nombre
+from .descripciones import (_ENTIDADES, _ID, _MOD_META, _MOD_REAL, _RELLENO_MEDIDA, _TRAD_MEDIDA, _con_tildes,
+                            _contraparte, _tokens_nombre, _traducir_tokens, normalizar_nombre)
 from .limpieza_guiada import ROLES, TOKENS_NULOS_BASE, a_numero, es_nulo
+from .relaciones import detectar_relaciones
 
 # --------------------------------------------------------------------------
 # Nombres de columnas y valores permitidos
@@ -213,6 +215,9 @@ _CONCEPTO_GEO = next(c for c in _CONCEPTOS if c.clave == "geografia")
 _CONCEPTO_PROCESO = next(c for c in _CONCEPTOS if c.clave == "proceso")
 
 _MARCAS_CONTEO = {"n", "num", "nro", "numero", "conteo", "count", "cantidad", "qty", "quantity", "number"}
+_PALABRAS_UNITARIAS = frozenset({"unit", "unitario", "unitaria", "unidad", "unid"})
+_ID_EN_NOMBRE = {"id", "ids", "uuid", "guid", "pk", "fk", "idx"}
+_ID_AL_FINAL = {"codigo", "cod", "clave", "key", "folio"}
 _PALABRAS_VALOR_UNITARIO = {"precio", "price", "tarifa", "fare", "unitario", "unit", "unidad", "promedio",
                             "average", "avg", "medio"}
 
@@ -246,6 +251,10 @@ def concepto_de(nombre, vecinas: Optional[set] = None) -> Optional[_Concepto]:
     if tokens == ["estado"] or tokens == ["state"]:
         return _CONCEPTO_GEO if vecinas & _CONCEPTO_GEO.palabras else _CONCEPTO_PROCESO
     formas = [_formas(t) for t in tokens]
+    if len(tokens) >= 2 and any(f & _PALABRAS_UNITARIAS for f in formas):  # «precio_unit», «costo_unitario»
+        dinero = next(c for c in _CONCEPTOS if c.clave == "dinero")
+        if any(f & (dinero.palabras - _PALABRAS_UNITARIAS) for f in formas):
+            return dinero  # «unit» pesa como unidad de medida, pero aqui califica a una cifra de dinero
     if len(tokens) >= 2 and any(t in _MARCAS_CONTEO for t in tokens):  # «num_visitas_12m», «cantidad_total»
         return next(c for c in _CONCEPTOS if c.clave == "cantidad")
     for concepto in _CONCEPTOS:
@@ -257,6 +266,43 @@ def concepto_de(nombre, vecinas: Optional[set] = None) -> Optional[_Concepto]:
             if any(len(p) >= 5 and p in pegado for p in concepto.palabras):
                 return concepto
     return None
+
+
+def _nombre_es_identificador(nombre) -> bool:
+    """«IdVenta», «id_cliente», «cliente_id», «codigo»: el nombre dice que es un identificador, aunque
+    otra palabra («venta») sugiera dinero."""
+    tokens = _tokens(nombre)
+    return bool(tokens) and (bool(set(tokens) & _ID_EN_NOMBRE) or (len(tokens) >= 1 and tokens[-1] in _ID_AL_FINAL))
+
+
+def _concepto_por_relacion(relacion: Dict, conceptos: Dict[str, Optional[_Concepto]], proporcion: bool,
+                           propio: Optional[_Concepto]) -> Optional[_Concepto]:
+    """Una columna calculada hereda el concepto de las que la forman: ganancia = ingreso - costo es dinero,
+    margen = ganancia / ingreso es una tasa, precio unitario = total / cantidad es dinero."""
+    if relacion["op"] == "cociente" and proporcion:
+        return next(c for c in _CONCEPTOS if c.clave == "tasa")
+    partes = [conceptos.get(relacion["a"]), conceptos.get(relacion["b"])]
+    dinero = next((c for c in partes if c is not None and c.clave == "dinero"), None)
+    return dinero or propio
+
+
+def _justificar_meta_real(nombre: str, nombres: Sequence[str]) -> str:
+    """Primera frase de la justificacion de una medida «real» o «meta» (ventas_real / meta_ventas): para que
+    sirve frente a su pareja. Vacio si el nombre no lleva esa marca."""
+    tokens = _tokens_nombre(nombre)
+    noun = [t for t in tokens if t not in _MOD_META | _MOD_REAL and t not in _RELLENO_MEDIDA]
+    if not noun or len(tokens) < 2:
+        return ""
+    sustantivo = _con_tildes(_traducir_tokens([_TRAD_MEDIDA.get(t, t) for t in noun]))
+    if _MOD_META & set(tokens) and "plan" not in tokens:
+        par = _contraparte(tokens, noun, _MOD_REAL, list(nombres))
+        return (f"Es la meta de {sustantivo}: el objetivo contra el que se mide el desempeño"
+                + (f"; junto con «{par}» permite calcular el % de cumplimiento (real ÷ meta)" if par else ""))
+    if _MOD_REAL & set(tokens) and not {"actual", "actuales", "actuals"} & set(tokens):
+        par = _contraparte(tokens, noun, _MOD_META, list(nombres))
+        return (f"Es lo que realmente se logró en {sustantivo}: el resultado que se compara con la meta"
+                + (f" «{par}» para medir el cumplimiento (real ÷ meta)" if par else ""))
+    return ""
 
 
 def _semantica_fecha(tokens: Sequence[str]) -> str:
@@ -748,6 +794,11 @@ def completar_campos_negocio(diccionario: pd.DataFrame, df: pd.DataFrame, nombre
     total = len(resultado)
     nombres = [str(c) for c in resultado["Campo"]]
     vecinas = {t for c in nombres for t in _tokens(c)}
+    try:  # columnas calculadas a partir de otras (ver relaciones.py)
+        relaciones = detectar_relaciones(df)
+    except Exception:  # noqa: BLE001 - una lectura mejor nunca debe romper el diccionario
+        relaciones = {}
+    conceptos_base = {c: concepto_de(c, vecinas) for c in nombres}
     llaves_set = {str(c) for c in llaves} if llaves is not None else None
     mapa_cruces: Dict[str, Dict] = {}
     for c in cruces or []:
@@ -767,7 +818,10 @@ def completar_campos_negocio(diccionario: pd.DataFrame, df: pd.DataFrame, nombre
             tipo = "Decimal"  # casi todo es número: unos pocos textos sueltos no la vuelven texto
         p = _perfil(serie, tipo, tokens) if serie is not None else {
             "n": 0, "validos": 0, "nulos": 0, "completitud": 1.0, "unicos": 0, "unicidad": 0.0, "top": []}
-        concepto = concepto_de(campo, vecinas)
+        concepto = conceptos_base.get(str(campo)) or concepto_de(campo, vecinas)
+        if str(campo) in relaciones:
+            proporcion = (p.get("maximo") is not None and p["maximo"] <= 1 and p["minimo"] >= -1)
+            concepto = _concepto_por_relacion(relaciones[str(campo)], conceptos_base, bool(proporcion), concepto)
         clasif_previa = str(fila.get(COLUMNA_CLASIFICACION, "") or "").strip()
         if clasif_previa:
             es_llave = clasif_previa == CLASIFICACION_LLAVE
@@ -775,6 +829,8 @@ def completar_campos_negocio(diccionario: pd.DataFrame, df: pd.DataFrame, nombre
             es_llave = str(campo) in llaves_set or str(campo) in mapa_cruces
         else:
             es_llave = rol == "id"
+        if not es_llave and not clasif_previa and _nombre_es_identificador(campo) and rol != "email":
+            es_llave = True  # «IdVenta» es un identificador aunque «venta» suene a dinero
         kind = _tipo_campo(campo, rol, tipo, p, es_llave, concepto)
         clasif = clasif_previa or _clasificar(campo, kind, concepto, tratamiento, p)
         if clasif_previa and kind == "llave" and clasif_previa != CLASIFICACION_LLAVE:
@@ -814,7 +870,12 @@ def completar_campos_negocio(diccionario: pd.DataFrame, df: pd.DataFrame, nombre
                 nombre, info["posicion"], total, info["kind"], info["tratamiento"], nombre_tabla, fuentes,
                 str(origenes.get(nombre, "") or ""), mapa_cruces.get(nombre), cruces or ())
         if vacias[COLUMNA_JUSTIFICACION].loc[idx]:
-            resultado.at[idx, COLUMNA_JUSTIFICACION] = _justificar(info, ctx)
+            texto = _justificar(info, ctx)
+            if info["kind"] in ("medida", "indicador"):
+                primera = _justificar_meta_real(nombre, nombres)
+                if primera:  # cambia solo la primera frase: el resto (rango, atípicos, ejes) sigue valiendo
+                    texto = primera + ". " + texto.partition(". ")[2] if ". " in texto else primera + "."
+            resultado.at[idx, COLUMNA_JUSTIFICACION] = texto
         if vacias[COLUMNA_MODELO].loc[idx]:
             resultado.at[idx, COLUMNA_MODELO] = _modelo(info, ctx)
     return resultado
