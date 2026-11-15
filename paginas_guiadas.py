@@ -749,6 +749,23 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
         st.warning("El filtro **elimina** las filas que no lo cumplen, también las que no tienen dato en esa columna. "
                    "Se aplica primero, sobre los valores reales, antes de corregir duplicados e imposibles.")
 
+    st.markdown("**Columnas derivadas (opcional)**")
+    st.caption("Agrega columnas nuevas calculadas a partir de las originales; las originales no se tocan. "
+               + LG.AYUDA_DERIVADAS)
+    derivadas_editadas = st.data_editor(
+        pd.DataFrame({"nombre": pd.Series(dtype="object"), "expresion": pd.Series(dtype="object")}),
+        num_rows="dynamic", hide_index=True, key=f"lg_derivadas_{sufijo}", column_config={
+            "nombre": st.column_config.TextColumn("Nombre de la columna nueva", required=True),
+            "expresion": st.column_config.TextColumn("Expresión (columnas entre corchetes)", required=True)})
+    derivadas = [{"nombre": str(f["nombre"]).strip(), "expresion": str(f["expresion"]).strip()}
+                 for _, f in derivadas_editadas.dropna().iterrows()
+                 if str(f["nombre"]).strip() and str(f["expresion"]).strip()]
+    with st.expander("Columnas disponibles para las expresiones"):
+        st.write(", ".join(f"[{c}]" for c in df_ren.columns))
+    if derivadas:
+        st.info("Se calculan al final de la estandarización, con los valores ya limpios. Donde falte un dato o se "
+                "divida entre cero la celda queda vacía. Quedan escritas en el script y en el código M.")
+
     config = {
         "tokens": tokens, "nombres_snake": snake, "vacios_a_nan": vacios,
         "texto": {"columnas": cols_texto, "minusculas": minus, "espacios": espacios,
@@ -763,6 +780,7 @@ def pagina_limpieza_guiada(al_enviar_a_clasica=None) -> None:
                      "accion": accion_atipicos} if (imposibles or cols_iqr) else None,
         "filtros": filtros,
         "formulas": {"accion": accion_formulas} if corregir_formulas else None,
+        "derivadas": derivadas,
     }
     try:
         df_pre, pasos_globales = _globales_cacheado(df, firma_df, config)
