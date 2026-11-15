@@ -152,7 +152,8 @@ def configurar_limpieza_guiada(
         eliminar_duplicados: bool = False, corregir_imposibles: bool = False,
         atipicos_iqr: Optional[Sequence[str]] = None, factor_iqr: float = 1.5,
         accion_atipicos: str = "nulo", filtros: Optional[Sequence[str]] = None,
-        corregir_formulas: bool = False, accion_formulas: str = "marcar") -> Dict:
+        corregir_formulas: bool = False, accion_formulas: str = "marcar",
+        derivadas: Optional[Sequence[str]] = None) -> Dict:
     """Arma el `config` de pasos globales con las mismas sugerencias de la app web.
 
     None = elegir automaticamente (columnas de texto, numericas, fechas y
@@ -178,6 +179,10 @@ def configurar_limpieza_guiada(
       «<total>_revisar», no cambia datos), recalcular o eliminar_fila.
     - filtros: ['ventas>1000', 'ciudad==Heredia']: solo se quedan las filas que cumplen TODOS (como
       df[df['ventas'] > 1000]; tambien se van las que no tienen dato en esa columna).
+    - derivadas: ['ganancia = [precio_total] - [costo_total]', 'margen = [ganancia] / [precio_total]']: columnas
+      nuevas calculadas a partir de las originales (columnas entre corchetes, + - * / **, parentesis y las
+      funciones abs, round, sqrt y log). Se agregan al final de los pasos globales, con los valores ya
+      estandarizados; quedan vacias donde falte un dato o se divida entre cero. Las originales no se tocan.
     """
     if "%" not in formato_fecha:
         raise ValueError(f"formato_fecha invalido: '{formato_fecha}' (ej. %Y-%m-%d)")
@@ -217,7 +222,8 @@ def configurar_limpieza_guiada(
         longitud = traducir([longitud], "longitud")[0]
 
     correcciones = _claves_de_correccion(traducir, eliminar_duplicados, corregir_imposibles, atipicos_iqr,
-                                         factor_iqr, accion_atipicos, filtros, corregir_formulas, accion_formulas)
+                                         factor_iqr, accion_atipicos, filtros, corregir_formulas, accion_formulas,
+                                         derivadas, df_ren)
 
     texto = {"columnas": cols_texto, "minusculas": minusculas, "espacios": espacios,
              "comillas": comillas} if estandarizar_texto else None
@@ -235,8 +241,10 @@ def configurar_limpieza_guiada(
 def _claves_de_correccion(traducir, eliminar_duplicados: bool, corregir_imposibles: bool,
                           atipicos_iqr: Optional[Sequence[str]], factor_iqr: float, accion_atipicos: str,
                           filtros: Optional[Sequence[str]], corregir_formulas: bool = False,
-                          accion_formulas: str = "marcar") -> Dict:
-    """Las claves del config de duplicados, valores imposibles/atipicos y filtros (ver configurar_limpieza_guiada)."""
+                          accion_formulas: str = "marcar", derivadas: Optional[Sequence] = None,
+                          df_ren: Optional[pd.DataFrame] = None) -> Dict:
+    """Las claves del config de duplicados, valores imposibles/atipicos, filtros y columnas derivadas
+    (ver configurar_limpieza_guiada)."""
     if accion_atipicos not in LG.ACCIONES_ATIPICOS:
         raise ValueError(f"accion_atipicos invalida: '{accion_atipicos}' (use {', '.join(LG.ACCIONES_ATIPICOS)})")
     if accion_formulas not in LG.ACCIONES_FORMULAS:
@@ -248,22 +256,26 @@ def _claves_de_correccion(traducir, eliminar_duplicados: bool, corregir_imposibl
     for texto_filtro in filtros or []:
         columna, operador, valor = LG.parsear_filtro(texto_filtro)
         lista_filtros.append((traducir([columna], "columna del filtro")[0], operador, valor))
+    lista_derivadas = [LG.parsear_derivada(t) if isinstance(t, str) else dict(t) for t in derivadas or []]
+    if lista_derivadas and df_ren is not None:
+        LG.paso_derivadas(df_ren, lista_derivadas)  # valida columnas y expresiones antes de limpiar nada
     return {"duplicados": eliminar_duplicados, "atipicos": atipicos, "filtros": lista_filtros,
-            "formulas": {"accion": accion_formulas} if corregir_formulas else None}
+            "formulas": {"accion": accion_formulas} if corregir_formulas else None,
+            "derivadas": lista_derivadas}
 
 
 def agregar_correcciones(df: pd.DataFrame, config: Dict, eliminar_duplicados: bool = False,
                          corregir_imposibles: bool = False, atipicos_iqr: Optional[Sequence[str]] = None,
                          factor_iqr: float = 1.5, accion_atipicos: str = "nulo",
                          filtros: Optional[Sequence[str]] = None, corregir_formulas: bool = False,
-                         accion_formulas: str = "marcar") -> Dict:
-    """Copia de `config` con los pasos opcionales de duplicados, valores imposibles/atipicos y filtros (mismos
+                         accion_formulas: str = "marcar", derivadas: Optional[Sequence[str]] = None) -> Dict:
+    """Copia de `config` con los pasos opcionales de duplicados, valores imposibles/atipicos, filtros y columnas derivadas (mismos
     parametros que configurar_limpieza_guiada). Sirve cuando el config ya se armo y se ajusto a mano."""
     df_ren = LG.paso_nombres_columnas(df)[0] if config.get("nombres_snake", True) else df
     traducir = _traductor_de_nombres(df, df_ren)
     return {**config, **_claves_de_correccion(traducir, eliminar_duplicados, corregir_imposibles, atipicos_iqr,
                                               factor_iqr, accion_atipicos, filtros, corregir_formulas,
-                                              accion_formulas)}
+                                              accion_formulas, derivadas, df_ren)}
 
 
 def parsear_ajustes_reglas(textos: Optional[Sequence[str]]) -> Dict[str, Dict[str, str]]:
