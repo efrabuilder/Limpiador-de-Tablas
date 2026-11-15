@@ -1007,6 +1007,9 @@ def limpieza_guiada_endpoint(
     accion_formulas: str = Form("marcar", description="marcar | recalcular | eliminar_fila."),
     filtros: str = Form("", description='JSON con una lista, ej. ["ventas>1000"]. Solo se quedan las filas que '
                         "cumplen TODOS (elimina el resto, también las sin dato en esa columna)."),
+    derivadas: str = Form("", description='JSON con una lista, ej. ["ganancia = [precio_total] - [costo_total]"]. '
+                          "Columnas nuevas calculadas de las originales (columnas entre corchetes, + - * / **, "
+                          "paréntesis y abs, round, sqrt, log)."),
     proyecto: str = Form("", description="Proyecto, para el documento de alcance."),
     autor: str = Form("", description="Autor(a), para el documento de alcance."),
     reglas: str = Form("", description='JSON {"columna": "regla[:parametro]"}. Ej: '
@@ -1030,7 +1033,7 @@ def limpieza_guiada_endpoint(
         eliminar_duplicados=eliminar_duplicados, corregir_imposibles=corregir_imposibles,
         atipicos_iqr=_lista_o_none(atipicos_iqr), factor_iqr=factor_iqr, accion_atipicos=accion_atipicos,
         filtros=_json_lista(filtros, "filtros"), corregir_formulas=corregir_formulas,
-        accion_formulas=accion_formulas)
+        accion_formulas=accion_formulas, derivadas=_json_lista(derivadas, "derivadas") or None)
     ajustes = _o_400(FG.parsear_ajustes_reglas,
                      [f"{k}={v}" for k, v in _json_dict(reglas, "reglas").items()])
     resultado = _o_400(FG.ejecutar_limpieza_guiada, df, config, ajustes, nombre_archivo=nombre, hoja=hoja,
