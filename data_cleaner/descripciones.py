@@ -319,6 +319,9 @@ _GLOSARIO: List[Tuple[_Patron, str]] = [
     (_p("observacion", "observaciones", "comentario", "comentarios", "notas", "descripcion", "detalle", "nota",
         "remark", "comment", "description", "notes", "details", "mensaje", "message", "texto libre"),
      "Texto libre con observaciones o detalle del registro."),
+    (_p("inconsistente", "inconsistencia", "inconsistency", "inconsistent", "incoherente", "discrepancia"),
+     "Marca de calidad: indica si el registro quedó señalado como inconsistente (por ejemplo, cifras que no "
+     "cuadran entre sí o una regla de validación incumplida); confirmar con quien la creó qué criterio usa."),
     # --- marcas de verdad (campos Sí/No que no empiezan con es_/tiene_)
     (_p("activo", "active", "vigente", "habilitado", "enabled", "disponible", "available", "bloqueado", "blocked",
         "eliminado", "deleted", "borrado", "verificado", "verified", "confirmado", "confirmed", "frecuente",
@@ -1217,12 +1220,8 @@ def _numeros(serie: pd.Series) -> pd.Series:
     directo = pd.to_numeric(texto, errors="coerce")
     if directo.notna().mean() >= 0.98:  # lo normal: ya son numeros escritos como texto
         return directo.dropna().astype(float)
-    texto = texto.str.replace(r"[\s$€£¥₡%]", "", regex=True)
-    if texto.str.contains(r",\d{1,2}$").mean() > 0.5 and not texto.str.contains(r"\.").any():
-        texto = texto.str.replace(",", ".", regex=False)  # coma decimal
-    else:
-        texto = texto.str.replace(",", "", regex=False)
-    return pd.to_numeric(texto, errors="coerce").dropna().astype(float)
+    from .limpieza_guiada import a_numero  # misma lectura que el resto de la app (coma decimal o de miles)
+    return a_numero(texto.str.replace("%", "", regex=False)).dropna().astype(float)
 
 
 def _binaria(serie: Optional[pd.Series]) -> Optional[Dict[str, int]]:
@@ -1499,18 +1498,170 @@ def _calificadores(texto: str, norm_base: str) -> List[str]:
     return frases
 
 
+# --------------------------------------------------------------------------
+# Medidas con modificador: «ventas_real», «meta_clientes», «variacion_ventas», «ventas_acumuladas»...
+# --------------------------------------------------------------------------
+
+_PALABRAS_SOLO_TEXTO = {"web", "url", "link", "sitio", "website", "email", "correo", "mail", "telefono", "phone", "tel",
+                        "celular", "movil", "direccion"}
+_MOD_META = {"meta", "metas", "objetivo", "objetivos", "target", "targets", "goal", "goals", "presupuesto",
+             "presupuestado", "budget", "forecast", "pronostico", "plan", "planeado", "planificado"}
+_MOD_REAL = {"real", "reales", "ejecutado", "ejecutada", "logrado", "lograda", "alcanzado", "alcanzada",
+             "obtenido", "obtenida", "actual", "actuales", "actuals"}
+_MOD_VARIACION = {"variacion", "variation", "cambio", "change", "delta", "diferencia", "diff", "crecimiento",
+                  "growth", "incremento", "decrecimiento"}
+_MOD_BRECHA = {"brecha", "gap", "desviacion", "faltante"}
+_MOD_ACUMULADO = {"acumulado", "acumulada", "acumulados", "acumuladas", "acum", "ytd", "mtd", "qtd", "running", "cumulative"}
+_MOD_PROMEDIO = {"promedio", "promedios", "avg", "average", "medio", "media", "mean"}
+_MOD_ANTERIOR = {"anterior", "previo", "previa", "previous", "prev", "pasado", "pasada", "last"}
+_PERIODOS = {"mes": "mensual", "meses": "mensual", "mensual": "mensual", "anio": "anual", "ano": "anual",
+             "anual": "anual", "year": "anual", "semana": "semanal", "semanal": "semanal", "trimestre": "trimestral",
+             "trimestral": "trimestral", "dia": "diario", "diario": "diario", "periodo": "del período"}
+_TRAD_MEDIDA = {"revenue": "ingresos", "units": "unidades", "sales": "ventas", "customers": "clientes",
+                "orders": "pedidos", "visits": "visitas", "cost": "costo", "costs": "costos", "profit": "utilidad",
+                "price": "precio", "amount": "monto", "income": "ingresos", "users": "usuarios", "calls": "llamadas",
+                "cases": "casos", "leads": "prospectos"}
+_RELLENO_MEDIDA = {"de", "del", "la", "el", "los", "las", "of", "the", "por", "per", "vs", "contra"}
+_NOMBRES_DINERO = {"ventas", "venta", "ingreso", "ingresos", "costo", "costos", "precio", "precios", "monto", "montos",
+                   "gasto", "gastos", "utilidad", "utilidades", "ganancia", "ganancias", "facturacion", "facturado",
+                   "sales", "revenue", "cost", "costs", "price", "amount", "income", "profit", "expense", "expenses",
+                   "pago", "pagos", "comision", "comisiones", "salario", "saldo", "importe", "ticket", "valor"}
+_UNIDADES_TIEMPO = {"dias": "días", "semanas": "semanas", "meses": "meses", "anios": "años"}
+_NOMBRES_CONTEO = {"ausencias", "faltas", "incidentes", "accidentes", "quejas", "devoluciones", "entregas", "compras",
+                   "intentos", "errores", "fallas", "consultas", "inasistencias", "unidades", "unidad", "clientes", "cliente", "pedidos", "pedido", "visitas", "visita", "ordenes",
+                   "orden", "casos", "llamadas", "empleados", "usuarios", "transacciones", "citas", "reclamos",
+                   "tickets", "units", "customers", "orders", "visits", "calls", "users", "cases", "leads",
+                   "contactos", "registros", "personas", "productos", "articulos", "items"}
+
+
+def _unidad_de_medida(noun: Sequence[str], tipo: str, serie: Optional[pd.Series], es_pct: bool) -> str:
+    """Como se expresa una medida: en dinero, como proporcion, en porcentaje, como conteo..."""
+    numeros = _numeros(serie) if serie is not None and tipo in ("Entero", "Decimal") else pd.Series(dtype=float)
+    if es_pct:
+        return "en porcentaje"
+    if any(t in _NOMBRES_DINERO for t in noun):
+        return "en dinero (confirmar la moneda)"
+    if len(numeros) and numeros.min() >= -1 and numeros.max() <= 1 and not (numeros % 1 == 0).all():
+        return "como proporción de 0 a 1"
+    if any(t in _NOMBRES_CONTEO for t in noun) or tipo == "Entero":
+        return "en cantidad (conteo), no en dinero"
+    return "en una unidad por confirmar"
+
+
+def _contraparte(tokens: Sequence[str], noun: Sequence[str], marcas: set, contexto: Optional[Sequence[str]]) -> Optional[str]:
+    """Otra columna de la tabla con el mismo sustantivo y una de las `marcas` (ventas_real <-> meta_ventas)."""
+    for c in contexto or ():
+        toks = _tokens_nombre(str(c))
+        if toks == list(tokens):
+            continue
+        if marcas & set(toks) and [t for t in toks if t not in marcas and t not in _RELLENO_MEDIDA] == list(noun):
+            return str(c)
+    return None
+
+
+def _descripcion_medida_modificada(tokens: Sequence[str], tipo: str, serie: Optional[pd.Series],
+                                   contexto: Optional[Sequence[str]], es_pct: bool) -> Optional[str]:
+    """Descripcion de una medida numerica cuyo nombre lleva un modificador (real, meta, variacion, acumulado,
+    promedio, mes anterior...). Compone «que es» + «como se expresa» + «con cual otra columna se compara»."""
+    if tipo not in ("Entero", "Decimal") or len(tokens) < 2:
+        return None
+    # El orden importa: «brecha_meta» es una brecha, no una meta.
+    conjuntos = (("brecha", _MOD_BRECHA), ("variacion", _MOD_VARIACION), ("acumulado", _MOD_ACUMULADO),
+                 ("promedio", _MOD_PROMEDIO), ("anterior", _MOD_ANTERIOR), ("meta", _MOD_META), ("real", _MOD_REAL))
+    clase = marcas = None
+    for nombre, conjunto in conjuntos:
+        if conjunto & set(tokens):
+            clase, marcas = nombre, conjunto
+            break
+    if clase is None:
+        return _descripcion_conteo(tokens, tipo)
+    periodos = [t for t in tokens if t in _PERIODOS]
+    noun = [t for t in tokens if t not in marcas and t not in _RELLENO_MEDIDA and t not in _PERIODOS]
+    if clase == "anterior" and not periodos:
+        return None  # «valor_anterior» sin periodo es la version previa de otro campo (lo trata otra regla)
+    if clase == "meta" and "plan" in tokens and not any(t in _NOMBRES_DINERO or t in _NOMBRES_CONTEO for t in noun):
+        return None  # «plan» a secas es un tipo de servicio, no una meta
+    periodo = ""  # la periodicidad («se mide por mes») la agrega el calificador del nombre
+    nombre_periodo = {"mes": "mes", "meses": "mes", "anio": "año", "ano": "año", "year": "año", "semana": "semana",
+                      "trimestre": "trimestre", "dia": "día"}.get(periodos[0], "período") if periodos else "período"
+    if clase == "brecha" and noun and set(noun) <= (_MOD_META | _MOD_REAL):  # «brecha_meta»
+        return ("Brecha frente a la meta: distancia entre lo logrado y el objetivo; confirmar el signo (faltante o "
+                "excedente) y que se expresa en la misma unidad que la meta." + periodo)
+    if not noun:
+        if clase == "variacion":  # «crecimiento_mensual»
+            unidad = _unidad_de_medida(noun, tipo, serie, es_pct)
+            return (f"Variación (crecimiento o disminución) entre períodos. Se expresa {unidad}; confirmar contra qué "
+                    f"se compara." + periodo)
+        return None
+    sustantivo = _con_tildes(_traducir_tokens([_TRAD_MEDIDA.get(t, t) for t in noun]))
+    unidad = _unidad_de_medida(noun, tipo, serie, es_pct)
+    if clase == "meta":
+        par = _contraparte(tokens, noun, _MOD_REAL, contexto)
+        texto = (f"Meta u objetivo de {sustantivo}: lo que se esperaba lograr en cada registro. Se expresa {unidad}."
+                 + (f" Se compara con «{par}» para medir el cumplimiento (real ÷ meta)." if par else ""))
+    elif clase == "real":
+        par = _contraparte(tokens, noun, _MOD_META, contexto)
+        if {"actual", "actuales", "actuals"} & set(tokens) and not par:
+            texto = f"Valor actual (vigente) de {sustantivo} en cada registro. Se expresa {unidad}."
+        else:
+            texto = f"{sustantivo.capitalize()} reales: lo que efectivamente ocurrió en cada registro. Se expresa {unidad}."
+        if par:
+            texto += f" Se compara con la meta «{par}» para medir el cumplimiento (real ÷ meta)."
+    elif clase == "variacion":
+        texto = (f"Variación de {sustantivo} frente a un período o valor de referencia: positiva si aumentó y "
+                 f"negativa si disminuyó. Se expresa {unidad}; confirmar contra qué se compara.")
+    elif clase == "brecha":
+        texto = (f"Brecha de {sustantivo}: distancia entre lo logrado y la meta o referencia. Se expresa {unidad}; "
+                 f"confirmar el signo (faltante o excedente).")
+    elif clase == "acumulado":
+        texto = (f"{sustantivo.capitalize()} acumuladas: suma de los períodos hasta cada fila. Se expresa {unidad}. "
+                 f"No se debe volver a sumar entre filas porque repetiría los mismos valores.")
+    elif clase == "promedio":
+        texto = f"Promedio de {sustantivo} por registro. Se expresa {unidad}."
+    else:
+        texto = (f"Valor de {sustantivo} del {nombre_periodo} anterior, para comparar contra el actual. "
+                 f"Se expresa {unidad}.")
+    return texto + periodo
+
+
+def _descripcion_conteo(tokens: Sequence[str], tipo: str) -> Optional[str]:
+    """«visitas_web», «unidades_vendidas», «ausencias_mes», «dias_entrega»: un entero cuyo nombre empieza con lo
+    que se cuenta (o con la unidad de tiempo que se mide)."""
+    if tipo != "Entero" or not tokens:
+        return None
+    if tokens[0] in _UNIDADES_TIEMPO:
+        resto = [t for t in tokens[1:] if t not in _RELLENO_MEDIDA]
+        if resto:
+            return (f"Cantidad de {_UNIDADES_TIEMPO[tokens[0]]} de {_con_tildes(_traducir_tokens(resto))}: tiempo "
+                    f"transcurrido o duración en cada registro. Se expresa en {_UNIDADES_TIEMPO[tokens[0]]}.")
+        return None
+    if tokens[0] not in _NOMBRES_CONTEO:
+        return None
+    periodos = [t for t in tokens[1:] if t in _PERIODOS]
+    resto = [t for t in tokens[1:] if t not in _RELLENO_MEDIDA and t not in _PERIODOS]
+    if not resto and not periodos:
+        return None
+    nombre = _con_tildes(_traducir_tokens([_TRAD_MEDIDA.get(tokens[0], tokens[0])]))
+    por = {"mes": "mes", "meses": "mes", "anio": "año", "ano": "año", "year": "año", "semana": "semana",
+           "trimestre": "trimestre", "dia": "día"}.get(periodos[0]) if periodos else None
+    detalle = (" " + _con_tildes(_traducir_tokens(resto))) if resto else ""
+    return (f"Cantidad de {nombre}{detalle}" + (f" por {por}" if por else " en cada registro")
+            + ". Se expresa en cantidad (conteo), no en dinero.")
+
+
 def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: str = "",
                     origen: str = "", es_llave: bool = False, *,
                     serie: Optional[pd.Series] = None, ejemplos: str = "",
                     unicos: Optional[int] = None, filas: Optional[int] = None,
-                    contexto: Optional[Sequence[str]] = None) -> str:
+                    contexto: Optional[Sequence[str]] = None, relacion: str = "") -> str:
     """Descripción redactada de un campo a partir de su nombre, rol, tipo y (si se dan) sus valores.
     `serie` son los datos de la columna; sin ella se puede pasar `ejemplos` (texto de «Rango o ejemplos»)
     y `unicos`/`filas`. `contexto` son los nombres de las demás columnas de la tabla: ayudan a leer palabras
     ambiguas («state» junto a city y country es una región; «origen» junto a «guía» y «flete» es el origen
     de un envío) y a reconocer el rubro de la tabla (RR. HH., logística, salud, educación...).
     Con `serie` la descripción añade lo que dicen los datos: escala o formato, valores y su peso, variantes
-    de escritura, unicidad, cadencia de las fechas. Siempre devuelve texto."""
+    de escritura, unicidad, cadencia de las fechas. `relacion` es la frase de una columna calculada a partir
+    de otras (ver relaciones.py): reemplaza a la del glosario, que solo conoce el nombre. Siempre devuelve texto."""
     nombre = str(col)
     norm_base = normalizar_nombre(nombre)
     n = _con_tildes(nombre_legible(nombre))
@@ -1552,8 +1703,12 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
                                                _GLOSARIO[_indice_por_palabra("longitud")]])
         resultado = encontrado[1] if encontrado else "Coordenada geográfica en grados decimales."
 
-    # Columna sin nombre descriptivo (col1, Unnamed: 0, var_3...).
+    # Columna calculada a partir de otras: lo dicen los datos, no el nombre.
     n_q = f"«{n}»"
+    if resultado is None and relacion:
+        resultado, curado, con_datos = relacion, True, True
+
+    # Columna sin nombre descriptivo (col1, Unnamed: 0, var_3...).
     if resultado is None and _NOMBRE_GENERICO.match(norm_base):
         if "unnamed" in norm_base and serie is not None and tipo == "Entero":
             numeros = pd.to_numeric(serie, errors="coerce").dropna()
@@ -1579,6 +1734,14 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
         resto = [t for t in tokens if t not in ("porcentaje", "de", "del")]
         if resto:
             resultado, curado, es_pct = f"Porcentaje de {_con_tildes(_traducir_tokens(resto))}.", True, True
+
+    # Medidas con modificador (real, meta, variación, acumulado, promedio, mes anterior): el nombre dice qué se
+    # mide y el modificador cómo se lee; la unidad sale del tipo y de los valores.
+    if resultado is None:
+        medida = _descripcion_medida_modificada(tokens, tipo, serie, contexto,
+                                                es_pct or bool(_p("porcentaje", "percent", "pct").search(texto_norm)))
+        if medida:
+            resultado, curado, con_datos = medida, True, True
 
     # Frases con sentido propio (RR. HH., logística, salud, educación, finanzas, sensores...) y nombres
     # de una sola palabra ambiguos. Se leen según el rubro de la tabla.
@@ -1741,6 +1904,11 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
                 resultado = (f"Valor {lado} registrado ({{n}}); no equivale al valor {otro} y no deben "
                              "mezclarse como una sola cifra.")
 
+    # Una columna numérica no es una URL, un correo ni un teléfono aunque el nombre lo sugiera («visitas_web»).
+    if ganador is not None and tipo in ("Entero", "Decimal") and rol == "numerica" \
+            and set(ganador.palabras) & _PALABRAS_SOLO_TEXTO:
+        resultado, ganador = None, None
+
     # Pista desde el contenido cuando el nombre no dijo nada.
     es_pista = False
     if resultado is None:
@@ -1777,7 +1945,7 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
             resultado += f" Corresponde {_a_la_entidad(sustantivo)}."
 
     # Matices del nombre: bruto/neto, unitario, mensual, estimado, unidad de medida...
-    if not es_pista:
+    if not es_pista and not relacion:
         for frase in _calificadores(texto_norm, norm_base):
             if frase in resultado:
                 continue
@@ -1796,8 +1964,26 @@ def describir_campo(col, rol: str = "texto", tipo: str = "Texto", tratamiento: s
     if serie is not None:
         for frase in _detalle_datos(serie, tipo, rol, es_llave, es_pct or bool(
                 _p("porcentaje", "percent", "pct").search(texto_norm)), texto_norm, binaria):
+            if relacion and frase.startswith("Los valores están entre 0 y 1"):
+                continue  # la frase de la relación ya lo dice
             if frase not in resultado:
                 resultado += " " + frase
+        # Un solo valor en todas las filas: no sirve para filtrar ni comparar.
+        total_filas = len(serie)
+        if total_filas > 1 and serie.nunique(dropna=True) == 1 and "único valor" not in resultado:
+            unico = serie.dropna().iloc[0]
+            resultado += (f" Tiene un único valor («{unico}») en las {total_filas} filas: no permite filtrar ni "
+                          f"comparar, salvo que la tabla se amplíe con otros valores.")
+        # «confirmar si es un monto o un porcentaje»: con los valores a la vista ya se sabe.
+        if "; confirmar si es un monto o un porcentaje" in resultado and tipo in ("Entero", "Decimal"):
+            numeros = _numeros(serie)
+            if len(numeros):
+                if numeros.max() <= 1 and numeros.min() >= -1:
+                    resultado = resultado.replace("; confirmar si es un monto o un porcentaje",
+                                                  "; con valores de 0 a 1 es una proporción, no un monto")
+                elif numeros.max() > 100:
+                    resultado = resultado.replace("; confirmar si es un monto o un porcentaje",
+                                                  "; con valores que pasan de 100 es un monto, no un porcentaje")
 
     extras = []
     if origen:
@@ -1826,6 +2012,13 @@ def completar_descripciones(diccionario: pd.DataFrame, origenes: Optional[Dict[s
     if not vacias.any():
         return resultado
     nombres_columnas = [str(c) for c in resultado["Campo"]]
+    relaciones: Dict[str, Dict] = {}
+    if df is not None:
+        try:  # columnas calculadas a partir de otras (ganancia = ingreso - costo, total = precio x cantidad...)
+            from .relaciones import detectar_relaciones
+            relaciones = detectar_relaciones(df)
+        except Exception:  # noqa: BLE001 - una descripcion mejor nunca debe romper el diccionario
+            relaciones = {}
     roles_inversos = {"identificador / llave": "id", "coordenada": "coordenada", "email": "email",
                       "teléfono": "telefono", "fecha": "fecha", "número": "numerica", "texto": "texto"}
     for idx in resultado.index[vacias]:
@@ -1841,5 +2034,13 @@ def completar_descripciones(diccionario: pd.DataFrame, origenes: Optional[Dict[s
             origen, es_llave=clasif.startswith("Llave"),
             serie=serie, ejemplos=str(fila.get("Rango o ejemplos", "") or ""),
             unicos=int(unicos) if pd.notna(unicos) and str(unicos).isdigit() else None,
-            contexto=nombres_columnas)
+            contexto=nombres_columnas,
+            relacion=_frase_relacion(campo, relaciones, df))
     return resultado
+
+
+def _frase_relacion(campo, relaciones: Dict[str, Dict], df: Optional[pd.DataFrame]) -> str:
+    if campo not in relaciones:
+        return ""
+    from .relaciones import describir_relacion
+    return describir_relacion(str(campo), relaciones[campo], df)
