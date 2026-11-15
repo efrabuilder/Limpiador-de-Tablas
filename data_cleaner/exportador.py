@@ -1213,6 +1213,20 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
     for c in cols_cola_pesada:
         limites_iqr[c] = _limites_logicos(c)
 
+    cache_numeros = {}  # columna completa ya convertida a numero
+
+    def _valor_numerico(columna, fila, valor_original):
+        if columna not in cache_numeros:
+            cache_numeros[columna] = _a_numero(df[columna])
+        try:
+            valor = cache_numeros[columna].at[fila]
+        except KeyError:
+            valor = None
+        if valor is None or isinstance(valor, pd.Series):
+            return _a_numero(pd.concat([pd.Series([valor_original], dtype=object), df[columna].astype(object)],
+                                       ignore_index=True)).iloc[0]  # junto a su columna: misma coma que el resto
+        return valor
+
     registro = []
     filas_a_eliminar = set()
 
@@ -1245,7 +1259,7 @@ def limpiar_tabla(df, faltante, duplicado, atipico, tipo_invalido, factor_iqr, v
             _asignar(df_limpio, h["fila"], h["columna"], valor_nuevo)
         elif h["tipo"] == "atipico" and accion == "limitar":
             lim_inf, lim_sup = limites_iqr.get(h["columna"], (None, None))
-            val_num = _a_numero(pd.Series([h["valor_original"]]))[0]
+            val_num = _valor_numerico(h["columna"], h["fila"], h["valor_original"])
             if lim_inf is not None and not pd.isna(val_num):
                 valor_nuevo = val_num
                 if not pd.isna(lim_inf) and valor_nuevo < lim_inf:
