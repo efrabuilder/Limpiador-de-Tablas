@@ -14,7 +14,7 @@ aqui ni en Power BI: se programa en el script de limpieza para que sea reproduci
 modulo solo MIDE y muestra; no modifica la tabla.
 
     resultado = analizar_eda(df)
-    resultado.numerico        # describe() en espanol, mas nulos y asimetria
+    resultado.numerico        # describe() en espanol, mas nulos, asimetria y coeficiente de variacion
     resultado.correlacion     # matriz de correlacion (o None si hay menos de 2 columnas)
     resultado.atipicos        # limites del IQR y cuantos valores caen fuera, por columna
     figura_boxplots(resultado.tabla_numerica)
@@ -104,8 +104,9 @@ def tabla_numerica(df: pd.DataFrame, tokens=TOKENS_NULOS_BASE) -> Tuple[pd.DataF
 # =============================================================================
 
 def resumen_numerico(num: pd.DataFrame) -> pd.DataFrame:
-    """Lo mismo que num.describe().T, con nombres en espanol, mas nulos, % de nulos y asimetria
-    (skew: cerca de 0 es simetrica; muy positiva, cola larga a la derecha, tipica de ventas)."""
+    """Lo mismo que num.describe().T, con nombres en espanol, mas nulos, % de nulos, asimetria
+    (skew: cerca de 0 es simetrica; muy positiva, cola larga a la derecha, tipica de ventas) y coeficiente
+    de variacion (cv_pct y su lectura: baja < 15 %, moderada 15-30 %, alta > 30 %)."""
     if num.empty:
         return pd.DataFrame()
     d = num.describe().T
@@ -116,6 +117,12 @@ def resumen_numerico(num: pd.DataFrame) -> pd.DataFrame:
     salida["nulos"] = len(num) - salida["n"]
     salida["pct_nulos"] = (salida["nulos"] / max(len(num), 1) * 100).round(1)
     salida["asimetria"] = num.skew()
+    # Coeficiente de variacion = desviacion / |media| x 100: compara la dispersion de columnas con escalas
+    # distintas. Sin sentido si la media es 0 (queda vacio). Menos de 15 % es poca variacion, mas de 30 % es mucha.
+    media = salida["media"].abs()
+    salida["cv_pct"] = (salida["desv_est"] / media * 100).where(media > 0)
+    salida["variabilidad"] = pd.cut(salida["cv_pct"], [-np.inf, 15, 30, np.inf],
+                                    labels=["baja", "moderada", "alta"]).astype(object).where(salida["cv_pct"].notna(), "")
     salida.index.name = "columna"
     return salida.round(4)
 
@@ -355,8 +362,10 @@ num = df.select_dtypes("number").drop(columns=excluir, errors="ignore")
 num = num.loc[:, num.nunique() > 1]  # sin columnas constantes
 
 # ---------------- 1. Estadisticos descriptivos ----------------
-print(num.describe().T)
-num.describe().T.to_csv("eda_describe.csv", encoding="utf-8-sig")
+descripcion = num.describe().T
+descripcion["cv_pct"] = (descripcion["std"] / descripcion["mean"].abs() * 100).where(descripcion["mean"] != 0).round(2)  # coeficiente de variacion
+print(descripcion)
+descripcion.to_csv("eda_describe.csv", encoding="utf-8-sig")
 
 # ---------------- 2. Matriz de correlacion ----------------
 corr = num.corr(method=METODO_CORRELACION)
