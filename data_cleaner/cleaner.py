@@ -329,6 +329,24 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
             _cache_admite[clave] = _admite_estadistico(df, columna, accion)
         return _cache_admite[clave]
 
+    _cache_numeros: Dict[str, pd.Series] = {}  # columna completa ya convertida a numero
+
+    def _valor_numerico(columna, fila, valor_original):
+        """Numero de UNA celda, leido con el contexto de toda su columna. Asi un '4,957' suelto se lee
+        como decimal si el resto de la columna usa coma decimal (leido solo seria ambiguo)."""
+        if columna not in _cache_numeros:
+            _cache_numeros[columna] = _a_numero(df[columna])
+        try:
+            valor = _cache_numeros[columna].at[fila]
+        except KeyError:
+            valor = None
+        if valor is None or isinstance(valor, pd.Series):  # fila ausente o indice repetido
+            # Sin fila propia (ausente o indice repetido): se lee junto a su columna, para que "4,957" use la
+            # misma coma (decimal o de miles) que el resto de los valores.
+            return _a_numero(pd.concat([pd.Series([valor_original], dtype=object), df[columna].astype(object)],
+                                       ignore_index=True)).iloc[0]
+        return valor
+
     for issue in issues:
         accion = config.get(issue.tipo, "marcar_solo")
         valor_nuevo = None
@@ -370,7 +388,7 @@ def limpiar(df: pd.DataFrame, issues: List[Issue], config: Dict[str, str] = None
 
         elif issue.tipo == "atipico" and accion == "limitar":
             lim_inf, lim_sup = limites_iqr.get(issue.columna, (None, None))
-            valor_original_num = _a_numero(pd.Series([issue.valor_original]))[0]
+            valor_original_num = _valor_numerico(issue.columna, issue.fila, issue.valor_original)
             if lim_inf is not None and not pd.isna(valor_original_num):
                 valor_nuevo = valor_original_num
                 if not pd.isna(lim_inf) and valor_nuevo < lim_inf:
