@@ -47,7 +47,8 @@ from .limpieza_guiada import (
     rol_columna,
 )
 from .patrones import columnas_fecha_por_nombre, tipo_coordenada
-from .descripciones import completar_descripciones, describir_campo
+from .descripciones import completar_descripciones, describir_campo, _frase_relacion as frase_relacion
+from .relaciones import detectar_relaciones
 from .negocio import (  # noqa: F401  (se reexportan: otras partes de la app los usan desde aquí)
     CLASIFICACION_ATRIBUTO,
     CLASIFICACION_KPI,
@@ -246,6 +247,10 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
     por_columna = {r["columna"]: r for r in (reglas or [])}
     cols_fecha = columnas_fecha_por_nombre(df)
     total = max(len(df), 1)
+    try:  # columnas calculadas a partir de otras (ganancia = ingreso - costo...): se describen por los datos
+        relaciones = detectar_relaciones(df)
+    except Exception:  # noqa: BLE001 - una descripcion mejor nunca debe romper el diccionario
+        relaciones = {}
     filas = []
     for i, col in enumerate(df.columns, 1):
         serie = df[col]
@@ -266,7 +271,8 @@ def construir_diccionario(df: pd.DataFrame, reglas: Optional[List[Dict]] = None,
         descripcion = describir_campo(col, rol, tipo, tratamiento,
                                       (origenes or {}).get(col, ""), es_llave=es_llave,
                                       serie=serie,  # el contenido ayuda cuando el nombre no dice nada
-                                      contexto=[str(c) for c in df.columns])  # y las columnas vecinas
+                                      contexto=[str(c) for c in df.columns],  # y las columnas vecinas
+                                      relacion=frase_relacion(col, relaciones, df))
         if rol == "coordenada" and tipo_coordenada(col):
             descripcion = f"{tipo_coordenada(col).capitalize()} en grados decimales."
         fila = {
