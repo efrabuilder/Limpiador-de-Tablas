@@ -30,6 +30,7 @@ del script que entrega, asi el script hace exactamente lo mismo que la app.
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 import unicodedata
@@ -1261,6 +1262,151 @@ def paso_filtros(df: pd.DataFrame, filtros: List[Tuple[str, str, object]]) -> Tu
                        m={"tipo": "filtros", "filtros": [tuple(f) for f in filtros]})
 
 
+# =============================================================================
+# Columnas derivadas (calculadas a partir de las originales)
+# =============================================================================
+
+# Funciones permitidas en una expresion y su equivalente en pandas/numpy.
+FUNCIONES_DERIVADAS = {"abs": "np.abs", "round": "np.round", "sqrt": "np.sqrt", "log": "np.log"}
+_OPERADORES_BINARIOS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod)
+_REF_COLUMNA = re.compile(r"\[([^\[\]]+)\]")
+AYUDA_DERIVADAS = ("Escriba cada columna como  nombre = expresión  y ponga las columnas entre corchetes, por ejemplo: "
+                   "ganancia = [precio_total] - [costo_total]   |   margen = [ganancia] / [precio_total]   |   "
+                   "total = round([cantidad] * [precio_unit], 2). Se puede sumar (+), restar (-), multiplicar (*), "
+                   "dividir (/), elevar (**), usar paréntesis y las funciones abs, round, sqrt y log.")
+
+
+def parsear_derivada(texto: str) -> Dict[str, str]:
+    """'margen = [ganancia] / [precio_total]' -> {'nombre': 'margen', 'expresion': '[ganancia] / [precio_total]'}."""
+    nombre, igual, expresion = str(texto).partition("=")
+    nombre, expresion = nombre.strip().strip("\"'"), expresion.strip()
+    if not igual or not nombre or not expresion:
+        raise ValueError(f"Columna derivada inválida: '{texto}'. Use  nombre = expresión, por ejemplo "
+                         f"ganancia = [precio_total] - [costo_total].")
+    return {"nombre": nombre, "expresion": expresion}
+
+
+def _buscar_columna(df: pd.DataFrame, nombre: str) -> str:
+    """Columna de `df` que corresponde al nombre escrito: igual, sin importar mayusculas o, si la tabla
+    se renombro a snake_case, con ese formato ('PrecioTotal' no, pero 'Precio Total' -> 'precio_total')."""
+    columnas = [str(c) for c in df.columns]
+    if nombre in columnas:
+        return nombre
+    bajo = nombre.strip().lower()
+    for c in columnas:
+        if c.strip().lower() == bajo:
+            return c
+    snake = nombres_snake([nombre])[0]
+    for c in columnas:
+        if c == snake or nombres_snake([c])[0] == snake:
+            return c
+    raise ValueError(f"La columna [{nombre}] no existe. Columnas disponibles: {', '.join(columnas[:15])}"
+                     f"{' …' if len(columnas) > 15 else ''}.")
+
+
+def compilar_derivada(df: pd.DataFrame, expresion: str) -> Dict:
+    """Valida una expresion y la traduce. Devuelve {'pandas': codigo, 'm': codigo Power Query, 'columnas': [..]}.
+    Solo se aceptan numeros, columnas entre corchetes, + - * / ** %, parentesis y las funciones de
+    FUNCIONES_DERIVADAS: nada mas llega a ejecutarse."""
+    usadas: List[str] = []
+
+    def marcador(coincidencia):
+        columna = _buscar_columna(df, coincidencia.group(1).strip())
+        if columna not in usadas:
+            usadas.append(columna)
+        return f"__c{usadas.index(columna)}__"
+
+    texto = _REF_COLUMNA.sub(marcador, expresion)
+    if "[" in texto or "]" in texto:
+        raise ValueError(f"Corchetes mal cerrados en: {expresion}")
+    try:
+        arbol = ast.parse(texto.strip(), mode="eval")
+    except SyntaxError:
+        raise ValueError(f"No se entiende la expresión: {expresion}. {AYUDA_DERIVADAS}") from None
+
+    def a_pandas(nodo) -> ast.AST:
+        if isinstance(nodo, ast.BinOp) and isinstance(nodo.op, _OPERADORES_BINARIOS):
+            return ast.BinOp(a_pandas(nodo.left), nodo.op, a_pandas(nodo.right))
+        if isinstance(nodo, ast.UnaryOp) and isinstance(nodo.op, (ast.USub, ast.UAdd)):
+            return ast.UnaryOp(nodo.op, a_pandas(nodo.operand))
+        if isinstance(nodo, ast.Constant) and isinstance(nodo.value, (int, float)) and not isinstance(nodo.value, bool):
+            return nodo
+        if isinstance(nodo, ast.Name) and re.fullmatch(r"__c\d+__", nodo.id):
+            return ast.parse(f"a_numero(df[{usadas[int(nodo.id[3:-2])]!r}])", mode="eval").body
+        if isinstance(nodo, ast.Call) and isinstance(nodo.func, ast.Name) and nodo.func.id in FUNCIONES_DERIVADAS \
+                and not nodo.keywords and 1 <= len(nodo.args) <= (2 if nodo.func.id == "round" else 1):
+            if len(nodo.args) == 2 and not (isinstance(nodo.args[1], ast.Constant) and isinstance(nodo.args[1].value, int)):
+                raise ValueError("round necesita un número entero de decimales, por ejemplo round([a] / [b], 2).")
+            funcion = ast.parse(FUNCIONES_DERIVADAS[nodo.func.id], mode="eval").body
+            return ast.Call(funcion, [a_pandas(a) for a in nodo.args], [])
+        raise ValueError(f"En «{expresion}» solo se pueden usar columnas entre corchetes, números, + - * / **, "
+                         f"paréntesis y las funciones {', '.join(FUNCIONES_DERIVADAS)}.")
+
+    def a_m(nodo) -> str:
+        if isinstance(nodo, ast.BinOp):
+            izq, der = a_m(nodo.left), a_m(nodo.right)
+            if isinstance(nodo.op, ast.Div):
+                return f"fnDividir({izq}, {der})"
+            if isinstance(nodo.op, ast.Pow):
+                return f"Number.Power({izq}, {der})"
+            if isinstance(nodo.op, ast.Mod):
+                return f"Number.Mod({izq}, {der})"
+            return f"({izq} {'+' if isinstance(nodo.op, ast.Add) else '-' if isinstance(nodo.op, ast.Sub) else '*'} {der})"
+        if isinstance(nodo, ast.UnaryOp):
+            return f"({'-' if isinstance(nodo.op, ast.USub) else '+'}{a_m(nodo.operand)})"
+        if isinstance(nodo, ast.Constant):
+            numero = float(nodo.value)
+            return str(int(numero)) if numero.is_integer() else repr(numero)
+        if isinstance(nodo, ast.Name):
+            columna = usadas[int(nodo.id[3:-2])].replace('"', '""').replace("#(", "#(#)(")
+            return f'fnNum(Record.Field(_, "{columna}"))'
+        argumentos = ", ".join(a_m(a) for a in nodo.args)
+        return {"abs": "Number.Abs", "round": "Number.Round", "sqrt": "Number.Sqrt", "log": "Number.Ln"}[nodo.func.id] \
+            + f"({argumentos})"
+
+    traducido = a_pandas(arbol.body)
+    return {"pandas": ast.unparse(ast.fix_missing_locations(traducido)), "m": a_m(arbol.body), "columnas": usadas}
+
+
+def calcular_derivada(df: pd.DataFrame, expresion: str) -> pd.Series:
+    """Valores de una expresion sobre `df` (NaN donde falta un dato o se divide entre cero)."""
+    codigo = compilar_derivada(df, expresion)["pandas"]
+    with np.errstate(all="ignore"):
+        valores = eval(codigo, {"__builtins__": {}}, {"a_numero": a_numero, "df": df, "np": np})  # noqa: S307 - validado arriba
+    valores = pd.Series(valores, index=df.index, dtype="float64") if not isinstance(valores, pd.Series) else valores
+    return valores.replace([np.inf, -np.inf], np.nan)
+
+
+def paso_derivadas(df: pd.DataFrame, derivadas: List[Dict[str, str]]) -> Tuple[pd.DataFrame, Optional[Paso]]:
+    """Agrega columnas calculadas a partir de las originales. `derivadas`: [{'nombre', 'expresion'}], donde la
+    expresion usa las columnas entre corchetes (ver AYUDA_DERIVADAS). Se calculan en orden, asi una derivada
+    puede usar otra anterior. Las originales no se tocan; donde falte un dato o se divida entre cero queda vacio."""
+    if not derivadas:
+        return df, None
+    df = df.copy()
+    lineas, codigos, items, reglas, avisos = [], [], [], [], []
+    for d in derivadas:
+        nombre, expresion = str(d["nombre"]).strip(), str(d["expresion"]).strip()
+        if not nombre:
+            raise ValueError("Una columna derivada necesita un nombre.")
+        if nombre in df.columns:
+            raise ValueError(f"Ya existe una columna llamada «{nombre}»: elija otro nombre para la derivada.")
+        compilada = compilar_derivada(df, expresion)
+        df[nombre] = calcular_derivada(df, expresion)
+        vacios = int(df[nombre].isna().sum())
+        lineas.append(f"{nombre} = {expresion}: {len(df) - vacios} valores calculados"
+                      + (f", {vacios} vacíos" if vacios else ""))
+        if vacios:
+            avisos.append(f"«{nombre}» quedó vacía en {vacios} filas (falta un dato o se divide entre cero).")
+        codigos.append(f'df[{nombre!r}] = ({compilada["pandas"]}).replace([np.inf, -np.inf], np.nan)  # {expresion}')
+        items.append({"nombre": nombre, "expresion": expresion, "m": compilada["m"], "columnas": compilada["columnas"]})
+        reglas.append({"columna": nombre, "regla": "dejar",
+                       "descripcion": f"Columna calculada con la expresión {expresion}; queda vacía si falta un dato "
+                                      f"o se divide entre cero"})
+    return df, Paso("Columnas derivadas", "\n".join(lineas), "\n".join(codigos), " ".join(avisos), reglas,
+                    m={"tipo": "derivadas", "items": items})
+
+
 # En columnas con nombres de personas no se sugieren uniones por tipeo («Marta» y «Martha» pueden ser dos personas).
 _PALABRAS_PERSONA = ("nombre", "apellido", "apellidos", "nombres", "name", "contacto", "cliente", "empleado",
                      "paciente", "estudiante", "alumno", "vendedor", "gerente", "jefe", "representante")
@@ -1451,7 +1597,9 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
         sacar la fila por un filtro como precio < 1000),
       duplicados (bool: eliminar filas identicas),
       atipicos (dict con imposibles, iqr_columnas, factor_iqr, accion),
-      formulas (dict con accion: total = cantidad x precio).
+      formulas (dict con accion: total = cantidad x precio),
+      derivadas (lista de {nombre, expresion}: columnas nuevas calculadas a partir de las originales, ver
+        paso_derivadas; se agregan al final).
     Los nombres de columna del config son los de DESPUES de renombrar."""
     tokens = tuple(config.get("tokens", TOKENS_NULOS_BASE))
     pasos: List[Paso] = []
@@ -1516,6 +1664,10 @@ def ejecutar_pasos_globales(df: pd.DataFrame, config: Dict) -> Tuple[pd.DataFram
     if formulas:
         df, paso = paso_formulas(df, formulas.get("accion", "marcar"))
         pasos.append(paso)
+    if config.get("derivadas"):  # al final: se calculan con los valores ya estandarizados y corregidos
+        df, paso = paso_derivadas(df, list(config["derivadas"]))
+        if paso:
+            pasos.append(paso)
     return df, pasos
 
 
