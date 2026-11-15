@@ -122,6 +122,8 @@ _M_FUNCIONES: Dict[str, Tuple[Tuple[str, ...], str]] = {
                     else t2
             in
                 if valido then (try Number.FromText(r, "en-US") otherwise null) else null,'''),
+    "fnDividir": ((), '''    fnDividir = (a as nullable number, b as nullable number) as nullable number =>
+        if a = null or b = null or b = 0 then null else a / b,'''),
     "fnNum": (("fnANumero",), '''    fnNum = (v as any) as nullable number =>
         if v is number then v else fnANumero(v),'''),
     "fnCoord": ((), '''    fnCoord = (v as any, minimo as number, maximo as number, referencia as nullable number) as nullable number =>
@@ -221,6 +223,7 @@ def _funciones_necesarias(tipos: List[str]) -> List[str]:
         "vacios": ["fnEsNulo"], "texto": ["fnLimpiarTexto"], "numericas": ["fnANumero"],
         "coordenadas": ["fnCoord"], "fechas": ["fnUnificarFechas", "fnReemplazarColumna"],
         "limites": ["fnNum"], "formulas": ["fnNum"], "filtros": ["fnNum"],
+        "derivadas": ["fnNum", "fnDividir"],
         "regla": ["fnValores", "fnANumero", "fnDecimales", "fnReemplazarColumna", "fnMedianaPorGrupo", "fnEsNulo"],
         "cierre": ["fnValores", "fnANumero", "fnDecimales", "fnReemplazarColumna", "fnEsNulo"],
         "partes": ["fnAFecha"],
@@ -286,6 +289,15 @@ def _m_fechas(cb: _ConstructorM, titulo: str, m: Dict) -> None:
         cb.agregar(f"{titulo} ({col})", f"fnReemplazarColumna({{prev}}, {_m_txt(col)}, fnUnificarFechas("
                                         f"Table.Column({{prev}}, {_m_txt(col)}), {_m_txt(_fmt_m(fmt))}, "
                                         f"{str(m['dia_primero']).lower()}))")
+
+
+def _m_derivadas(cb: _ConstructorM, titulo: str, m: Dict) -> None:
+    """Una columna nueva por cada derivada: Table.AddColumn con la expresion ya traducida a M
+    (la division devuelve null si el divisor es 0, igual que el vacio de pandas)."""
+    for item in m["items"]:
+        cb.agregar(f"{titulo} ({item['nombre']})",
+                   "Table.AddColumn({prev}, " + _m_txt(item["nombre"]) + ", each " + item["m"]
+                   + ", type nullable number)")
 
 
 def _m_duplicados(cb: _ConstructorM, titulo: str, m: Dict) -> None:
@@ -483,7 +495,7 @@ def _m_partes(cb: _ConstructorM, titulo: str, m: Dict) -> None:
 _TRADUCTORES = {"nombres": _m_nombres, "vacios": _m_vacios, "texto": _m_texto, "numericas": _m_numericas,
                 "coordenadas": _m_coordenadas, "fechas": _m_fechas, "duplicados": _m_duplicados,
                 "limites": _m_limites, "formulas": _m_formulas, "filtros": _m_filtros, "unificar": _m_unificar,
-                "datetime": _m_datetime, "partes": _m_partes}
+                "datetime": _m_datetime, "partes": _m_partes, "derivadas": _m_derivadas}
 _TRADUCTORES_CON_PALABRA = {"regla": _m_regla, "cierre": _m_cierre}
 
 
